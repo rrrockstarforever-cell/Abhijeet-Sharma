@@ -3,9 +3,7 @@
 // No silent fallbacks: every failure is thrown as a typed AiError and must be shown in the UI.
 import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } from '../types.ts';
 
-import { Question } from "../types";
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
-import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } from "../types";
 export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok';
 
 export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok'];

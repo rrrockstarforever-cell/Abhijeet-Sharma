@@ -58,6 +58,7 @@ export interface ClinicalQuestion {
   isRemediated?: boolean;
   timesFailed?: number;
   remediatedInTest?: string;
+  explanation?: string;
 }
 
 export interface MedicalTopic {

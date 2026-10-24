@@ -512,6 +512,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
             const textLayer = new tl({
               textContentSource: page.streamTextContent({ includeMarkedContent: false }),
               container: slot,
+              viewport,
             });
             await textLayer.render();
           } catch (err) {
@@ -1914,8 +1915,10 @@ const Thumb: React.FC<{
       className={`cursor-pointer p-1 rounded-lg border transition-colors ${active ? 'border-[#0f8b8d] bg-teal-50' : 'border-transparent hover:border-slate-300'}`}
       data-thumb-page={num}
     >
-      <div ref={canvasHostRef} className="bg-slate-100 rounded min-h-[60px] flex items-center justify-center overflow-hidden">
-        {!loaded && <span className="text-[9px] font-mono text-slate-400">{num}</span>}
+      <div className="relative bg-slate-100 rounded min-h-[60px] flex items-center justify-center overflow-hidden">
+        {!loaded && <span className="absolute inset-0 flex items-center justify-center text-[9px] font-mono text-slate-400">{num}</span>}
+        {/* pdf.js canvas is inserted imperatively here; React must not own its children */}
+        <div ref={canvasHostRef} className="relative w-full" />
       </div>
       <div className={`text-center text-[9px] font-mono mt-0.5 ${active ? 'text-[#00696b] font-bold' : 'text-slate-400'}`}>{num}</div>
     </div>

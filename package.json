@@ -30,6 +30,7 @@
     "vite": "^8.3.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
@@ -38,6 +39,7 @@
     "electron": "^45.0.0",
     "electron-builder": "^26.18.0",
     "esbuild": "^0.28.2",
+    "playwright": "^1.64.1",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2"
@@ -80,10 +82,15 @@
     },
     "extraResources": []
   },
-  "description": "Pulse Med \u2014 AI-assisted NEET-PG / INI-CET / AMC CAT exam preparation desktop app",
+  "description": "Pulse Med — AI-assisted NEET-PG / INI-CET / AMC CAT exam preparation desktop app",
   "author": {
     "name": "rrrockstarforever-cell",
     "email": "rrrockstarforever@gmail.com"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "protobufjs@7.6.6": true,
+    "tesseract.js@6.0.1": true
+  }
 }
