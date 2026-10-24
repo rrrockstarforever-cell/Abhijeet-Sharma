@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Clock, 
   Flag, 
@@ -19,6 +19,7 @@ import {
 import { ClinicalQuestion, AppView, ExamType } from '../types.ts';
 import { AiQuestionTools } from './AiQuestionTools.tsx';
 import { addAttempt } from '../utils/attemptStore.ts';
+import { loadRunSession, saveRunSession, signature } from '../utils/sessionStore.ts';
 
 interface TestRunnerViewProps {
   initialQuestionId?: string;
@@ -35,17 +36,29 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
 }) => {
   // Only real questions ever reach the runner. With no module launched there is
   // nothing to answer, so the view shows an empty state instead of sample items.
+  // Progress for this exact question set is restored, so leaving the screen, or
+  // restarting the app, never loses answers, flags, position or the timer.
+  const [restoredRun] = useState(() =>
+    propQuestions && propQuestions.length > 0 ? loadRunSession(signature(propQuestions)) : null,
+  );
+  const skipFirstSync = useRef<boolean>(Boolean(restoredRun));
+
   const [questions, setQuestions] = useState<ClinicalQuestion[]>(propQuestions ?? []);
-  const [currentIndex, setCurrentIndex] = useState<number>(0);
-  const [userAnswers, setUserAnswers] = useState<Record<string, 'A' | 'B' | 'C' | 'D' | 'E'>>({});
-  const [flaggedIds, setFlaggedIds] = useState<Record<string, boolean>>({});
-  const [examSubmitted, setExamSubmitted] = useState<boolean>(false);
-  const [showExplanation, setShowExplanation] = useState<boolean>(mode === 'TUTOR');
-  const [secondsElapsed, setSecondsElapsed] = useState<number>(0);
-  const [showResultsScreen, setShowResultsScreen] = useState<boolean>(false);
+  const [currentIndex, setCurrentIndex] = useState<number>(restoredRun?.index ?? 0);
+  const [userAnswers, setUserAnswers] = useState<Record<string, 'A' | 'B' | 'C' | 'D' | 'E'>>(restoredRun?.answers ?? {});
+  const [flaggedIds, setFlaggedIds] = useState<Record<string, boolean>>(restoredRun?.flags ?? {});
+  const [examSubmitted, setExamSubmitted] = useState<boolean>(restoredRun?.submitted ?? false);
+  const [showExplanation, setShowExplanation] = useState<boolean>(restoredRun?.showExplanation ?? mode === 'TUTOR');
+  const [secondsElapsed, setSecondsElapsed] = useState<number>(restoredRun?.seconds ?? 0);
+  const [showResultsScreen, setShowResultsScreen] = useState<boolean>(restoredRun?.showResults ?? false);
 
   // Sync questions if prop changes
   useEffect(() => {
+    // The first run after a restore must not reset the progress we just loaded.
+    if (skipFirstSync.current) {
+      skipFirstSync.current = false;
+      return;
+    }
     if (propQuestions && propQuestions.length > 0) {
       setQuestions(propQuestions);
       setCurrentIndex(0);
@@ -71,6 +84,21 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
     }, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // Save progress for this question set whenever any of it changes.
+  useEffect(() => {
+    if (!questions.length) return;
+    saveRunSession({
+      sig: signature(questions),
+      answers: userAnswers,
+      flags: flaggedIds,
+      index: currentIndex,
+      seconds: secondsElapsed,
+      submitted: examSubmitted,
+      showResults: showResultsScreen,
+      showExplanation,
+    });
+  }, [questions, userAnswers, flaggedIds, currentIndex, secondsElapsed, examSubmitted, showResultsScreen, showExplanation]);
 
   const formatTimer = (secs: number) => {
     const mins = Math.floor(secs / 60);
@@ -611,6 +639,13 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                         </p>
                       </div>
                     </div>
+                  </div>
+                )}
+
+                {currentQ.explanation && (
+                  <div className="p-4 rounded-xl bg-white border border-slate-200 space-y-1.5">
+                    <div className="text-xs font-bold text-slate-900 uppercase tracking-wider">Explanation</div>
+                    <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-line">{currentQ.explanation}</p>
                   </div>
                 )}
 

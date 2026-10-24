@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AppView, ExamType, DifficultyTier, DifficultySubLevel, ClinicalQuestion } from './types.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { TopBar } from './components/TopBar.tsx';
@@ -16,13 +16,36 @@ import { JobsBanner } from './components/JobsBanner.tsx';
 import { dueCount } from './utils/flashcardStore.ts';
 import { listCapturedQuestions } from './utils/mistakeStore.ts';
 import { subscribeDataChanged } from './utils/dataEvents.ts';
+import { loadActiveTest, saveActiveTest } from './utils/sessionStore.ts';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<AppView>('analytics');
-  const [currentExam, setCurrentExam] = useState<ExamType>('INI_CET');
-  const [activeQuestionId, setActiveQuestionId] = useState<string>('');
-  const [activeTestQuestions, setActiveTestQuestions] = useState<ClinicalQuestion[] | undefined>(undefined);
-  const [activeTestMode, setActiveTestMode] = useState<'EXAM' | 'TUTOR'>('TUTOR');
+  // The launched test is restored from storage so a restart never loses generated questions.
+  const [restoredTest] = useState(() => loadActiveTest());
+  const [currentExam, setCurrentExam] = useState<ExamType>((restoredTest?.exam as ExamType) ?? 'INI_CET');
+  const [activeQuestionId, setActiveQuestionId] = useState<string>(restoredTest?.activeQuestionId ?? '');
+  const [activeTestQuestions, setActiveTestQuestions] = useState<ClinicalQuestion[] | undefined>(restoredTest?.questions);
+  const [activeTestMode, setActiveTestMode] = useState<'EXAM' | 'TUTOR'>(restoredTest?.mode ?? 'TUTOR');
+
+  useEffect(() => {
+    saveActiveTest(
+      activeTestQuestions && activeTestQuestions.length
+        ? { questions: activeTestQuestions, mode: activeTestMode, exam: currentExam, activeQuestionId }
+        : null,
+    );
+  }, [activeTestQuestions, activeTestMode, currentExam, activeQuestionId]);
+
+  // Screens that hold long-running or unsaved work stay mounted (hidden) once opened, so
+  // switching away never destroys an in-flight generation, filters, or a test in progress.
+  const KEEP_ALIVE: AppView[] = ['practice', 'test-runner', 'question-bank'];
+  const [mountedViews, setMountedViews] = useState<AppView[]>([]);
+
+  // Generation can finish while the learner is on another screen. Read the live view from a
+  // ref (the launch callback is captured when they pressed Launch) and, if they have moved
+  // on, leave them where they are and offer the finished module instead of yanking them away.
+  const currentViewRef = useRef<AppView>(currentView);
+  useEffect(() => { currentViewRef.current = currentView; }, [currentView]);
+  const [readyNotice, setReadyNotice] = useState<{ count: number } | null>(null);
   const [isDarkMode, setIsDarkMode] = useState<boolean>(false);
   // Bumped whenever a store writes, so the sidebar badges stay truthful.
   const [, setDataVersion] = useState(0);
@@ -32,7 +55,15 @@ export default function App() {
   const unresolvedMistakes = listCapturedQuestions().filter((q) => q.status === 'unresolved').length;
   const srsDue = dueCount();
 
+  useEffect(() => {
+    if (KEEP_ALIVE.includes(currentView)) {
+      setMountedViews((m) => (m.includes(currentView) ? m : [...m, currentView]));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentView]);
+
   const handleNavigate = (view: AppView, targetId?: string) => {
+    if (view === 'test-runner') setReadyNotice(null);
     setCurrentView(view);
     if (targetId) {
       setActiveQuestionId(targetId);
@@ -75,7 +106,12 @@ export default function App() {
     if (tagged.length > 0) {
       setActiveQuestionId(tagged[0].id);
     }
-    setCurrentView('test-runner');
+    if (currentViewRef.current === 'practice') {
+      setReadyNotice(null);
+      setCurrentView('test-runner');
+    } else {
+      setReadyNotice({ count: tagged.length });
+    }
   };
 
   const handleLaunchBankQuestions = (
@@ -92,8 +128,8 @@ export default function App() {
     setCurrentView('test-runner');
   };
 
-  const renderActiveView = () => {
-    switch (currentView) {
+  const renderView = (view: AppView) => {
+    switch (view) {
       case 'analytics':
         return (
           <PerformanceAnalyticsView 
@@ -216,7 +252,36 @@ export default function App() {
 
         {/* Dynamic Canvas Container */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-[1600px] w-full mx-auto">
-          {renderActiveView()}
+          {readyNotice && currentView !== 'test-runner' && (
+            <div
+              role="status"
+              className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-teal-200 bg-teal-50 px-4 py-3"
+            >
+              <span className="text-sm font-semibold text-slate-800">
+                Your {readyNotice.count}-question module finished generating and is ready.
+              </span>
+              <span className="flex items-center gap-2">
+                <button
+                  onClick={() => handleNavigate('test-runner')}
+                  className="rounded-lg bg-[#0f8b8d] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#00696b]"
+                >
+                  Open test
+                </button>
+                <button
+                  onClick={() => setReadyNotice(null)}
+                  className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+                >
+                  Dismiss
+                </button>
+              </span>
+            </div>
+          )}
+          {KEEP_ALIVE.filter((v) => mountedViews.includes(v) || v === currentView).map((v) => (
+            <div key={v} className={v === currentView ? '' : 'hidden'}>
+              {renderView(v)}
+            </div>
+          ))}
+          {!KEEP_ALIVE.includes(currentView) && renderView(currentView)}
         </main>
       </div>
 

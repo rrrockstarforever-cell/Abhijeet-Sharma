@@ -739,7 +739,7 @@ export const SettingsAIView: React.FC = () => {
                         </div>
 
                         {/* Per-provider model selector (persisted, user-selectable) */}
-                        <div className="flex items-center gap-2 mt-2">
+                        <div className="flex flex-wrap items-center gap-2 mt-2">
                           <label className="text-[11px] text-slate-500 font-semibold">Model</label>
                           <input
                             type="text"
@@ -754,6 +754,11 @@ export const SettingsAIView: React.FC = () => {
                               <option key={m.id} value={m.id}>{m.label}</option>
                             ))}
                           </datalist>
+                          {accountError && (
+                            <span className="basis-full text-[10px] leading-snug text-amber-600" title={accountError}>
+                              {accountError.length > 170 ? accountError.slice(0, 167) + '…' : accountError}
+                            </span>
+                          )}
                           <span className="text-[9px] font-mono text-slate-400 max-w-[130px] truncate" title={selectedMeta?.released ? `Released ${selectedMeta.released}` : undefined}>
                             {selectedMeta?.context ? `${Math.round(selectedMeta.context / 1000)}k ctx` : 'any model id'}
                           </span>

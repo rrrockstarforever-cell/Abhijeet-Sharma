@@ -18,6 +18,7 @@ import {
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
+import ExamPatternDisplay from './ExamPatternDisplay';
 import { ExamType, AppView, DifficultyTier, DifficultySubLevel, INISyllabusMode, ClinicalQuestion } from '../types.ts';
 import { 
   NEET_PG_SUBJECTS, 
@@ -1249,6 +1250,16 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                   {count} Qs
                 </button>
               ))}
+              <button
+                onClick={() => setQuestionCount(100)}
+                className={`py-2 rounded-xl text-xs font-bold transition-all ${
+                  questionCount === 100
+                    ? 'bg-[#001432] text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                ALL
+              </button>
             </div>
 
             <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1.5 font-mono">

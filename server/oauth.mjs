@@ -30,7 +30,7 @@ const CLAUDE = {
   base: 'https://api.anthropic.com/v1',
   ua: 'axios/1.7.9', // the token endpoint rejects claude-code/ user agents
   betas: 'claude-code-20250219,oauth-2025-04-20',
-  version: '2.1.74',
+  version: '2.1.280', // newest models refuse older client versions ("2.1.280 or newer is required")
 };
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
 async function claudeToken(body) {
@@ -256,21 +256,32 @@ export async function chat({ provider, model, system, messages, json, effort, se
     } else if (json) {
       claudeSystem.push({ type: 'text', text: jsonRule.trim() });
     }
-    const r = await fetch(`${CLAUDE.base}/messages`, {
+    // Newer Claude models think by default, and that hidden reasoning is billed against
+    // max_tokens. A 10-question JSON batch then ran out of budget with only ~17k visible
+    // characters and was cut off mid-sentence, which made the whole batch unparseable.
+    // Switch thinking off (the old app's models never thought) and fall back to omitting
+    // the field for older models that do not recognise it.
+    const claudeBody = {
+      model, max_tokens: json ? 16384 : 8192,
+      system: claudeSystem,
+      messages,
+    };
+    const sendClaude = (thinking) => fetch(`${CLAUDE.base}/messages`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json', Authorization: `Bearer ${tok}`, 'anthropic-version': '2023-06-01',
         'anthropic-beta': CLAUDE.betas, 'User-Agent': `claude-code/${CLAUDE.version} (external, cli)`,
       },
-      body: JSON.stringify({
-        model, max_tokens: json ? 16384 : 8192,
-        system: claudeSystem,
-        messages,
-      }),
+      body: JSON.stringify(thinking ? { ...claudeBody, thinking } : claudeBody),
     });
-    const b = await r.json().catch(() => ({}));
+    let r = await sendClaude({ type: 'between_tools' });
+    let b = await r.json().catch(() => ({}));
+    if (!r.ok && /thinking/i.test(b?.error?.message || '')) {
+      r = await sendClaude(null);
+      b = await r.json().catch(() => ({}));
+    }
     if (!r.ok) throw new Error(`Claude: ${b?.error?.message || 'HTTP ' + r.status}`);
-    return (b.content || []).map((x) => x.text || '').join('');
+    return (b.content || []).filter((x) => x.type === 'text').map((x) => x.text || '').join('');
   }
   if (provider === 'xai' && search) {
     const r = await fetch(`${XAI.base}/responses`, {

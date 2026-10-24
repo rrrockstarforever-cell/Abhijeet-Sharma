@@ -305,6 +305,35 @@ app.post('/api/settings/gemini-key', (req: Request, res: Response) => {
 // reports separately and never blocks the others.
 let availableModelsCache: { at: number; payload: any } | null = null;
 
+// A model listed by the provider is not necessarily runnable on this subscription: some need
+// paid usage credits, some need a newer client version. Probe each model once with a tiny
+// prompt and remember the verdict, so the picker only offers models that actually answer.
+// Only definitive refusals hide a model; a timeout or 5xx keeps it (the failure is transient).
+const modelVerdicts = new Map<string, { ok: boolean; reason?: string; at: number }>();
+const VERDICT_TTL_MS = 6 * 60 * 60 * 1000;
+const DEFINITIVE_REFUSAL = /usage credits|credits are required|does not support this model|not supported|not found|no access|permission|not available|unknown model|invalid model|deprecated/i;
+
+async function probeModel(uiId: string, modelId: string): Promise<{ ok: boolean; reason?: string }> {
+  const key = `${uiId}:${modelId}`;
+  const cached = modelVerdicts.get(key);
+  if (cached && Date.now() - cached.at < VERDICT_TTL_MS) return cached;
+  let verdict: { ok: boolean; reason?: string } = { ok: true };
+  try {
+    const text = await Promise.race([
+      runCompletion({ provider: uiId, model: modelId, messages: [{ role: 'user', content: 'Reply with exactly: OK' }] }),
+      new Promise<string>((_, rej) => setTimeout(() => rej(new Error('probe timed out')), 45_000)),
+    ]);
+    verdict = { ok: Boolean(text && text.trim()) };
+    if (!verdict.ok) verdict.reason = 'returned an empty reply';
+  } catch (err: any) {
+    const msg = String(err?.message || 'request failed');
+    // Hide only on a definitive refusal; keep the model when the failure looks transient.
+    verdict = DEFINITIVE_REFUSAL.test(msg) ? { ok: false, reason: msg.replace(/^Claude:\s*/i, '').slice(0, 140) } : { ok: true };
+  }
+  modelVerdicts.set(key, { ...verdict, at: Date.now() });
+  return verdict;
+}
+
 app.get('/api/models/available', async (_req: Request, res: Response) => {
   if (availableModelsCache && Date.now() - availableModelsCache.at < 300_000) {
     return res.json(availableModelsCache.payload);
@@ -321,7 +350,16 @@ app.get('/api/models/available', async (_req: Request, res: Response) => {
       }
       const internal = INTERNAL_PROVIDER[uiId];
       const result = await oauthListModels(internal as 'codex' | 'xai' | 'claude');
-      providers[uiId] = (result.models || []).map((m) => ({ id: m.id, name: m.name || m.id, source: 'account' }));
+      const listed = (result.models || []).map((m) => ({ id: m.id, name: m.name || m.id, source: 'account' }));
+      const verdicts = await Promise.all(listed.map((m) => probeModel(uiId, m.id)));
+      providers[uiId] = listed.filter((_, i) => verdicts[i].ok);
+      const hidden = listed
+        .map((m, i) => ({ m, v: verdicts[i] }))
+        .filter((x) => !x.v.ok);
+      if (hidden.length) {
+        errors[uiId] = `${hidden.length} listed model${hidden.length === 1 ? '' : 's'} hidden because your plan cannot run ${hidden.length === 1 ? 'it' : 'them'}: ` +
+          hidden.map((x) => `${x.m.id} (${x.v.reason || 'refused'})`).join('; ');
+      }
       if (result.error) errors[uiId] = result.error;
     }),
   );

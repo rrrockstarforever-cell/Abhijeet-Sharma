@@ -3,6 +3,9 @@
 // No silent fallbacks: every failure is thrown as a typed AiError and must be shown in the UI.
 import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } from '../types.ts';
 
+import { Question } from "../types";
+import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
+import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } from "../types";
 export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok';
 
 export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok'];
@@ -150,17 +153,100 @@ export function extractJson<T = any>(raw: string): T | null {
   }
 }
 
+/**
+ * A reply cut off mid-item (token limit, dropped connection) is invalid JSON as a whole,
+ * but every item before the cut is intact. Walk the "questions" array and keep each
+ * COMPLETE object so one truncated tail never throws away a whole batch.
+ */
+export function salvageQuestionObjects(text: string): any[] {
+  if (!text) return [];
+  const key = text.indexOf('"questions"');
+  const open = text.indexOf('[', key >= 0 ? key : 0);
+  if (open < 0) return [];
+  const items: any[] = [];
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  let start = -1;
+  for (let i = open + 1; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{') { if (depth === 0) start = i; depth++; }
+    else if (c === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        try { items.push(JSON.parse(text.slice(start, i + 1))); } catch { /* skip a malformed item */ }
+        start = -1;
+      }
+    } else if (c === ']' && depth === 0) break;
+  }
+  return items;
+}
+
 // ---------- AI exam-question generation ----------
 
-const GENERATOR_SYSTEM = `You are an expert medical exam item writer for NEET-PG, INI-CET and the AMC CAT.
-You write authentic, clinically rigorous single-best-answer MCQs with exactly one clearly correct option and plausible distractors.
+const GENERATOR_SYSTEM = `You are a senior item writer for the Indian and Australian postgraduate medical entrance exams (NEET-PG, INI-CET, AMC CAT).
+Your questions are written to DISCRIMINATE between well-prepared candidates, not to confirm what everyone already knows. An item that a candidate can answer from a single buzzword is a failed item.
+Every question has exactly one defensible best answer. Distractors are real, plausible entities that a half-prepared candidate would genuinely choose, never absurd or obviously wrong.
 Always respond with ONLY a single valid JSON object (no markdown fences, no commentary).`;
 
-const TIER_BEHAVIOUR: Record<string, string> = {
-  LOW: 'Direct-recall style: clear stem, characteristic finding or guideline fact; distractors must be obviously wrong to the well-prepared.',
-  MEDIUM: 'Clinical 2-step reasoning: a short vignette, the reader must infer the diagnosis/mechanism first, then pick the correct next step; distractors are mimickers or classic confusions.',
-  HIGH: 'Multi-step / IBQ style: longer vignette or management sequence, subtle traps, atypical presentations or evidence-based next best step; distractors are individually defensible but one is clearly best.',
+/**
+ * Per-exam item patterns, ported from the original app's generator (its `__cmExam`
+ * table). These, not a one-line label, are what keep the questions exam-standard.
+ */
+const EXAM_PATTERNS: Record<ExamType, { name: string; opts: number; pat: string }> = {
+  NEET_PG: {
+    name: 'NEET PG',
+    opts: 4,
+    pat: "NEET PG (NBEMS) pattern. Exactly 4 options (A-D), one correct; +4 for correct, -1 for wrong. Mostly 2-5 line clinical vignettes giving age, sex, presenting complaint, key examination findings and results, ending with ONE lead-in such as 'What is the most likely diagnosis?', 'What is the next best step in management?', 'What is the investigation of choice?', 'What is the drug of choice?' or 'Identify the structure/condition shown'. Mix in one-liner factual recall items, about one in five image-based items (describe the X-ray, CT, histology slide, instrument, ECG or clinical photo finding in words, then ask to identify it), integrated items linking two subjects, and PSM/biostatistics calculations where relevant. Options must be homogeneous and close; avoid 'all of the above', 'none of the above' and 'all except' wording.",
+  },
+  INI_CET: {
+    name: 'INI-CET',
+    opts: 4,
+    pat: "INI-CET (AIIMS) pattern. Exactly 4 options (A-D); +1 correct, -1/3 wrong. About half single-best-answer clinical vignettes and half analytical formats: multiple-statement items ('Which of the following statements is/are correct? 1. ... 2. ... 3. ... 4. ...' with options such as '1 and 3 only', '2, 3 and 4 only'), match-the-following (List I with List II, options as code combinations like 'A-2, B-4, C-1, D-3'), assertion-reason (Assertion A / Reason R with the four standard options), arrange-in-correct-sequence, and recent-advances or guideline facts. Image-heavy topics describe the image in words. Distractors must be very close; elimination should be hard.",
+  },
+  AMC_CAT: {
+    name: 'AMC CAT MCQ',
+    opts: 5,
+    pat: "AMC CAT MCQ pattern (Australia). Exactly 5 options (A-E), one best answer, no negative marking. Every item is a patient vignette set in Australian practice (general practice, emergency department, ward, rural or remote clinic) giving age, sex, history, examination and relevant results, ending with ONE lead-in such as 'What is the most appropriate next step in management?', 'What is the most likely diagnosis?', 'Which investigation is most appropriate?', 'What is the most appropriate advice?'. Test data gathering, data interpretation and management, favouring safe guideline-based next steps. Follow Australian sources: Therapeutic Guidelines (eTG), Australian Medicines Handbook, RACGP Red Book, John Murtagh's General Practice (safe diagnostic strategy: probability diagnosis, serious disorders not to be missed, pitfalls, masquerades, is the patient trying to tell me something), National Immunisation Program, state Mental Health Acts, consent and Gillick competence, mandatory reporting, Aboriginal and Torres Strait Islander health. Options must be homogeneous (all diagnoses, or all management steps).",
+  },
 };
+
+const TIER_BEHAVIOUR: Record<string, string> = {
+  LOW: 'EASY: still a short clinical vignette (never a bare one-line fact). One inferential step. Distractors are plausible and share the same category as the key, but the key is clearly best to a well-prepared candidate.',
+  MEDIUM: 'MEDIUM: a full vignette. The candidate must first infer the diagnosis or mechanism, then choose the correct next step. Distractors are close mimickers or classic confusions, so recognising the buzzword alone does not give the answer.',
+  HIGH: 'HARD: a long vignette with two or three reasoning steps, an atypical or overlapping presentation, and a recent-guideline or evidence-based decision point. Every distractor is individually defensible in some other scenario; only the exact details of THIS patient make one option best. Elimination must be hard and the key must not be guessable from keywords.',
+};
+
+const GENERATION_RULES =
+  'Rules: medically accurate and current; do not invent doses or values; no two questions on the same fact; ' +
+  'the stem must not contain a clue that gives the answer away; options must be homogeneous and of similar length; ' +
+  'vary which option is correct across the batch (do not favour B or C).';
+
+// Options that must keep their order (combination codes, "all of the above", ...) are never shuffled.
+const NO_SHUFFLE = /\b(all|none|both|neither)\b.*\b(above|these|of the)\b|\b(a|b|c|d|e)\s*(and|&|,)\s*(a|b|c|d|e)\b|^\s*(a|b|c|d|e)\s*[,&]|\bonly\s*$|^\s*\d(\s*(,|and|&)\s*\d)+/i;
+
+/** Models over-use B/C for the key. Shuffle so the position is not a tell. */
+export function shuffleOptions(entries: { id: string; text: string }[], correctId: string): { entries: { id: string; text: string }[]; correct: string } {
+  if (entries.length < 3 || entries.some((e) => NO_SHUFFLE.test(e.text))) return { entries, correct: correctId };
+  const order = entries.map((_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  const ids = ['A', 'B', 'C', 'D', 'E'];
+  const origCorrect = entries.findIndex((e) => e.id === correctId);
+  return {
+    entries: order.map((o, i) => ({ id: ids[i], text: entries[o].text })),
+    correct: ids[order.indexOf(origCorrect)],
+  };
+}
 
 interface BatchQuestionSpec {
   examType: string;
@@ -174,6 +260,7 @@ interface BatchQuestionSpec {
   options: Record<string, string>;
   correctOption: string;
   boardPearl: string;
+  explanation?: string;
   citations: string[];
   trapType?: string;
   trapExplanation?: string;
@@ -227,7 +314,7 @@ function nextId(exam: ExamType): string {
 }
 
 /** Validate/repair one raw question from the model; null when it must be dropped. */
-function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtopic: string }[], tier: 'LOW' | 'MEDIUM' | 'HIGH', subLevel?: DifficultySubLevel): ClinicalQuestion | null {
+function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtopic: string }[], tier: 'LOW' | 'MEDIUM' | 'HIGH', subLevel: DifficultySubLevel | undefined, requiredOptions: number): ClinicalQuestion | null {
   if (!raw || typeof raw !== 'object') return null;
   const stem = typeof raw.stem === 'string' ? raw.stem.trim() : '';
   if (!stem) return null; // non-empty stem required
@@ -247,10 +334,12 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
       if (typeof text === 'string' && text.trim()) entries.push({ id: key as any, text: text.trim() });
     }
   }
-  if (entries.length < 4 || entries.length > 5) return null; // 4-5 options required
+  if (entries.length !== requiredOptions) return null; // each exam has a fixed option count
 
-  const correct = String(raw.correctOption ?? '').trim().toUpperCase();
-  if (!entries.some((o) => o.id === correct)) return null; // correctOption must exist among options
+  const keyed = String(raw.correctOption ?? '').trim().toUpperCase();
+  if (!entries.some((o) => o.id === keyed)) return null; // correctOption must exist among options
+  const shuffled = shuffleOptions(entries, keyed);
+  const correct = shuffled.correct;
 
   const requested = pool[Math.floor(Math.random() * pool.length)];
   const subject = typeof raw.subject === 'string' && raw.subject.trim() ? raw.subject.trim() : requested.subject;
@@ -275,9 +364,10 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
     difficultySubLevel: subLevel || SUB_LEVEL_DEFAULT[aiTier],
     stem,
     questionText: typeof raw.questionText === 'string' && raw.questionText.trim() ? raw.questionText.trim() : stem,
-    options: entries.map((o) => ({ id: o.id as 'A' | 'B' | 'C' | 'D' | 'E', text: o.text })),
+    options: shuffled.entries.map((o) => ({ id: o.id as 'A' | 'B' | 'C' | 'D' | 'E', text: o.text })),
     correctOption: correct as ClinicalQuestion['correctOption'],
     boardPearl: typeof raw.boardPearl === 'string' ? raw.boardPearl.trim() : '',
+    explanation: typeof raw.explanation === 'string' && raw.explanation.trim() ? raw.explanation.trim() : undefined,
     citations: Array.isArray(raw.citations)
       ? raw.citations.filter((c: any) => typeof c === 'string' && c.trim()).map((c: string) => c.trim()).slice(0, 5)
       : [],
@@ -312,6 +402,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const poolSubjects = [...new Set(workingPool.map((p) => p.subject))];
 
   const tier: 'LOW' | 'MEDIUM' | 'HIGH' = difficultyTier === 'ALL' ? 'MEDIUM' : difficultyTier;
+  const pattern = EXAM_PATTERNS[exam];
   const questions: ClinicalQuestion[] = [];
   let dropped = 0;
   let batch = 0;
@@ -339,9 +430,11 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }
 
     const prompt = [
-      `Write ${batchSize} exam MCQs for the ${exam.replace('_', '-')} exam.`,
-      `Difficulty tier: ${difficultyTier === 'ALL' ? 'adaptive mix (vary LOW / MEDIUM / HIGH across questions)' : difficultyTier}${difficultySubLevel ? ` (sub-level ${difficultySubLevel})` : ''}.`,
-      TIER_BEHAVIOUR[difficultyTier === 'ALL' ? 'MEDIUM' : difficultyTier],
+      `Write ${batchSize} NEW, exam-standard MCQs for ${pattern.name}.`,
+      difficultyTier === 'ALL'
+        ? `Difficulty: a realistic exam mix of about 20% easy, 45% medium and 35% hard. Set each item's "difficultyTier" (LOW / MEDIUM / HIGH) to match what you wrote.\n${TIER_BEHAVIOUR.LOW}\n${TIER_BEHAVIOUR.MEDIUM}\n${TIER_BEHAVIOUR.HIGH}`
+        : `Difficulty: ${difficultyTier}${difficultySubLevel ? ` (sub-level ${difficultySubLevel})` : ''}. Every item must be at this level.\n${TIER_BEHAVIOUR[difficultyTier]}`,
+      pattern.pat,
       // ---- section-14 writing options ----
       questionTypes && questionTypes.length
         ? `Mix these QUESTION TYPES across the batch (label each item's focus implicitly through the stem): ${questionTypes.join('; ')}. For "match the following" or "multiple statements" style, use the options to present the statement sets / roman-numeral choices inside the stem.`
@@ -379,15 +472,16 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       '  "difficultyTier": "LOW" | "MEDIUM" | "HIGH",',
       '  "stem": "clinical vignette / scenario (2-7 sentences, concrete findings, no answer hints)",',
       '  "questionText": "the actual question sentence asking for the single best answer",',
-      '  "options": {"A": "text", "B": "text", "C": "text", "D": "text", "E": "text (optional 5th)"},',
-      `  "correctOption": "A" (single best answer, 4-5 options total)${exam === 'AMC_CAT' ? ' — AMC CAT style: pick the single most appropriate next step or diagnosis' : ''},`,
+      `  "options": {${'ABCDE'.slice(0, pattern.opts).split('').map((k) => `"${k}": "text"`).join(', ')}} — EXACTLY ${pattern.opts} options, no more and no fewer,`,
+      `  "correctOption": "one of ${'ABCDE'.slice(0, pattern.opts).split('').join(', ')}" (the single best answer),`,
+      '  "explanation": "120-220 words, each part on its own line: first why the keyed answer is right; then ONE line for EACH of the other options saying exactly why it is wrong; then one exam tip",',
       '  "boardPearl": "one-line high-yield exam pearl",',
       '  "citations": ["standard textbook / guideline citation, e.g. Harrison\'s 21st Ed Ch. 142 or eTG"],',
       '  "trapType": "short label for the classic trap in this item",',
       '  "trapExplanation": "why the most tempting distractor is wrong",',
       '  "targetAccuracy": 0-100 expected percent of examinees answering correctly',
       '}',
-      `${exam === 'NEET_PG' ? 'NEET-PG style: NBE clinical vignettes, +4/-1 scoring mindset.' : exam === 'INI_CET' ? 'INI-CET style: AIIMS clinical matrix, assertion-reasoning depth.' : 'AMC CAT style: Australian practice (TGA/eTG medications, Australian screening schedules).'}`,
+      GENERATION_RULES,
       'Use authentic current clinical knowledge; no obsolete trivia. Output ONLY the JSON object.',
     ].join('\n');
 
@@ -404,11 +498,16 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     });
 
     const parsed = extractJson<{ questions?: BatchQuestionSpec[] } | BatchQuestionSpec[]>(raw);
-    const batchItems: BatchQuestionSpec[] | null = Array.isArray(parsed)
+    let batchItems: BatchQuestionSpec[] | null = Array.isArray(parsed)
       ? parsed
       : parsed && Array.isArray((parsed as any).questions)
         ? (parsed as any).questions
         : null;
+    if (!batchItems) {
+      // Cut-off reply: recover the complete questions that came before the cut.
+      const salvaged = salvageQuestionObjects(raw) as BatchQuestionSpec[];
+      if (salvaged.length) batchItems = salvaged;
+    }
 
     if (!batchItems) {
       dropped += batchSize; // entire batch unusable
@@ -419,7 +518,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const tierForItem = difficultyTier === 'ALL'
           ? (['LOW', 'MEDIUM', 'HIGH'] as const)[questions.length % 3]
           : tier;
-        const q = buildQuestion(item, exam, batchPool, tierForItem, difficultySubLevel);
+        const q = buildQuestion(item, exam, batchPool, tierForItem, difficultySubLevel, pattern.opts);
         if (q) questions.push(q);
       }
       // Everything requested but not delivered (invalid items or missing) counts as dropped.
