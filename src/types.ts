@@ -116,7 +116,7 @@ export interface AIProvider {
   model: string;
   availableModels: AvailableModel[];
   status: 'active' | 'connected' | 'ready' | 'offline_ready' | 'standby';
-  latencyMs: number;
+  latencyMs?: number;
   type: string;
   features: string[];
   isDefault: boolean;

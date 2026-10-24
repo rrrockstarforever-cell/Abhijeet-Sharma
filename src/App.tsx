@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AppView, ExamType, DifficultyTier, DifficultySubLevel } from './types.ts';
+import { AppView, ExamType, DifficultyTier, DifficultySubLevel, ClinicalQuestion } from './types.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { TopBar } from './components/TopBar.tsx';
 import { PerformanceAnalyticsView } from './components/PerformanceAnalyticsView.tsx';
@@ -11,11 +11,13 @@ import { PracticeModuleBuilderView } from './components/PracticeModuleBuilderVie
 import { TestRunnerView } from './components/TestRunnerView.tsx';
 import { AITutorView } from './components/AITutorView.tsx';
 import { PDFReaderView } from './components/PDFReaderView.tsx';
+import { generatePracticeQuestions } from './data/mockClinicalData.ts';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<AppView>('analytics');
   const [currentExam, setCurrentExam] = useState<ExamType>('INI_CET');
   const [activeQuestionId, setActiveQuestionId] = useState<string>('Q10');
+  const [activeTestQuestions, setActiveTestQuestions] = useState<ClinicalQuestion[] | undefined>(undefined);
   const [isDarkMode, setIsDarkMode] = useState<boolean>(false);
 
   const handleNavigate = (view: AppView, targetId?: string) => {
@@ -36,9 +38,18 @@ export default function App() {
     mode: 'EXAM' | 'TUTOR', 
     subjects: string[],
     difficultyTier: DifficultyTier,
-    difficultySubLevel?: DifficultySubLevel
+    difficultySubLevel?: DifficultySubLevel,
+    chosenSubtopics?: string[],
+    customQuestions?: ClinicalQuestion[]
   ) => {
     setCurrentExam(exam);
+    const questions = customQuestions && customQuestions.length > 0
+      ? customQuestions
+      : generatePracticeQuestions(exam, count, subjects, difficultyTier, difficultySubLevel, chosenSubtopics);
+    setActiveTestQuestions(questions);
+    if (questions.length > 0) {
+      setActiveQuestionId(questions[0].id);
+    }
     setCurrentView('test-runner');
   };
 
@@ -66,6 +77,7 @@ export default function App() {
           <TestRunnerView 
             initialQuestionId={activeQuestionId}
             onNavigate={handleNavigate}
+            questions={activeTestQuestions}
           />
         );
       case 'mistakes':

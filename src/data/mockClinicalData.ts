@@ -3,8 +3,12 @@ import {
   MedicalTopic, 
   SavedHighlight, 
   AIProvider, 
-  PDFDocument 
+  PDFDocument,
+  ExamType,
+  DifficultyTier,
+  DifficultySubLevel
 } from '../types.ts';
+import { SUBTOPICS } from './subtopics.ts';
 
 // ==========================================
 // 1. AUTHENTIC SYLLABI DEFINITIONS
@@ -349,15 +353,12 @@ export const AI_PROVIDERS: AIProvider[] = [
     name: 'ChatGPT (OpenAI Subscription)',
     brand: 'openai',
     model: 'gpt-4o-2024-08-06',
-    status: 'connected',
-    latencyMs: 290,
-    type: 'OpenAI Plus / Team Account',
+    status: 'ready',
+    type: 'Device Code Sign-In',
     features: ['Multi-Step Reasoning', 'Vision Stains', 'STEM Benchmark Apex'],
     isDefault: false,
-    isSignedIn: true,
-    userEmail: 'dr.arya.sharma@hospital.org',
-    subscriptionPlan: 'ChatGPT Plus ($20/mo)',
-    hasTokenConfigured: true,
+    isSignedIn: false,
+    hasTokenConfigured: false,
     availableModels: [
       { id: 'gpt-4o-2024-08-06', name: 'GPT-4o (Omni Multimodal Flagship)', badge: 'Default', description: 'High-speed diagnostic analysis & image-based question parsing', latencyEstimate: '290ms', contextWindow: '128k tokens' },
       { id: 'o1', name: 'OpenAI o1 (Full Reasoning Engine)', badge: 'Deep Thinker', description: 'Spends thinking time to eliminate subtle board distractor traps', latencyEstimate: '850ms', contextWindow: '128k tokens' },
@@ -371,15 +372,12 @@ export const AI_PROVIDERS: AIProvider[] = [
     name: 'Claude (Anthropic Subscription)',
     brand: 'anthropic',
     model: 'claude-3-7-sonnet',
-    status: 'connected',
-    latencyMs: 240,
-    type: 'Anthropic Pro Web Subscription',
+    status: 'ready',
+    type: 'PKCE Browser Sign-In',
     features: ['Topper Diagnostic Reasoning', 'Thinking Budgets', 'Extended Differential'],
     isDefault: false,
-    isSignedIn: true,
-    userEmail: 'dr.arya.sharma@hospital.org',
-    subscriptionPlan: 'Claude Pro Subscription',
-    hasTokenConfigured: true,
+    isSignedIn: false,
+    hasTokenConfigured: false,
     availableModels: [
       { id: 'claude-3-7-sonnet', name: 'Claude 3.7 Sonnet (Thinking Engine)', badge: 'Latest Flagship', description: 'Hybrid instant response and extended clinical diagnostic thinking', latencyEstimate: '310ms', contextWindow: '200k tokens' },
       { id: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet', badge: 'Resident Choice', description: 'Exceptional clinical nuance and medical board question parsing', latencyEstimate: '240ms', contextWindow: '200k tokens' },
@@ -599,3 +597,75 @@ export const MOCK_AI_PROVIDERS: AIProvider[] = AI_PROVIDERS;
 export const MOCK_BOOKS = MOCK_PDF_DOCUMENTS;
 export const INGESTED_BOOKS = MOCK_PDF_DOCUMENTS;
 export const MEDICAL_TOPICS: MedicalTopic[] = [];
+
+export function generatePracticeQuestions(
+  exam: ExamType,
+  count: number,
+  subjects: string[],
+  difficultyTier: DifficultyTier,
+  difficultySubLevel?: DifficultySubLevel,
+  chosenSubtopics?: string[]
+): ClinicalQuestion[] {
+  // If specific subtopics are passed and non-empty, use them; otherwise fallback to subject subtopics
+  const activeSubtopics = (chosenSubtopics && chosenSubtopics.length > 0)
+    ? chosenSubtopics
+    : subjects.flatMap(s => SUBTOPICS[s] || [s]);
+
+  // Check existing INITIAL_QUESTIONS for direct matches
+  const existingMatches = INITIAL_QUESTIONS.filter(q => 
+    q.examType === exam && (
+      subjects.some(s => q.subject.toLowerCase().includes(s.toLowerCase())) ||
+      (chosenSubtopics && chosenSubtopics.some(sub => q.subtopic.toLowerCase().includes(sub.toLowerCase())))
+    )
+  );
+
+  const result: ClinicalQuestion[] = [...existingMatches];
+
+  const targetCount = Math.max(count, 5);
+  for (let i = 0; i < targetCount; i++) {
+    const subtopic = activeSubtopics[i % activeSubtopics.length] || 'General Clinical Sciences';
+    const parentSubject = subjects[i % subjects.length] || 'General Medicine';
+    const qTier: 'LOW' | 'MEDIUM' | 'HIGH' = difficultyTier === 'ALL' 
+      ? (i % 3 === 0 ? 'LOW' : i % 3 === 1 ? 'MEDIUM' : 'HIGH') 
+      : difficultyTier;
+    const cogTier: 'Direct Recall' | 'Clinical 2-Step' | 'Multi-Step & IBQ' = 
+      qTier === 'LOW' ? 'Direct Recall' : qTier === 'MEDIUM' ? 'Clinical 2-Step' : 'Multi-Step & IBQ';
+    const subLvl: DifficultySubLevel = difficultySubLevel || (qTier === 'LOW' ? 'L1' : qTier === 'MEDIUM' ? 'M1' : 'H1');
+
+    const qId = `Q-${exam.replace('_', '')}-${200 + i}`;
+    if (result.some(r => r.id === qId)) continue;
+
+    result.push({
+      id: qId,
+      moduleCode: `${exam.replace('_', '-')} · Dynamic Module #${1400 + i}`,
+      examType: exam,
+      subject: parentSubject,
+      subtopic: subtopic,
+      cognitiveTier: cogTier,
+      difficultyTier: qTier,
+      difficultySubLevel: subLvl,
+      stem: `${subtopic} — High-Yield Clinical Reasoning Stem`,
+      questionText: `A patient presents with classical diagnostic findings involving ${subtopic}. In accordance with standard clinical guidelines, which of the following is the most appropriate diagnostic discriminator or initial intervention?`,
+      options: [
+        { id: 'A', text: `First-line management / gold standard diagnostic investigation for ${subtopic}` },
+        { id: 'B', text: `Secondary therapeutic alternative with lower efficacy or higher side-effect burden` },
+        { id: 'C', text: `Classical diagnostic trap based on obsolete protocol or mimicker condition` },
+        { id: 'D', text: `Contraindicated intervention that exacerbates patient hemodynamic instability` },
+      ],
+      correctOption: 'A',
+      selectedOption: undefined,
+      trapType: `CLINICAL DISCRIMINATION PITFALL • ${subtopic.toUpperCase()}`,
+      trapExplanation: `In ${subtopic}, options C and D represent typical board exam distractor patterns. Option A provides the direct evidence-backed clinical action.`,
+      boardPearl: `Faculty Pearl for ${subtopic}: Recognize hallmark pathognomonic findings early. Prioritize immediate stabilization and definitive guideline-based therapy.`,
+      citations: [
+        exam === 'AMC_CAT' ? 'Australian Therapeutic Guidelines (eTG) 2024' : "Harrison's Principles of Internal Medicine 21st Ed.",
+        exam === 'NEET_PG' ? 'Robbins & Cotran Pathologic Basis of Disease 10th Ed.' : 'AIIMS New Delhi Clinical Protocol Guide'
+      ],
+      targetAccuracy: qTier === 'LOW' ? 82 : qTier === 'MEDIUM' ? 64 : 48,
+      nationalPercentile: qTier === 'LOW' ? 58 : qTier === 'MEDIUM' ? 74 : 89,
+    });
+  }
+
+  return result.slice(0, count);
+}
+

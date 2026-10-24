@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Cpu, 
   Sparkles, 
@@ -12,10 +12,22 @@ import {
   X, 
   Check, 
   AlertCircle,
-  HardDrive
+  HardDrive,
+  Copy,
+  LogOut,
+  Radio
 } from 'lucide-react';
 import { AIProvider } from '../types.ts';
 import { MOCK_AI_PROVIDERS } from '../data/mockClinicalData.ts';
+
+function getClientSessionId(): string {
+  let sid = localStorage.getItem('pulse_session_id');
+  if (!sid) {
+    sid = 'sess_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now().toString(36);
+    localStorage.setItem('pulse_session_id', sid);
+  }
+  return sid;
+}
 
 export const SettingsAIView: React.FC = () => {
   const [providers, setProviders] = useState<AIProvider[]>(MOCK_AI_PROVIDERS);
@@ -24,47 +36,263 @@ export const SettingsAIView: React.FC = () => {
   const [cacheMemoryMB, setCacheMemoryMB] = useState<number>(512);
   const [fp16Quantization, setFp16Quantization] = useState<boolean>(true);
   
-  // Connect / Sign-in Modal State
-  const [selectedModalProvider, setSelectedModalProvider] = useState<AIProvider | null>(null);
-  const [inputToken, setInputToken] = useState<string>('');
-  const [inputAuthType, setInputAuthType] = useState<'session_token' | 'api_key'>('session_token');
+  // Real OAuth Sign-In Modal State
+  const [selectedProvider, setSelectedProvider] = useState<AIProvider | null>(null);
+  const [isLoadingFlow, setIsLoadingFlow] = useState<boolean>(false);
+  const [deviceCodeData, setDeviceCodeData] = useState<{
+    userCode: string;
+    verificationUri: string;
+    deviceCode: string;
+    interval: number;
+  } | null>(null);
+  const [pkceData, setPkceData] = useState<{
+    authUrl: string;
+    state: string;
+  } | null>(null);
+  const [claudeInputCode, setClaudeInputCode] = useState<string>('');
+  const [isPolling, setIsPolling] = useState<boolean>(false);
   const [isVerifying, setIsVerifying] = useState<boolean>(false);
-  const [verificationSuccess, setVerificationSuccess] = useState<boolean | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authSuccess, setAuthSuccess] = useState<boolean>(false);
+  const [copied, setCopied] = useState<boolean>(false);
 
-  const handleOpenConnectModal = (provider: AIProvider) => {
-    setSelectedModalProvider(provider);
-    setInputToken(provider.hasTokenConfigured ? '••••••••••••••••••••••••••••••••' : '');
-    setInputAuthType(provider.id === 'claude' ? 'session_token' : 'api_key');
-    setVerificationSuccess(null);
+  const pollTimerRef = useRef<any>(null);
+
+  // Poll or fetch status on mount to display real server connection state
+  const fetchOAuthStatus = async () => {
+    try {
+      const res = await fetch('/api/oauth/status', {
+        headers: {
+          'x-session-id': getClientSessionId()
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.providers) {
+          setProviders(prev => prev.map(p => {
+            const providerStatus = data.providers[p.id];
+            if (providerStatus) {
+              const isConn = Boolean(providerStatus.connected);
+              return {
+                ...p,
+                hasTokenConfigured: isConn,
+                status: isConn ? (p.id === activeProviderId ? 'active' : 'connected') : 'ready',
+                userEmail: providerStatus.userEmail || p.userEmail
+              };
+            }
+            return p;
+          }));
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching OAuth status:', err);
+    }
   };
 
-  const handleVerifyAndSave = () => {
-    if (!inputToken.trim()) return;
-    setIsVerifying(true);
-    setVerificationSuccess(null);
+  useEffect(() => {
+    fetchOAuthStatus();
+  }, [activeProviderId]);
 
-    setTimeout(() => {
-      setIsVerifying(false);
-      setVerificationSuccess(true);
-      
-      if (selectedModalProvider) {
-        setProviders(prev => prev.map(p => {
-          if (p.id === selectedModalProvider.id) {
-            return {
-              ...p,
-              hasTokenConfigured: true,
-              status: p.id === activeProviderId ? 'active' : 'connected',
-              latencyMs: Math.floor(Math.random() * 40) + 110,
-            };
-          }
-          return p;
-        }));
+  // Clean up polling timer on unmount
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
+  }, []);
+
+  // Initiate OAuth Sign-In
+  const handleOpenSignInModal = async (provider: AIProvider) => {
+    setSelectedProvider(provider);
+    setAuthError(null);
+    setAuthSuccess(false);
+    setCopied(false);
+    setClaudeInputCode('');
+    setDeviceCodeData(null);
+    setPkceData(null);
+    setIsLoadingFlow(true);
+
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+
+    if (provider.id === 'gemini') {
+      setIsLoadingFlow(false);
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/oauth/start', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-session-id': getClientSessionId()
+        },
+        body: JSON.stringify({ provider: provider.id })
+      });
+
+      if (!res.ok) {
+        throw new Error(`Failed to start ${provider.name} sign-in flow.`);
       }
 
+      const data = await res.json();
+      setIsLoadingFlow(false);
+
+      if (data.flow === 'device_code') {
+        setDeviceCodeData({
+          userCode: data.userCode,
+          verificationUri: data.verificationUri,
+          deviceCode: data.deviceCode,
+          interval: data.interval || 2
+        });
+        startDeviceCodePolling(provider.id, data.deviceCode);
+      } else if (data.flow === 'pkce') {
+        setPkceData({
+          authUrl: data.authUrl,
+          state: data.state
+        });
+      }
+    } catch (err: any) {
+      setIsLoadingFlow(false);
+      setAuthError(err.message || 'Failed to start authorization flow.');
+    }
+  };
+
+  // Device Code Polling: polls /api/oauth/poll every 2 seconds
+  const startDeviceCodePolling = (providerId: string, deviceCode: string) => {
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    setIsPolling(true);
+
+    pollTimerRef.current = setInterval(async () => {
+      try {
+        const res = await fetch('/api/oauth/poll', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-session-id': getClientSessionId()
+          },
+          body: JSON.stringify({ provider: providerId, deviceCode })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.status === 'success' && data.connected) {
+            clearInterval(pollTimerRef.current);
+            setIsPolling(false);
+            setAuthSuccess(true);
+            await fetchOAuthStatus();
+            setTimeout(() => {
+              setSelectedProvider(null);
+            }, 1200);
+          } else if (data.status === 'expired') {
+            clearInterval(pollTimerRef.current);
+            setIsPolling(false);
+            setAuthError('Device authorization code has expired. Please restart sign-in.');
+          }
+        }
+      } catch (err) {
+        console.error('Polling error:', err);
+      }
+    }, 2000);
+  };
+
+  // Manual approval trigger for device code
+  const handleCompleteDeviceCode = async () => {
+    if (!selectedProvider || !deviceCodeData) return;
+    setIsVerifying(true);
+    setAuthError(null);
+
+    try {
+      const res = await fetch('/api/oauth/complete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-session-id': getClientSessionId()
+        },
+        body: JSON.stringify({
+          provider: selectedProvider.id,
+          deviceCode: deviceCodeData.deviceCode
+        })
+      });
+
+      if (!res.ok) {
+        throw new Error('Device approval completion failed.');
+      }
+
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      setIsPolling(false);
+      setIsVerifying(false);
+      setAuthSuccess(true);
+      await fetchOAuthStatus();
       setTimeout(() => {
-        setSelectedModalProvider(null);
-      }, 1000);
-    }, 700);
+        setSelectedProvider(null);
+      }, 1200);
+    } catch (err: any) {
+      setIsVerifying(false);
+      setAuthError(err.message || 'Verification failed.');
+    }
+  };
+
+  // Complete Claude PKCE by pasting approval code
+  const handleCompleteClaudePKCE = async () => {
+    if (!selectedProvider || !claudeInputCode.trim()) return;
+    setIsVerifying(true);
+    setAuthError(null);
+
+    try {
+      const res = await fetch('/api/oauth/complete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-session-id': getClientSessionId()
+        },
+        body: JSON.stringify({
+          provider: 'claude',
+          code: claudeInputCode.trim(),
+          state: pkceData?.state
+        })
+      });
+
+      if (!res.ok) {
+        throw new Error('Failed to verify Claude authorization code.');
+      }
+
+      setIsVerifying(false);
+      setAuthSuccess(true);
+      await fetchOAuthStatus();
+      setTimeout(() => {
+        setSelectedProvider(null);
+      }, 1200);
+    } catch (err: any) {
+      setIsVerifying(false);
+      setAuthError(err.message || 'Authorization failed.');
+    }
+  };
+
+  // Revoke token on server
+  const handleLogout = async (providerId: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    try {
+      await fetch('/api/oauth/logout', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-session-id': getClientSessionId()
+        },
+        body: JSON.stringify({ provider: providerId })
+      });
+      await fetchOAuthStatus();
+      if (activeProviderId === providerId) {
+        setActiveProviderId('gemini');
+      }
+    } catch (err) {
+      console.error('Logout error:', err);
+    }
+  };
+
+  const handleCopyCode = () => {
+    if (deviceCodeData?.userCode) {
+      navigator.clipboard.writeText(deviceCodeData.userCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   const handleSetActive = (providerId: string) => {
@@ -74,6 +302,12 @@ export const SettingsAIView: React.FC = () => {
       isDefault: p.id === providerId,
       status: p.id === providerId ? 'active' : p.hasTokenConfigured ? 'connected' : 'ready'
     })));
+  };
+
+  const handleCloseModal = () => {
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    setIsPolling(false);
+    setSelectedProvider(null);
   };
 
   return (
@@ -194,10 +428,10 @@ export const SettingsAIView: React.FC = () => {
           {/* HIPAA & Privacy Guard */}
           <div className="bg-slate-900 rounded-2xl p-5 text-white border border-slate-800 shadow-sm space-y-3">
             <div className="flex items-center gap-2 text-xs font-bold text-emerald-400 uppercase tracking-wider">
-              <ShieldCheck className="w-4 h-4" /> Zero-Egress Local Credential Security
+              <ShieldCheck className="w-4 h-4" /> Server-Keyed Session Security
             </div>
             <p className="text-xs text-slate-300 leading-relaxed">
-              Your API keys and subscription tokens are stored purely in your browser's local sandbox. No credentials or patient stems are logged or egressed.
+              Tokens live strictly on the server keyed to your user session. They are never returned to the browser and never committed to repository storage.
             </p>
           </div>
         </div>
@@ -214,7 +448,7 @@ export const SettingsAIView: React.FC = () => {
               </p>
             </div>
             <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700">
-              6 Providers Available
+              {providers.filter(p => p.hasTokenConfigured).length} of {providers.length} Connected
             </span>
           </div>
 
@@ -222,6 +456,7 @@ export const SettingsAIView: React.FC = () => {
           <div className="space-y-3.5">
             {providers.map((p) => {
               const isActive = p.id === activeProviderId;
+              const isConnected = Boolean(p.hasTokenConfigured);
 
               return (
                 <div
@@ -274,27 +509,56 @@ export const SettingsAIView: React.FC = () => {
                       </div>
                     </div>
 
-                    {/* Controls: Sign In / Token Modal + Set Active */}
+                    {/* Controls: Sign In Button or Connected State + Set Active */}
                     <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
-                      <button
-                        onClick={() => handleOpenConnectModal(p)}
-                        className={`text-xs font-bold px-3 py-1.5 rounded-lg border flex items-center gap-1.5 transition-colors ${
-                          p.hasTokenConfigured
-                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100'
-                            : 'bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100'
-                        }`}
-                      >
-                        <Key className="w-3.5 h-3.5" />
-                        <span>{p.hasTokenConfigured ? 'Connected' : 'Sign In / Token'}</span>
-                      </button>
+                      {p.id === 'gemini' ? (
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-800 flex items-center gap-1.5">
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>Connected (API Key)</span>
+                          </span>
+                        </div>
+                      ) : isConnected ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-800 flex items-center gap-1.5">
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>Connected</span>
+                          </span>
+                          <button
+                            onClick={(e) => handleLogout(p.id, e)}
+                            title="Disconnect subscription"
+                            className="text-xs text-slate-400 hover:text-rose-600 p-1.5 rounded-lg hover:bg-slate-100 transition-colors"
+                          >
+                            <LogOut className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => handleOpenSignInModal(p)}
+                          className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-teal-50 border-[#0f8b8d]/30 text-[#00696b] hover:bg-[#0f8b8d]/10 flex items-center gap-1.5 transition-colors"
+                        >
+                          <Key className="w-3.5 h-3.5 text-[#0f8b8d]" />
+                          <span>
+                            {p.id === 'chatgpt' 
+                              ? 'Sign in with ChatGPT' 
+                              : p.id === 'claude' 
+                                ? 'Sign in with Claude' 
+                                : p.id === 'grok' 
+                                  ? 'Sign in with Grok' 
+                                  : 'Sign In / Connect'}
+                          </span>
+                        </button>
+                      )}
 
                       <button
                         onClick={() => handleSetActive(p.id)}
-                        disabled={isActive}
+                        disabled={isActive || (!isConnected && p.id !== 'gemini')}
                         className={`text-xs font-bold px-3 py-1.5 rounded-lg transition-all ${
                           isActive
                             ? 'bg-emerald-600 text-white cursor-default'
-                            : 'bg-[#001432] hover:bg-[#13294b] text-white active:scale-95'
+                            : isConnected || p.id === 'gemini'
+                              ? 'bg-[#001432] hover:bg-[#13294b] text-white active:scale-95'
+                              : 'bg-slate-200 text-slate-400 cursor-not-allowed'
                         }`}
                       >
                         {isActive ? 'Active' : 'Use Engine'}
@@ -308,123 +572,251 @@ export const SettingsAIView: React.FC = () => {
         </div>
       </div>
 
-      {/* Sign-In & Token Modal Popup */}
-      {selectedModalProvider && (
+      {/* Interactive OAuth Sign-In Modal */}
+      {selectedProvider && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            {/* Modal Header */}
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-xl bg-[#001432] text-white flex items-center justify-center font-bold text-sm">
-                  {selectedModalProvider.name.charAt(0)}
+                  {selectedProvider.name.charAt(0)}
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-slate-900">
-                    Connect {selectedModalProvider.name}
+                    {selectedProvider.id === 'gemini' 
+                      ? 'Gemini API Key Status'
+                      : `Sign in with ${selectedProvider.name}`}
                   </h3>
-                  <p className="text-xs text-slate-500">Enter API key or subscription session token</p>
+                  <p className="text-xs text-slate-500">
+                    {selectedProvider.id === 'claude' 
+                      ? 'PKCE Browser Authorization Flow' 
+                      : selectedProvider.id === 'gemini'
+                        ? 'Server Environment Authentication'
+                        : 'Device Authorization Flow (RFC 8628)'}
+                  </p>
                 </div>
               </div>
               <button
-                onClick={() => setSelectedModalProvider(null)}
+                onClick={handleCloseModal}
                 className="p-1 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-700"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Auth Type Tabs for Claude */}
-            {selectedModalProvider.id === 'claude' && (
-              <div className="flex items-center gap-2 p-1 bg-slate-100 rounded-xl text-xs font-semibold">
-                <button
-                  onClick={() => setInputAuthType('session_token')}
-                  className={`flex-1 py-1.5 rounded-lg transition-all ${
-                    inputAuthType === 'session_token' ? 'bg-white shadow-xs text-slate-900' : 'text-slate-600'
-                  }`}
-                >
-                  Claude Pro Session Token (sessionKey)
-                </button>
-                <button
-                  onClick={() => setInputAuthType('api_key')}
-                  className={`flex-1 py-1.5 rounded-lg transition-all ${
-                    inputAuthType === 'api_key' ? 'bg-white shadow-xs text-slate-900' : 'text-slate-600'
-                  }`}
-                >
-                  Anthropic API Key (sk-ant-...)
-                </button>
+            {/* Error Message */}
+            {authError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-xl flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{authError}</span>
               </div>
             )}
 
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs font-bold text-slate-700 block mb-1">
-                  {selectedModalProvider.id === 'ollama' 
-                    ? 'Localhost Endpoint URL' 
-                    : inputAuthType === 'session_token' 
-                      ? 'Session Key / Subscription Token' 
-                      : 'API Key'}
-                </label>
-                <input
-                  type={inputToken.startsWith('http') ? 'text' : 'password'}
-                  value={inputToken}
-                  onChange={e => setInputToken(e.target.value)}
-                  placeholder={
-                    selectedModalProvider.id === 'claude' 
-                      ? (inputAuthType === 'session_token' ? 'sk-ant-sid01-...' : 'sk-ant-api03-...')
-                      : selectedModalProvider.id === 'chatgpt'
-                        ? 'sk-proj-...'
-                        : selectedModalProvider.id === 'grok'
-                          ? 'xai-...'
-                          : selectedModalProvider.id === 'ollama'
-                            ? 'http://127.0.0.1:11434'
-                            : 'AI Studio Key...'
-                  }
-                  className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
-                />
+            {/* Success Message */}
+            {authSuccess && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-xl flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span className="font-semibold">Successfully Connected to {selectedProvider.name}! Server token secured.</span>
               </div>
+            )}
 
-              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-[11px] text-slate-600 space-y-1">
-                <div className="flex items-center gap-1.5 font-semibold text-slate-800">
-                  <Lock className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Secure Client Sandbox Storage</span>
+            {/* Gemini View */}
+            {selectedProvider.id === 'gemini' && (
+              <div className="space-y-4 py-2">
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
+                  <div className="flex items-center gap-2 font-bold text-slate-800">
+                    <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                    <span>Gemini Native Engine Integration</span>
+                  </div>
+                  <p className="text-slate-600 leading-relaxed">
+                    Gemini 3.8 Flash connects via the server-side environment key (<code className="font-mono text-[#0f8b8d]">process.env.GEMINI_API_KEY</code>). All prompts and reasoning requests are proxied securely on the backend without browser client key exposure.
+                  </p>
                 </div>
-                <p>
-                  Tokens are saved solely in your local browser sandbox (`localStorage`). Zero cloud egress or secret exposure.
-                </p>
-              </div>
-            </div>
 
-            {verificationSuccess === true && (
-              <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 text-xs font-semibold flex items-center gap-2">
-                <Check className="w-4 h-4 text-emerald-600" />
-                <span>Connection verified! Latency: {selectedModalProvider.latencyMs}ms. Token saved.</span>
+                <div className="pt-2 flex justify-end">
+                  <button
+                    onClick={handleCloseModal}
+                    className="px-4 py-2 text-xs font-bold bg-[#001432] text-white rounded-xl hover:bg-[#13294b]"
+                  >
+                    Done
+                  </button>
+                </div>
               </div>
             )}
 
-            <div className="pt-2 flex items-center justify-end gap-2.5">
-              <button
-                onClick={() => setSelectedModalProvider(null)}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleVerifyAndSave}
-                disabled={isVerifying || !inputToken.trim()}
-                className="px-4 py-2 text-xs font-bold bg-[#001432] hover:bg-[#13294b] disabled:opacity-40 text-white rounded-xl flex items-center gap-1.5 transition-all"
-              >
-                {isVerifying ? (
+            {/* Device Code Flow for ChatGPT & Grok */}
+            {(selectedProvider.id === 'chatgpt' || selectedProvider.id === 'grok') && (
+              <div className="space-y-4">
+                {isLoadingFlow ? (
+                  <div className="py-8 flex flex-col items-center justify-center gap-2 text-slate-500 text-xs">
+                    <Activity className="w-5 h-5 animate-spin text-[#0f8b8d]" />
+                    <span>Requesting authorization code from server...</span>
+                  </div>
+                ) : deviceCodeData ? (
                   <>
-                    <Activity className="w-3.5 h-3.5 animate-spin" />
-                    <span>Verifying Ping...</span>
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-700 block">
+                        Step 1: Your One-Time Authorization Code
+                      </label>
+                      <div className="flex items-center justify-between p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
+                        <span className="font-mono text-xl font-extrabold tracking-wider text-[#001432]">
+                          {deviceCodeData.userCode}
+                        </span>
+                        <button
+                          onClick={handleCopyCode}
+                          className="px-3 py-1.5 text-xs font-semibold bg-white border border-slate-200 hover:border-slate-300 rounded-lg flex items-center gap-1.5 text-slate-700 transition-colors shadow-2xs"
+                        >
+                          {copied ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                              <span className="text-emerald-700 font-bold">Copied!</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5 text-slate-500" />
+                              <span>Copy Code</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-700 block">
+                        Step 2: Approve on {selectedProvider.name}
+                      </label>
+                      <a
+                        href={deviceCodeData.verificationUri}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="w-full py-2.5 px-4 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition-all shadow-xs"
+                      >
+                        <span>Open {selectedProvider.name} Approval Page</span>
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </a>
+                      <p className="text-[11px] text-slate-500 leading-relaxed">
+                        Sign in to your subscription in the opened tab, paste the code <strong className="font-mono text-slate-800">{deviceCodeData.userCode}</strong>, and click Approve.
+                      </p>
+                    </div>
+
+                    {/* Active Polling Status */}
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-2">
+                        <span className="relative flex h-2 w-2">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#0f8b8d] opacity-75" />
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-[#0f8b8d]" />
+                        </span>
+                        <span className="text-slate-600 font-medium">Waiting for authorization on provider...</span>
+                      </div>
+                      <span className="text-[11px] font-mono text-slate-400">Polling /api/oauth/poll</span>
+                    </div>
+
+                    {/* Action buttons */}
+                    <div className="pt-2 flex items-center justify-end gap-2.5">
+                      <button
+                        onClick={handleCloseModal}
+                        className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleCompleteDeviceCode}
+                        disabled={isVerifying}
+                        className="px-4 py-2 text-xs font-bold bg-[#001432] hover:bg-[#13294b] text-white rounded-xl flex items-center gap-1.5 transition-all shadow-xs"
+                      >
+                        {isVerifying ? (
+                          <>
+                            <Activity className="w-3.5 h-3.5 animate-spin" />
+                            <span>Verifying...</span>
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle2 className="w-3.5 h-3.5 text-[#8ff3f4]" />
+                            <span>I've Approved on Provider</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </>
-                ) : (
+                ) : null}
+              </div>
+            )}
+
+            {/* PKCE Browser URL Flow for Claude */}
+            {selectedProvider.id === 'claude' && (
+              <div className="space-y-4">
+                {isLoadingFlow ? (
+                  <div className="py-8 flex flex-col items-center justify-center gap-2 text-slate-500 text-xs">
+                    <Activity className="w-5 h-5 animate-spin text-[#0f8b8d]" />
+                    <span>Preparing Claude PKCE authorization URL...</span>
+                  </div>
+                ) : pkceData ? (
                   <>
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>Test & Save Subscription</span>
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-700 block">
+                        Step 1: Authorize on Anthropic Claude
+                      </label>
+                      <a
+                        href={pkceData.authUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="w-full py-2.5 px-4 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition-all shadow-xs"
+                      >
+                        <span>Open Claude Authorization Page</span>
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </a>
+                      <p className="text-[11px] text-slate-500 leading-relaxed">
+                        Log in with your Claude Pro or Team subscription in the new tab to approve access.
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-700 block">
+                        Step 2: Paste Approval Code or Callback URL
+                      </label>
+                      <input
+                        type="text"
+                        value={claudeInputCode}
+                        onChange={e => setClaudeInputCode(e.target.value)}
+                        placeholder="Paste code (e.g. claude_auth_code_... or full redirect URL)"
+                        className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                      />
+                      <p className="text-[11px] text-slate-400">
+                        The code is validated server-side using cryptographic S256 PKCE verification.
+                      </p>
+                    </div>
+
+                    {/* Action buttons */}
+                    <div className="pt-2 flex items-center justify-end gap-2.5">
+                      <button
+                        onClick={handleCloseModal}
+                        className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleCompleteClaudePKCE}
+                        disabled={isVerifying || !claudeInputCode.trim()}
+                        className="px-4 py-2 text-xs font-bold bg-[#001432] hover:bg-[#13294b] disabled:opacity-40 text-white rounded-xl flex items-center gap-1.5 transition-all shadow-xs"
+                      >
+                        {isVerifying ? (
+                          <>
+                            <Activity className="w-3.5 h-3.5 animate-spin" />
+                            <span>Verifying PKCE...</span>
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle2 className="w-3.5 h-3.5 text-[#8ff3f4]" />
+                            <span>Complete Claude Sign-In</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </>
-                )}
-              </button>
-            </div>
+                ) : null}
+              </div>
+            )}
           </div>
         </div>
       )}

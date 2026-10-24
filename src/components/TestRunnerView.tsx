@@ -22,13 +22,17 @@ import { INITIAL_QUESTIONS } from '../data/mockClinicalData.ts';
 interface TestRunnerViewProps {
   initialQuestionId?: string;
   onNavigate: (view: AppView, targetId?: string) => void;
+  questions?: ClinicalQuestion[];
 }
 
 export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
   initialQuestionId,
   onNavigate,
+  questions: propQuestions,
 }) => {
-  const [questions, setQuestions] = useState<ClinicalQuestion[]>(INITIAL_QUESTIONS);
+  const [questions, setQuestions] = useState<ClinicalQuestion[]>(
+    propQuestions && propQuestions.length > 0 ? propQuestions : INITIAL_QUESTIONS
+  );
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [userAnswers, setUserAnswers] = useState<Record<string, 'A' | 'B' | 'C' | 'D' | 'E'>>({
     'Q10': 'B',
@@ -36,6 +40,14 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
   const [flaggedIds, setFlaggedIds] = useState<Record<string, boolean>>({});
   const [showExplanation, setShowExplanation] = useState<boolean>(true);
   const [secondsElapsed, setSecondsElapsed] = useState<number>(866);
+
+  // Sync questions if prop changes
+  useEffect(() => {
+    if (propQuestions && propQuestions.length > 0) {
+      setQuestions(propQuestions);
+      setCurrentIndex(0);
+    }
+  }, [propQuestions]);
 
   // AMC CAT Adaptive State
   const [adaptiveTheta, setAdaptiveTheta] = useState<number>(268); // Out of 500
