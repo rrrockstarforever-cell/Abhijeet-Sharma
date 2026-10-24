@@ -18,7 +18,84 @@ import {
   Radio
 } from 'lucide-react';
 import { AIProvider } from '../types.ts';
-import { MOCK_AI_PROVIDERS } from '../data/mockClinicalData.ts';
+import {
+  AI_PROVIDER_IDS,
+  DEFAULT_MODELS,
+  NOT_CONNECTED_MESSAGE,
+  getActiveProvider,
+  setActiveProvider as persistActiveProvider,
+  pickDefaultActiveProvider,
+  getModel,
+  setModel as persistModel,
+  getEffectiveModel,
+} from '../lib/ai.ts';
+import { DataBackupPanel } from './DataBackupPanel.tsx';
+
+// Local provider catalog for the 4 REAL providers (no mock latency/verified numbers).
+// Connection state is always fetched live from GET /api/oauth/status.
+const REAL_PROVIDERS: AIProvider[] = [
+  {
+    id: 'gemini',
+    name: 'Gemini (Google AI)',
+    brand: 'google',
+    model: DEFAULT_MODELS.gemini,
+    status: 'ready',
+    type: 'API Key (user-supplied)',
+    features: ['API Key in Settings', 'Flash & Pro models'],
+    isDefault: true,
+    isSignedIn: false,
+    hasTokenConfigured: false,
+    availableModels: [
+      { id: DEFAULT_MODELS.gemini, name: 'Gemini 3.8 Flash', description: 'Default fast model', latencyEstimate: '—', contextWindow: '—' },
+      { id: 'gemini-3.8-pro', name: 'Gemini 3.8 Pro', description: 'Deep reasoning', latencyEstimate: '—', contextWindow: '—' },
+    ]
+  },
+  {
+    id: 'chatgpt',
+    name: 'ChatGPT (OpenAI Subscription)',
+    brand: 'openai',
+    model: DEFAULT_MODELS.chatgpt,
+    status: 'ready',
+    type: 'Device Code Sign-In',
+    features: ['Device Code Sign-In', 'Subscription Tokens'],
+    isDefault: false,
+    isSignedIn: false,
+    hasTokenConfigured: false,
+    availableModels: [
+      { id: DEFAULT_MODELS.chatgpt, name: 'GPT 6.1 Sol (Default)', description: 'Current default', latencyEstimate: '—', contextWindow: '—' },
+    ]
+  },
+  {
+    id: 'claude',
+    name: 'Claude (Anthropic Subscription)',
+    brand: 'anthropic',
+    model: DEFAULT_MODELS.claude,
+    status: 'ready',
+    type: 'PKCE Sign-In (paste code)',
+    features: ['Paste-Code Sign-In', 'Subscription Tokens'],
+    isDefault: false,
+    isSignedIn: false,
+    hasTokenConfigured: false,
+    availableModels: [
+      { id: DEFAULT_MODELS.claude, name: 'Claude Sonnet 5.5 (Default)', description: 'Current default', latencyEstimate: '—', contextWindow: '—' },
+    ]
+  },
+  {
+    id: 'grok',
+    name: 'Grok (xAI SuperGrok)',
+    brand: 'xai',
+    model: DEFAULT_MODELS.grok,
+    status: 'ready',
+    type: 'Device Code Sign-In',
+    features: ['Device Code Sign-In', 'Subscription Tokens'],
+    isDefault: false,
+    isSignedIn: false,
+    hasTokenConfigured: false,
+    availableModels: [
+      { id: DEFAULT_MODELS.grok, name: 'Grok 4.7 (Default)', description: 'Current default', latencyEstimate: '—', contextWindow: '—' },
+    ]
+  },
+];
 
 function getClientSessionId(): string {
   let sid = localStorage.getItem('pulse_session_id');
@@ -30,11 +107,13 @@ function getClientSessionId(): string {
 }
 
 export const SettingsAIView: React.FC = () => {
-  const [providers, setProviders] = useState<AIProvider[]>(MOCK_AI_PROVIDERS);
-  const [activeProviderId, setActiveProviderId] = useState<string>('gemini');
-  const [simdThreads, setSimdThreads] = useState<number>(12); // 12 workers default
-  const [cacheMemoryMB, setCacheMemoryMB] = useState<number>(512);
-  const [fp16Quantization, setFp16Quantization] = useState<boolean>(true);
+  const [providers, setProviders] = useState<AIProvider[]>(REAL_PROVIDERS);
+  const [activeProviderId, setActiveProviderId] = useState<string>(() => getActiveProvider() ?? 'gemini');
+  const [models, setModels] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {};
+    REAL_PROVIDERS.forEach(p => { initial[p.id] = getEffectiveModel(p.id as any); });
+    return initial;
+  });
   
   // Real OAuth Sign-In Modal State
   const [selectedProvider, setSelectedProvider] = useState<AIProvider | null>(null);
@@ -56,9 +135,56 @@ export const SettingsAIView: React.FC = () => {
   const [authSuccess, setAuthSuccess] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
 
+  // Gemini API key state (the one provider that uses a key)
+  const [geminiKeyInput, setGeminiKeyInput] = useState<string>('');
+  const [isSavingKey, setIsSavingKey] = useState<boolean>(false);
+  const [keySavedMsg, setKeySavedMsg] = useState<string | null>(null);
+
+  // Optional live model catalog (models.dev via the local server) — suggestions only,
+  // any model id can still be typed manually.
+  const [modelCatalog, setModelCatalog] = useState<Record<string, { id: string; name: string; context: number | null; released: string | null }[]>>({});
+  const [catalogInfo, setCatalogInfo] = useState<{ busy: boolean; error: string | null; at: string | null }>({
+    busy: false, error: null, at: null,
+  });
+
+  // The models THIS account may actually use, asked of each provider with its own
+  // token (GET /api/models/available). The models.dev catalogue above is not
+  // account-aware, so it suggests ids a subscription login cannot call.
+  const [accountModels, setAccountModels] = useState<Record<string, { id: string; name: string }[]>>({});
+  const [accountErrors, setAccountErrors] = useState<Record<string, string>>({});
+  const [accountBusy, setAccountBusy] = useState<boolean>(false);
+
+  const loadModelCatalog = async () => {
+    setCatalogInfo((s) => ({ ...s, busy: true, error: null }));
+    try {
+      const res = await fetch('/api/models/catalog');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${res.status}`);
+      setModelCatalog(data.providers ?? {});
+      setCatalogInfo({ busy: false, error: null, at: typeof data.fetchedAt === 'string' ? data.fetchedAt : new Date().toISOString() });
+    } catch (err: any) {
+      setCatalogInfo({ busy: false, error: err?.message || 'Could not load the live model catalog.', at: null });
+    }
+  };
+
+  const loadAccountModels = async () => {
+    setAccountBusy(true);
+    try {
+      const res = await fetch('/api/models/available');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${res.status}`);
+      setAccountModels(data.providers ?? {});
+      setAccountErrors(data.errors ?? {});
+    } catch (err: any) {
+      setAccountErrors({ _global: err?.message || 'Could not list the models on your account.' });
+    } finally {
+      setAccountBusy(false);
+    }
+  };
+
   const pollTimerRef = useRef<any>(null);
 
-  // Poll or fetch status on mount to display real server connection state
+  // Fetch REAL connection state from the server on mount / active change
   const fetchOAuthStatus = async () => {
     try {
       const res = await fetch('/api/oauth/status', {
@@ -71,18 +197,27 @@ export const SettingsAIView: React.FC = () => {
         if (data.providers) {
           setProviders(prev => prev.map(p => {
             const providerStatus = data.providers[p.id];
-            if (providerStatus) {
-              const isConn = Boolean(providerStatus.connected);
-              return {
-                ...p,
-                hasTokenConfigured: isConn,
-                status: isConn ? (p.id === activeProviderId ? 'active' : 'connected') : 'ready',
-                userEmail: providerStatus.userEmail || p.userEmail
-              };
-            }
-            return p;
+            const isConn = Boolean(providerStatus?.connected);
+            return {
+              ...p,
+              hasTokenConfigured: isConn,
+              status: isConn ? (p.id === activeProviderId ? 'active' : 'connected') : 'ready',
+              userEmail: providerStatus?.userEmail || undefined
+            };
           }));
+
+          // First-run default: active provider = first connected provider
+          const persisted = getActiveProvider();
+          if (!persisted) {
+            const firstConnected = pickDefaultActiveProvider(data.providers);
+            if (firstConnected) {
+              setActiveProviderId(firstConnected);
+              persistActiveProvider(firstConnected);
+            }
+          }
         }
+      } else if (res.status !== 200) {
+        console.error('OAuth status fetch failed:', res.status);
       }
     } catch (err) {
       console.error('Error fetching OAuth status:', err);
@@ -93,6 +228,25 @@ export const SettingsAIView: React.FC = () => {
     fetchOAuthStatus();
   }, [activeProviderId]);
 
+  useEffect(() => {
+    loadModelCatalog();
+    loadAccountModels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Refresh the account lists when a provider's connection state changes.
+  // Derived as a string so the effect only re-runs when the set actually changes.
+  const connectedProviderKey = providers
+    .filter((p) => p.hasTokenConfigured)
+    .map((p) => p.id)
+    .sort()
+    .join(',');
+
+  useEffect(() => {
+    loadAccountModels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProviderId, connectedProviderKey]);
+
   // Clean up polling timer on unmount
   useEffect(() => {
     return () => {
@@ -100,23 +254,25 @@ export const SettingsAIView: React.FC = () => {
     };
   }, []);
 
-  // Initiate OAuth Sign-In
+  // Initiate OAuth Sign-In (real device-code / PKCE flows from the server)
   const handleOpenSignInModal = async (provider: AIProvider) => {
     setSelectedProvider(provider);
     setAuthError(null);
     setAuthSuccess(false);
+    setKeySavedMsg(null);
     setCopied(false);
     setClaudeInputCode('');
     setDeviceCodeData(null);
     setPkceData(null);
-    setIsLoadingFlow(true);
-
-    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
 
     if (provider.id === 'gemini') {
+      // Gemini uses a user-pasted API key handled inside the modal.
       setIsLoadingFlow(false);
       return;
     }
+
+    setIsLoadingFlow(true);
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
 
     try {
       const res = await fetch('/api/oauth/start', {
@@ -128,11 +284,12 @@ export const SettingsAIView: React.FC = () => {
         body: JSON.stringify({ provider: provider.id })
       });
 
+      const data = await res.json().catch(() => ({}));
+
       if (!res.ok) {
-        throw new Error(`Failed to start ${provider.name} sign-in flow.`);
+        throw new Error(data?.error || `Failed to start ${provider.name} sign-in flow.`);
       }
 
-      const data = await res.json();
       setIsLoadingFlow(false);
 
       if (data.flow === 'device_code') {
@@ -140,14 +297,16 @@ export const SettingsAIView: React.FC = () => {
           userCode: data.userCode,
           verificationUri: data.verificationUri,
           deviceCode: data.deviceCode,
-          interval: data.interval || 2
+          interval: data.interval || 5
         });
-        startDeviceCodePolling(provider.id, data.deviceCode);
+        startDeviceCodePolling(provider.id, data.deviceCode, data.interval || 5);
       } else if (data.flow === 'pkce') {
         setPkceData({
           authUrl: data.authUrl,
           state: data.state
         });
+      } else {
+        throw new Error('Unexpected sign-in flow response.');
       }
     } catch (err: any) {
       setIsLoadingFlow(false);
@@ -155,10 +314,11 @@ export const SettingsAIView: React.FC = () => {
     }
   };
 
-  // Device Code Polling: polls /api/oauth/poll every 2 seconds
-  const startDeviceCodePolling = (providerId: string, deviceCode: string) => {
+  // Device Code Polling: polls /api/oauth/poll using the provider-provided interval
+  const startDeviceCodePolling = (providerId: string, deviceCode: string, intervalSeconds: number) => {
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     setIsPolling(true);
+    const pollEveryMs = Math.max(2, intervalSeconds || 3) * 1000;
 
     pollTimerRef.current = setInterval(async () => {
       try {
@@ -185,15 +345,19 @@ export const SettingsAIView: React.FC = () => {
             clearInterval(pollTimerRef.current);
             setIsPolling(false);
             setAuthError('Device authorization code has expired. Please restart sign-in.');
+          } else if (data.status === 'error') {
+            clearInterval(pollTimerRef.current);
+            setIsPolling(false);
+            setAuthError(data?.error || 'Authorization failed. Please restart sign-in.');
           }
         }
       } catch (err) {
         console.error('Polling error:', err);
       }
-    }, 2000);
+    }, pollEveryMs);
   };
 
-  // Manual approval trigger for device code
+  // Verify device approval against the real provider via /api/oauth/complete
   const handleCompleteDeviceCode = async () => {
     if (!selectedProvider || !deviceCodeData) return;
     setIsVerifying(true);
@@ -212,8 +376,10 @@ export const SettingsAIView: React.FC = () => {
         })
       });
 
+      const data = await res.json().catch(() => ({}));
+
       if (!res.ok) {
-        throw new Error('Device approval completion failed.');
+        throw new Error(data?.error || 'Not approved yet. Approve the code on the provider page, then click Verify again.');
       }
 
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
@@ -230,9 +396,9 @@ export const SettingsAIView: React.FC = () => {
     }
   };
 
-  // Complete Claude PKCE by pasting approval code
+  // Complete Claude PKCE by pasting the approval code (validated with real PKCE on the server)
   const handleCompleteClaudePKCE = async () => {
-    if (!selectedProvider || !claudeInputCode.trim()) return;
+    if (!selectedProvider || !claudeInputCode.trim() || !pkceData) return;
     setIsVerifying(true);
     setAuthError(null);
 
@@ -246,12 +412,14 @@ export const SettingsAIView: React.FC = () => {
         body: JSON.stringify({
           provider: 'claude',
           code: claudeInputCode.trim(),
-          state: pkceData?.state
+          state: pkceData.state
         })
       });
 
+      const data = await res.json().catch(() => ({}));
+
       if (!res.ok) {
-        throw new Error('Failed to verify Claude authorization code.');
+        throw new Error(data?.error || 'Failed to verify Claude authorization code.');
       }
 
       setIsVerifying(false);
@@ -266,7 +434,35 @@ export const SettingsAIView: React.FC = () => {
     }
   };
 
-  // Revoke token on server
+  // Save the Gemini API key (server stores it in the user's data dir, never in the repo)
+  const handleSaveGeminiKey = async () => {
+    const key = geminiKeyInput.trim();
+    if (!key) return;
+    setIsSavingKey(true);
+    setAuthError(null);
+    try {
+      const res = await fetch('/api/settings/gemini-key', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-session-id': getClientSessionId()
+        },
+        body: JSON.stringify({ apiKey: key })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || 'Could not save the API key.');
+      setKeySavedMsg('API key saved and active. Gemini is now connected.');
+      setGeminiKeyInput('');
+      await fetchOAuthStatus();
+      setTimeout(() => setSelectedProvider(null), 1200);
+    } catch (err: any) {
+      setAuthError(err.message || 'Could not save the API key.');
+    } finally {
+      setIsSavingKey(false);
+    }
+  };
+
+  // Revoke subscription tokens on the server (real logout of stored tokens)
   const handleLogout = async (providerId: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     try {
@@ -295,18 +491,62 @@ export const SettingsAIView: React.FC = () => {
     }
   };
 
-  const handleSetActive = (providerId: string) => {
-    setActiveProviderId(providerId);
-    setProviders(prev => prev.map(p => ({
-      ...p,
-      isDefault: p.id === providerId,
-      status: p.id === providerId ? 'active' : p.hasTokenConfigured ? 'connected' : 'ready'
-    })));
+  // Set Active: persists to localStorage and is only allowed for connected providers
+  const handleSetActive = (provider: AIProvider) => {
+    if (!provider.hasTokenConfigured) {
+      setAuthError(null);
+      return;
+    }
+    setActiveProviderId(provider.id);
+    persistActiveProvider(provider.id as any);
+  };
+
+  const handleModelChange = (providerId: string, model: string) => {
+    setModels(prev => ({ ...prev, [providerId]: model }));
+    persistModel(providerId as any, model);
+  };
+
+  // Real "Test connection": sends "Reply with exactly: OK" through the provider and
+  // verifies the exact response (same behaviour as the old app's model check).
+  const [testState, setTestState] = useState<{
+    id: string;
+    status: 'busy' | 'ok' | 'fail';
+    detail: string | null;
+  } | null>(null);
+
+  const handleTestConnection = async (providerId: string) => {
+    if (testState?.status === 'busy') return;
+    setTestState({ id: providerId, status: 'busy', detail: null });
+    try {
+      const res = await fetch('/api/ai/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: providerId,
+          model: models[providerId] || getEffectiveModel(providerId as any),
+          messages: [{ role: 'user', content: 'Reply with exactly: OK' }],
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Request failed (HTTP ${res.status}).`);
+      const text = typeof data?.text === 'string' ? data.text.trim() : '';
+      if (text === 'OK') {
+        setTestState({ id: providerId, status: 'ok', detail: null });
+      } else {
+        setTestState({ id: providerId, status: 'fail', detail: `Unexpected reply: ${text.slice(0, 60) || '(empty)'}` });
+      }
+    } catch (err: any) {
+      setTestState({ id: providerId, status: 'fail', detail: err?.message || 'Test request failed.' });
+    } finally {
+      setTimeout(() => setTestState(null), 6000);
+    }
   };
 
   const handleCloseModal = () => {
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     setIsPolling(false);
+    setKeySavedMsg(null);
+    setGeminiKeyInput('');
     setSelectedProvider(null);
   };
 
@@ -320,118 +560,76 @@ export const SettingsAIView: React.FC = () => {
           <div>
             <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-[#0f8b8d]/20 text-[#8ff3f4] text-xs font-semibold uppercase tracking-wider mb-2 border border-[#0f8b8d]/30">
               <Cpu className="w-3.5 h-3.5" />
-              SIMD Parallel Engine & AI Subscription Gateway
+              AI Subscription & Model Routing
             </div>
             <h1 className="text-2xl font-bold tracking-tight text-white">
-              AI Subscriptions, Model Tokens & OCR Architecture
+              AI Subscriptions, Model Tokens & Local Engine
             </h1>
             <p className="text-slate-300 text-sm mt-1 max-w-2xl">
-              Sign in with your Claude Pro, ChatGPT Plus, Gemini, or Grok subscription tokens, and calibrate the 10–16 thread parallel SIMD OCR engine for medical PDFs.
+              Sign in with your Claude Pro, ChatGPT Plus, or Grok subscription, or add your Gemini API key — then route every AI feature through your active model.
             </p>
           </div>
 
           <div className="flex items-center gap-3">
             <div className="px-3 py-1.5 rounded-xl bg-slate-800/80 border border-slate-700 text-xs font-mono text-emerald-400 flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              Engine Online · WASM SIMD 128-bit
+              Local Server Routing · Tokens Never Leave This Machine
             </div>
           </div>
         </div>
       </div>
 
-      {/* Grid: Left SIMD OCR Settings, Right Provider Cards with Sign-In */}
+      {/* Grid: Left Info/Security, Right Provider Cards with Sign-In */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: SIMD Parallel OCR Architecture */}
+        {/* Left Column: Server-Keyed Security & Model Routing Info */}
         <div className="lg:col-span-5 space-y-6">
           <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-5">
             <div className="flex items-center justify-between border-b border-slate-100 pb-4">
               <div>
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <Cpu className="w-4 h-4 text-[#0f8b8d]" /> High-Speed SIMD OCR Engine
+                  <Radio className="w-4 h-4 text-[#0f8b8d]" /> Active Engine & Model Routing
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Multi-worker WebAssembly acceleration for PDF books
+                  Every AI feature uses the active provider and model below
                 </p>
               </div>
               <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
-                ACTIVE
+                LIVE
               </span>
             </div>
 
-            {/* Hardware Thread Allocation (10-16 Workers) */}
-            <div>
-              <div className="flex justify-between items-center text-xs font-semibold text-slate-700 mb-2">
-                <span>Parallel OCR Worker Threads</span>
-                <span className="font-mono text-[#0f8b8d] font-bold">{simdThreads} Workers</span>
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-slate-500 font-semibold">Active Provider:</span>
+                <span className="font-mono font-bold text-[#0f8b8d] truncate max-w-[60%] text-right">
+                  {activeProviderId} · {models[activeProviderId] || getEffectiveModel(activeProviderId as any)}
+                </span>
               </div>
-              <input
-                type="range"
-                min={8}
-                max={16}
-                value={simdThreads}
-                onChange={e => setSimdThreads(Number(e.target.value))}
-                className="w-full accent-[#0f8b8d] cursor-pointer"
-              />
-              <div className="flex justify-between text-[10px] text-slate-400 mt-1 font-mono">
-                <span>8 Threads</span>
-                <span className="text-[#0f8b8d] font-bold">12 Threads (Recommended)</span>
-                <span>16 Threads (Max Speed)</span>
-              </div>
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                The active engine is used by the AI Tutor, Practice Module Builder, and any other AI action. Change it with “Use Engine” on any connected provider card.
+              </p>
             </div>
 
-            {/* RAM Cache Allocation */}
-            <div>
-              <div className="flex justify-between items-center text-xs font-semibold text-slate-700 mb-2">
-                <span>Vector Embedding LRU Cache</span>
-                <span className="font-mono text-[#0f8b8d] font-bold">{cacheMemoryMB} MB</span>
-              </div>
-              <input
-                type="range"
-                min={128}
-                max={1024}
-                step={64}
-                value={cacheMemoryMB}
-                onChange={e => setCacheMemoryMB(Number(e.target.value))}
-                className="w-full accent-[#0f8b8d] cursor-pointer"
-              />
-            </div>
-
-            {/* Toggles */}
-            <div className="pt-2 space-y-3 border-t border-slate-100">
-              <label className="flex items-center justify-between cursor-pointer">
-                <div>
-                  <div className="text-xs font-semibold text-slate-800">FP16 Weight Quantization</div>
-                  <div className="text-[11px] text-slate-500">Accelerates OCR indexing with 50% less RAM</div>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={fp16Quantization}
-                  onChange={e => setFp16Quantization(e.target.checked)}
-                  className="w-4 h-4 rounded text-[#0f8b8d] focus:ring-[#0f8b8d] cursor-pointer"
-                />
-              </label>
-            </div>
-
-            {/* Diagnostic stats */}
+            {/* Privacy note */}
             <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-2">
               <div className="flex justify-between text-[11px]">
-                <span className="text-slate-500">Processing Speed:</span>
-                <span className="font-mono font-medium text-emerald-600">~{Math.round(simdThreads * 1.55)} pages / sec</span>
+                <span className="text-slate-500">Subscription tokens stored:</span>
+                <span className="font-mono font-medium text-slate-800">~\.neet-pg-prep\oauth.json (local only)</span>
               </div>
               <div className="flex justify-between text-[11px]">
-                <span className="text-slate-500">Indexed Medical Passages:</span>
-                <span className="font-mono font-medium text-slate-800">4,820 chunks (42 textbooks)</span>
+                <span className="text-slate-500">Gemini key stored:</span>
+                <span className="font-mono font-medium text-slate-800">user data dir \.env</span>
               </div>
             </div>
           </div>
 
-          {/* HIPAA & Privacy Guard */}
+          {/* Privacy Guard */}
           <div className="bg-slate-900 rounded-2xl p-5 text-white border border-slate-800 shadow-sm space-y-3">
             <div className="flex items-center gap-2 text-xs font-bold text-emerald-400 uppercase tracking-wider">
               <ShieldCheck className="w-4 h-4" /> Server-Keyed Session Security
             </div>
             <p className="text-xs text-slate-300 leading-relaxed">
-              Tokens live strictly on the server keyed to your user session. They are never returned to the browser and never committed to repository storage.
+              Subscription tokens and your Gemini key live only on this machine, managed by the local server. They are never returned to the browser and never committed to repository storage.
             </p>
           </div>
         </div>
@@ -444,7 +642,7 @@ export const SettingsAIView: React.FC = () => {
                 <Sparkles className="w-4 h-4 text-amber-500" /> AI Subscription Hub & Model Routing
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Sign in with your Claude, ChatGPT, Gemini, or Grok subscription
+                Sign in with your Claude, ChatGPT, or Grok subscription — or paste a Gemini API key
               </p>
             </div>
             <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700">
@@ -452,11 +650,51 @@ export const SettingsAIView: React.FC = () => {
             </span>
           </div>
 
+          {/* Live model catalog status (models.dev) */}
+          <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[10px] text-slate-500">
+            <span>
+              {catalogInfo.error
+                ? `Live catalog unavailable — static suggestions shown (${catalogInfo.error})`
+                : catalogInfo.at
+                  ? `Live model catalog loaded ${new Date(catalogInfo.at).toLocaleString()} · ${Object.values(modelCatalog).reduce((n, list) => n + list.length, 0)} models`
+                  : 'Loading live model catalog…'}
+            </span>
+            <button
+              onClick={loadModelCatalog}
+              disabled={catalogInfo.busy}
+              className="font-bold text-[#0f8b8d] hover:underline disabled:opacity-40"
+            >
+              {catalogInfo.busy ? 'Refreshing…' : 'Refresh catalog'}
+            </button>
+          </div>
+
           {/* Providers List */}
           <div className="space-y-3.5">
             {providers.map((p) => {
               const isActive = p.id === activeProviderId;
               const isConnected = Boolean(p.hasTokenConfigured);
+              const catalogModels = modelCatalog[p.id] ?? [];
+              const liveAccountModels = accountModels[p.id] ?? [];
+              const accountError = accountErrors[p.id];
+              const selectedModelId = models[p.id] ?? p.model;
+              const selectedMeta = catalogModels.find((m) => m.id === selectedModelId);
+              // NEW / OLD badge from the models.dev release date (only when known).
+              const releaseBadge: 'NEW' | 'OLD' | null = (() => {
+                const released = selectedMeta?.released ? Date.parse(selectedMeta.released) : NaN;
+                if (!Number.isFinite(released)) return null;
+                const days = (Date.now() - released) / 86_400_000;
+                return days <= 120 ? 'NEW' : days >= 540 ? 'OLD' : null;
+              })();
+              // Prefer what THIS account can really call; the public catalogue is only
+              // a fallback, and static defaults only if the live list is unavailable.
+              const suggestions = liveAccountModels.length
+                ? liveAccountModels.map((m) => ({ id: m.id, label: m.name || m.id }))
+                : catalogModels.length
+                  ? catalogModels.map((m) => ({
+                      id: m.id,
+                      label: `${m.name}${m.context ? ` · ${Math.round(m.context / 1000)}k context` : ''}`,
+                    }))
+                  : p.availableModels.map((m) => ({ id: m.id, label: m.name }));
 
               return (
                 <div
@@ -476,22 +714,59 @@ export const SettingsAIView: React.FC = () => {
                             ? 'bg-gradient-to-br from-amber-600 to-orange-700 text-white'
                             : p.id === 'chatgpt'
                               ? 'bg-gradient-to-br from-emerald-600 to-teal-800 text-white'
-                              : p.id === 'grok'
-                                ? 'bg-gradient-to-br from-slate-800 to-black text-white'
-                                : p.id === 'deepseek'
-                                  ? 'bg-gradient-to-br from-blue-500 to-cyan-600 text-white'
-                                  : 'bg-slate-700 text-white'
+                              : 'bg-gradient-to-br from-slate-800 to-black text-white'
                       }`}>
                         {p.name.charAt(0)}
                       </div>
 
-                      <div>
+                      <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
                           <h4 className="text-sm font-bold text-slate-900">{p.name}</h4>
-                          <span className="text-xs font-mono text-slate-500 font-medium">({p.model})</span>
                           {isActive && (
                             <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1">
                               <CheckCircle2 className="w-3 h-3" /> ACTIVE ENGINE
+                            </span>
+                          )}
+                          {isConnected ? (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              Connected
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 border border-slate-200">
+                              Not connected
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Per-provider model selector (persisted, user-selectable) */}
+                        <div className="flex items-center gap-2 mt-2">
+                          <label className="text-[11px] text-slate-500 font-semibold">Model</label>
+                          <input
+                            type="text"
+                            value={models[p.id] ?? p.model}
+                            onChange={(e) => handleModelChange(p.id, e.target.value)}
+                            className="w-52 text-[11px] font-mono px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                            list={`models-${p.id}`}
+                            placeholder={p.model}
+                          />
+                          <datalist id={`models-${p.id}`}>
+                            {suggestions.map((m) => (
+                              <option key={m.id} value={m.id}>{m.label}</option>
+                            ))}
+                          </datalist>
+                          <span className="text-[9px] font-mono text-slate-400 max-w-[130px] truncate" title={selectedMeta?.released ? `Released ${selectedMeta.released}` : undefined}>
+                            {selectedMeta?.context ? `${Math.round(selectedMeta.context / 1000)}k ctx` : 'any model id'}
+                          </span>
+                          {releaseBadge && (
+                            <span
+                              className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+                                releaseBadge === 'NEW'
+                                  ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                                  : 'bg-slate-100 border-slate-200 text-slate-500'
+                              }`}
+                              title={selectedMeta?.released ? `Released ${selectedMeta.released}` : undefined}
+                            >
+                              {releaseBadge}
                             </span>
                           )}
                         </div>
@@ -513,10 +788,30 @@ export const SettingsAIView: React.FC = () => {
                     <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
                       {p.id === 'gemini' ? (
                         <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-800 flex items-center gap-1.5">
-                            <Check className="w-3.5 h-3.5 text-emerald-600" />
-                            <span>Connected (API Key)</span>
+                          <span className={`text-xs font-bold px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+                            isConnected
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                              : 'bg-slate-50 border-slate-200 text-slate-500'
+                          }`}>
+                            {isConnected ? (
+                              <>
+                                <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                <span>Key Saved</span>
+                              </>
+                            ) : (
+                              <>
+                                <Key className="w-3.5 h-3.5 text-slate-400" />
+                                <span>No Key</span>
+                              </>
+                            )}
                           </span>
+                          <button
+                            onClick={() => handleOpenSignInModal(p)}
+                            className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 hover:text-[#0f8b8d] flex items-center gap-1.5 transition-colors"
+                          >
+                            <Key className="w-3.5 h-3.5 text-[#0f8b8d]" />
+                            <span>{isConnected ? 'Update Key' : 'Add API Key'}</span>
+                          </button>
                         </div>
                       ) : isConnected ? (
                         <div className="flex items-center gap-1.5">
@@ -543,20 +838,50 @@ export const SettingsAIView: React.FC = () => {
                               ? 'Sign in with ChatGPT' 
                               : p.id === 'claude' 
                                 ? 'Sign in with Claude' 
-                                : p.id === 'grok' 
-                                  ? 'Sign in with Grok' 
-                                  : 'Sign In / Connect'}
+                                : 'Sign in with Grok'}
+                          </span>
+                        </button>
+                      )}
+
+                      {isConnected && (
+                        <button
+                          onClick={() => handleTestConnection(p.id)}
+                          disabled={testState?.status === 'busy' && testState.id === p.id}
+                          title={testState?.id === p.id && testState.status === 'fail'
+                            ? `Test failed: ${testState.detail ?? 'unknown error'}`
+                            : 'Send "Reply with exactly: OK" through this provider'}
+                          className={`text-xs font-bold px-3 py-1.5 rounded-lg border transition-colors flex items-center gap-1.5 ${
+                            testState?.id === p.id && testState.status === 'ok'
+                              ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                              : testState?.id === p.id && testState.status === 'fail'
+                                ? 'bg-rose-50 border-rose-300 text-rose-800'
+                                : 'bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 hover:text-[#0f8b8d]'
+                          }`}
+                        >
+                          {testState?.id === p.id && testState.status === 'busy' ? (
+                            <Activity className="w-3.5 h-3.5 animate-spin" />
+                          ) : testState?.id === p.id && testState.status === 'ok' ? (
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                          ) : (
+                            <Activity className="w-3.5 h-3.5 text-slate-400" />
+                          )}
+                          <span>
+                            {testState?.id === p.id && testState.status === 'ok'
+                              ? 'OK'
+                              : testState?.id === p.id && testState.status === 'fail'
+                                ? 'Failed'
+                                : 'Test'}
                           </span>
                         </button>
                       )}
 
                       <button
-                        onClick={() => handleSetActive(p.id)}
-                        disabled={isActive || (!isConnected && p.id !== 'gemini')}
+                        onClick={() => handleSetActive(p)}
+                        disabled={isActive || !isConnected}
                         className={`text-xs font-bold px-3 py-1.5 rounded-lg transition-all ${
                           isActive
                             ? 'bg-emerald-600 text-white cursor-default'
-                            : isConnected || p.id === 'gemini'
+                            : isConnected
                               ? 'bg-[#001432] hover:bg-[#13294b] text-white active:scale-95'
                               : 'bg-slate-200 text-slate-400 cursor-not-allowed'
                         }`}
@@ -572,6 +897,11 @@ export const SettingsAIView: React.FC = () => {
         </div>
       </div>
 
+      {/* Data & exports — real stores, versioned backup, merge import */}
+      <div className="mt-6">
+        <DataBackupPanel />
+      </div>
+
       {/* Interactive OAuth Sign-In Modal */}
       {selectedProvider && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
@@ -585,14 +915,14 @@ export const SettingsAIView: React.FC = () => {
                 <div>
                   <h3 className="text-base font-bold text-slate-900">
                     {selectedProvider.id === 'gemini' 
-                      ? 'Gemini API Key Status'
+                      ? 'Gemini API Key'
                       : `Sign in with ${selectedProvider.name}`}
                   </h3>
                   <p className="text-xs text-slate-500">
                     {selectedProvider.id === 'claude' 
-                      ? 'PKCE Browser Authorization Flow' 
+                      ? 'Paste-Code Authorization Flow' 
                       : selectedProvider.id === 'gemini'
-                        ? 'Server Environment Authentication'
+                        ? 'Key saved locally — never shown again'
                         : 'Device Authorization Flow (RFC 8628)'}
                   </p>
                 </div>
@@ -617,29 +947,66 @@ export const SettingsAIView: React.FC = () => {
             {authSuccess && (
               <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-xl flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span className="font-semibold">Successfully Connected to {selectedProvider.name}! Server token secured.</span>
+                <span className="font-semibold">Successfully Connected to {selectedProvider.name}!</span>
               </div>
             )}
 
-            {/* Gemini View */}
+            {keySavedMsg && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-xl flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span className="font-semibold">{keySavedMsg}</span>
+              </div>
+            )}
+
+            {/* Gemini API Key View */}
             {selectedProvider.id === 'gemini' && (
               <div className="space-y-4 py-2">
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
                   <div className="flex items-center gap-2 font-bold text-slate-800">
                     <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                    <span>Gemini Native Engine Integration</span>
+                    <span>Server-Side Key Handling</span>
                   </div>
                   <p className="text-slate-600 leading-relaxed">
-                    Gemini 3.8 Flash connects via the server-side environment key (<code className="font-mono text-[#0f8b8d]">process.env.GEMINI_API_KEY</code>). All prompts and reasoning requests are proxied securely on the backend without browser client key exposure.
+                    Create the key in Google AI Studio and paste it here. It is saved by the local server to your user data directory (<code className="font-mono text-[#0f8b8d]">.env</code>, outside the repo) and is never displayed again or sent back to the browser.
                   </p>
                 </div>
 
-                <div className="pt-2 flex justify-end">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-700 block">
+                    Gemini API Key
+                  </label>
+                  <input
+                    type="password"
+                    value={geminiKeyInput}
+                    onChange={(e) => setGeminiKeyInput(e.target.value)}
+                    placeholder="AIza… / your Gemini API key"
+                    className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                  />
+                </div>
+
+                <div className="pt-2 flex items-center justify-end gap-2.5">
                   <button
                     onClick={handleCloseModal}
-                    className="px-4 py-2 text-xs font-bold bg-[#001432] text-white rounded-xl hover:bg-[#13294b]"
+                    className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
                   >
-                    Done
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveGeminiKey}
+                    disabled={isSavingKey || !geminiKeyInput.trim()}
+                    className="px-4 py-2 text-xs font-bold bg-[#001432] hover:bg-[#13294b] disabled:opacity-40 text-white rounded-xl flex items-center gap-1.5 transition-all"
+                  >
+                    {isSavingKey ? (
+                      <>
+                        <Activity className="w-3.5 h-3.5 animate-spin" />
+                        <span>Saving…</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-3.5 h-3.5 text-[#8ff3f4]" />
+                        <span>Save & Connect</span>
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
@@ -651,7 +1018,7 @@ export const SettingsAIView: React.FC = () => {
                 {isLoadingFlow ? (
                   <div className="py-8 flex flex-col items-center justify-center gap-2 text-slate-500 text-xs">
                     <Activity className="w-5 h-5 animate-spin text-[#0f8b8d]" />
-                    <span>Requesting authorization code from server...</span>
+                    <span>Requesting real device code from {selectedProvider.name}...</span>
                   </div>
                 ) : deviceCodeData ? (
                   <>
@@ -728,7 +1095,7 @@ export const SettingsAIView: React.FC = () => {
                         {isVerifying ? (
                           <>
                             <Activity className="w-3.5 h-3.5 animate-spin" />
-                            <span>Verifying...</span>
+                            <span>Verifying with provider...</span>
                           </>
                         ) : (
                           <>
@@ -743,13 +1110,13 @@ export const SettingsAIView: React.FC = () => {
               </div>
             )}
 
-            {/* PKCE Browser URL Flow for Claude */}
+            {/* Paste-Code Flow for Claude */}
             {selectedProvider.id === 'claude' && (
               <div className="space-y-4">
                 {isLoadingFlow ? (
                   <div className="py-8 flex flex-col items-center justify-center gap-2 text-slate-500 text-xs">
                     <Activity className="w-5 h-5 animate-spin text-[#0f8b8d]" />
-                    <span>Preparing Claude PKCE authorization URL...</span>
+                    <span>Preparing Claude authorization URL...</span>
                   </div>
                 ) : pkceData ? (
                   <>
@@ -767,23 +1134,23 @@ export const SettingsAIView: React.FC = () => {
                         <ExternalLink className="w-3.5 h-3.5" />
                       </a>
                       <p className="text-[11px] text-slate-500 leading-relaxed">
-                        Log in with your Claude Pro or Team subscription in the new tab to approve access.
+                        Log in with your Claude Pro or Team subscription, approve access, then copy the code shown on the page.
                       </p>
                     </div>
 
                     <div className="space-y-2">
                       <label className="text-xs font-bold text-slate-700 block">
-                        Step 2: Paste Approval Code or Callback URL
+                        Step 2: Paste the Approval Code
                       </label>
                       <input
                         type="text"
                         value={claudeInputCode}
                         onChange={e => setClaudeInputCode(e.target.value)}
-                        placeholder="Paste code (e.g. claude_auth_code_... or full redirect URL)"
+                        placeholder="Paste the code shown by Claude (format: code#state)"
                         className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
                       />
                       <p className="text-[11px] text-slate-400">
-                        The code is validated server-side using cryptographic S256 PKCE verification.
+                        The code is verified server-side with S256 PKCE and exchanged for tokens stored locally on this machine.
                       </p>
                     </div>
 
@@ -803,7 +1170,7 @@ export const SettingsAIView: React.FC = () => {
                         {isVerifying ? (
                           <>
                             <Activity className="w-3.5 h-3.5 animate-spin" />
-                            <span>Verifying PKCE...</span>
+                            <span>Verifying code...</span>
                           </>
                         ) : (
                           <>

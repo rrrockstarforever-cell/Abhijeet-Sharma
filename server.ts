@@ -1,9 +1,21 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
+import os from 'os';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
-import crypto from 'crypto';
+import {
+  startLogin,
+  pollLogin,
+  completeLogin,
+  status as oauthStatus,
+  logout as oauthLogout,
+  chat as oauthChat,
+  listModels as oauthListModels,
+  type OAuthChatMessage,
+} from './server/oauth.mjs';
+import { research as webResearch } from './server/web.mjs';
 
 dotenv.config();
 
@@ -13,457 +25,548 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
+// User data dir (Electron passes PULSE_DATA_DIR=app.getPath('userData'); dev fallback keeps
+// secrets OUT of the repository). The user's pasted Gemini key lives here, never in the repo.
+const DATA_DIR = process.env.PULSE_DATA_DIR || path.join(os.homedir(), '.pulse-med');
+const ENV_FILE = path.join(DATA_DIR, '.env');
+try { dotenv.config({ path: ENV_FILE }); } catch { /* dev: file may not exist */ }
+
 app.use(express.json());
 
-// Server-Side Session Storage for OAuth Tokens (Never returned to client, never committed to git)
-interface SessionData {
-  tokens: Record<string, {
-    token: string;
-    tokenType: string;
-    connectedAt: number;
-    userEmail?: string;
-  }>;
-  pendingAuth: Record<string, {
-    flow: 'device_code' | 'pkce';
-    deviceCode?: string;
-    userCode?: string;
-    state?: string;
-    codeVerifier?: string;
-    createdAt: number;
-    expiresAt: number;
-    approved?: boolean;
-  }>;
-}
+// ==========================================
+// PROVIDER CONFIG (real providers only)
+// ==========================================
 
-const userSessions = new Map<string, SessionData>();
+const DEFAULT_MODELS: Record<string, string> = {
+  gemini: 'gemini-3.8-flash',
+  chatgpt: 'gpt-6.1-sol',
+  claude: 'claude-sonnet-5-5',
+  grok: 'grok-4.7',
+};
 
-function getSession(req: Request, res: Response): { sessionId: string; session: SessionData } {
-  let sessionId = (req.headers['x-session-id'] as string) || '';
-  if (!sessionId) {
-    sessionId = 'sess_' + crypto.randomBytes(16).toString('hex');
+// UI provider ids -> old oauth.mjs internal ids
+const INTERNAL_PROVIDER: Record<string, string> = {
+  chatgpt: 'codex',
+  grok: 'xai',
+  claude: 'claude',
+};
+
+class ApiError extends Error {
+  status: number;
+  constructor(message: string, status = 500) {
+    super(message);
+    this.status = status;
   }
-  res.setHeader('x-session-id', sessionId);
-  if (!userSessions.has(sessionId)) {
-    userSessions.set(sessionId, {
-      tokens: {},
-      pendingAuth: {},
-    });
+}
+
+function geminiKey(): string {
+  return (process.env.GEMINI_API_KEY || '').trim();
+}
+
+// Gemini client is created lazily and refreshed if the key changes, so a key pasted
+// in Settings takes effect immediately without restarting the server.
+let geminiClient: { key: string; client: GoogleGenAI } | null = null;
+function getGemini(): GoogleGenAI | null {
+  const key = geminiKey();
+  if (!key) return null;
+  if (!geminiClient || geminiClient.key !== key) {
+    geminiClient = { key, client: new GoogleGenAI({ apiKey: key }) };
   }
-  return { sessionId, session: userSessions.get(sessionId)! };
+  return geminiClient.client;
 }
 
-// Initialize Google GenAI client (Server-Side)
-const apiKey = process.env.GEMINI_API_KEY;
-let ai: GoogleGenAI | null = null;
-if (apiKey) {
-  ai = new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
+// Save the key the user pastes in Settings to <PULSE_DATA_DIR>/.env.
+// Never echo the key back, never write it to the repository.
+function saveGeminiKey(key: string): void {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  let lines: string[] = [];
+  if (fs.existsSync(ENV_FILE)) {
+    lines = fs
+      .readFileSync(ENV_FILE, 'utf8')
+      .split(/\r?\n/)
+      .filter((l) => l.trim() !== '' && !/^GEMINI_API_KEY\s*=/.test(l));
+  }
+  lines.push(`GEMINI_API_KEY=${key}`, '');
+  fs.writeFileSync(ENV_FILE, lines.join('\n'), 'utf8');
+  process.env.GEMINI_API_KEY = key;
 }
 
-// API: AI Medical Tutor / Clinical Reasoning Partner
-app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
-  const { message, activePersona, customRules, history } = req.body;
-
+function isProviderConnected(providerId: string): boolean {
+  if (providerId === 'gemini') return Boolean(geminiKey());
   try {
-    if (ai) {
-      const systemInstruction = `You are the PULSE MED Senior Clinical Faculty & Academic Partner for postgraduate medical exams (NEET-PG, INI-CET, AMC CAT, and USMLE).
-Your persona: ${activePersona || 'AMC Part 1 — Hard Clinical Reasoning & NEET-PG Topper Guidance'}.
-Your instructions and custom exam rules:
-- Provide high-yield, razor-sharp clinical breakdowns.
-- Include authentic citations (e.g., Harrison's Principles 21st Ed, Robbins Pathology 10th Ed, Goodman & Gilman Pharmacology, or Australian Therapeutic Guidelines eTG).
-- When asked to generate vignettes, provide 1 high-yield MCQ with 4 options, the Correct Key, a detailed phenotypic dissection of each distractor, and an EXAM BOARD PEARL.
-- Explain the cognitive trap and discriminative reasoning.
-- Respect active rules: ${customRules ? customRules.join(', ') : 'Strict clinical grounding, no obsolete trivia'}.`;
+    const s = oauthStatus();
+    if (providerId === 'chatgpt') return Boolean(s.codex);
+    if (providerId === 'grok') return Boolean(s.xai);
+    if (providerId === 'claude') return Boolean(s.claude);
+  } catch { /* treat storage failure as not connected */ }
+  return false;
+}
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: message,
-        config: {
-          systemInstruction,
-          temperature: 0.7,
-        },
-      });
-
-      return res.json({
-        success: true,
-        reply: response.text,
-        modelUsed: 'gemini-3.8-flash',
-      });
-    } else {
-      // High-yield fallback simulation if API key is pending
-      return res.json({
-        success: true,
-        reply: `### Pulse Clinical Faculty Synthesis
-
-**Concept:** Antimicrobial Resistance & Glycopeptide/Beta-Lactam Mechanisms
-
-In treating severe infections like **NDM-1 (New Delhi metallo-β-lactamase)** producing *Klebsiella pneumoniae*, Ambler Class B metallo-enzymes utilize active-site zinc ions ($Zn^{2+}$) to hydrolyze all beta-lactams except **Aztreonam**. However, clinical strains routinely co-produce ESBLs or AmpC cephalosporinases that rapidly cleave aztreonam. 
-
-Therefore, the faculty-verified regimen is the synergistic combination of **Aztreonam + Ceftazidime-avibactam (CZA)**:
-- **Avibactam** neutralizes co-expressed ESBLs/AmpC enzymes.
-- **Aztreonam** remains immune to NDM-1 and successfully inhibits PBP-3 cell-wall transpeptidation.
-
-**High-Yield Board Pearl (Harrison's Ch. 142 / Robbins p. 344):**
-For *Enterococcus faecium* VanA resistance, the phenotype confers dual high-level resistance to both **Vancomycin and Teicoplanin** via transposon Tn1546 substitution of terminal D-Ala-D-Ala to D-Ala-D-Lac (1,000-fold binding affinity drop). Drug of choice for bacteremia: **Linezolid** or **Daptomycin** (avoid Daptomycin in pulmonary infections due to surfactant inactivation).`,
-        modelUsed: 'clinical-faculty-engine-v4',
-      });
-    }
-  } catch (error: any) {
-    console.error('Gemini API Error:', error);
-    return res.status(500).json({
-      error: 'Failed to process clinical query',
-      details: error.message,
-    });
+function notConnectedMessage(providerId: string): string {
+  if (providerId === 'gemini') {
+    return 'Gemini is not connected. Add your Gemini API key in Settings → AI Subscription Hub.';
   }
-});
+  return `${providerId.charAt(0).toUpperCase() + providerId.slice(1)} is not signed in. Connect an AI provider in Settings → AI Subscription Hub.`;
+}
+
+// Shared completion dispatcher used by /api/ai/complete and /api/ai/tutor-chat.
+async function runCompletion(opts: {
+  provider: string;
+  model?: string;
+  system?: string;
+  messages: OAuthChatMessage[];
+  json?: boolean;
+  effort?: string;
+  search?: boolean;
+}): Promise<string> {
+  const { provider, model, system, messages, json, effort, search } = opts;
+  if (provider === 'gemini') {
+    const ai = getGemini();
+    if (!ai) throw new ApiError(notConnectedMessage('gemini'), 401);
+    const model_ = model || DEFAULT_MODELS.gemini;
+    const contents = messages.map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    }));
+    const response = await ai.models.generateContent({
+      model: model_,
+      contents,
+      config: {
+        systemInstruction: system,
+        temperature: 0.7,
+        ...(json ? { responseMimeType: 'application/json' } : {}),
+      },
+    });
+    return response.text || '';
+  }
+
+  const internal = INTERNAL_PROVIDER[provider];
+  if (!internal) throw new ApiError(`Unknown AI provider: ${provider}`, 400);
+  try {
+    return await oauthChat({
+      provider: internal as 'codex' | 'xai' | 'claude',
+      model: model || DEFAULT_MODELS[provider],
+      system,
+      messages,
+      json,
+      effort,
+      search,
+    });
+  } catch (err: any) {
+    const msg = String(err?.message || 'AI request failed');
+    if (/not signed in|login expired/i.test(msg)) {
+      throw new ApiError(notConnectedMessage(provider), 401);
+    }
+    throw new ApiError(msg, 502);
+  }
+}
 
 // ==========================================
-// SECURE SERVER-SIDE OAUTH & SUBSCRIPTION ROUTES
-// Tokens live strictly in server memory, never returned to browser
+// REAL OAUTH ROUTES (subscription sign-in)
+// Tokens live in ~/.neet-pg-prep/oauth.json via server/oauth.mjs and are never
+// returned to the browser. Same token file the old app used.
 // ==========================================
 
-// 1. GET /api/oauth/status: Check real connection status for all providers
+// 1. GET /api/oauth/status: real connection state for all providers
 app.get('/api/oauth/status', (req: Request, res: Response) => {
-  const { session } = getSession(req, res);
-  const geminiConnected = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim() !== '');
-
-  return res.json({
+  res.json({
     success: true,
     providers: {
-      gemini: {
-        id: 'gemini',
-        connected: geminiConnected,
-        authType: 'api_key',
-        model: 'gemini-3.8-flash',
-        name: 'Gemini (Google AI & Advanced)'
-      },
-      chatgpt: {
-        id: 'chatgpt',
-        connected: Boolean(session.tokens['chatgpt']),
-        authType: 'device_code',
-        connectedAt: session.tokens['chatgpt']?.connectedAt,
-        userEmail: session.tokens['chatgpt']?.userEmail,
-        model: 'gpt-4o-2024-08-06',
-        name: 'ChatGPT (OpenAI Subscription)'
-      },
-      claude: {
-        id: 'claude',
-        connected: Boolean(session.tokens['claude']),
-        authType: 'pkce',
-        connectedAt: session.tokens['claude']?.connectedAt,
-        userEmail: session.tokens['claude']?.userEmail,
-        model: 'claude-3-5-sonnet-20241022',
-        name: 'Claude (Anthropic Subscription)'
-      },
-      grok: {
-        id: 'grok',
-        connected: Boolean(session.tokens['grok']),
-        authType: 'device_code',
-        connectedAt: session.tokens['grok']?.connectedAt,
-        userEmail: session.tokens['grok']?.userEmail,
-        model: 'grok-2-medical-fine-tune',
-        name: 'Grok (xAI SuperGrok)'
+      gemini: { connected: isProviderConnected('gemini') },
+      chatgpt: { connected: isProviderConnected('chatgpt') },
+      claude: { connected: isProviderConnected('claude') },
+      grok: { connected: isProviderConnected('grok') },
+    },
+    defaults: DEFAULT_MODELS,
+  });
+});
+
+// 2. POST /api/oauth/start: begin a real device-code / PKCE+paste-code flow
+app.post('/api/oauth/start', async (req: Request, res: Response) => {
+  const { provider } = req.body || {};
+  const internal = INTERNAL_PROVIDER[provider];
+  if (!internal) {
+    return res.status(400).json({ error: `Unsupported provider: ${provider}` });
+  }
+  try {
+    const started = await startLogin(internal as 'codex' | 'xai' | 'claude');
+    if (internal === 'claude') {
+      // UI adapter: login id doubles as the PKCE "state" for /complete
+      return res.json({ provider, flow: 'pkce', authUrl: started.url, state: started.id });
+    }
+    // UI adapter: login id doubles as the "deviceCode" for /poll and /complete
+    return res.json({
+      provider,
+      flow: 'device_code',
+      userCode: started.userCode,
+      verificationUri: started.url,
+      deviceCode: started.id,
+      interval: Math.max(3, started.interval || 5),
+    });
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'Failed to start sign-in flow.' });
+  }
+});
+
+// 3. POST /api/oauth/poll: poll a real device-code authorization
+app.post('/api/oauth/poll', async (req: Request, res: Response) => {
+  const { provider, deviceCode } = req.body || {};
+  try {
+    if (provider === 'claude') {
+      // Claude uses the paste-code flow; authorization_pending until completeLogin succeeds.
+      return res.json(
+        isProviderConnected('claude')
+          ? { status: 'success', connected: true }
+          : { status: 'authorization_pending', connected: false },
+      );
+    }
+    if (!deviceCode) {
+      return res.status(400).json({ error: 'deviceCode is required.' });
+    }
+    const r = await pollLogin(String(deviceCode));
+    if (r.status === 'done') return res.json({ status: 'success', connected: true });
+    if (r.status === 'pending') return res.json({ status: 'authorization_pending', connected: false });
+    const expired = /expired/i.test(r.error || '');
+    return res.json({ status: expired ? 'expired' : 'error', error: r.error || 'Authorization failed.' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Poll failed.' });
+  }
+});
+
+// 4. POST /api/oauth/complete: finish sign-in (Claude paste-code or device approval check)
+app.post('/api/oauth/complete', async (req: Request, res: Response) => {
+  const { provider, code, state, deviceCode } = req.body || {};
+  try {
+    if (provider === 'claude') {
+      if (!code || typeof code !== 'string' || !code.trim()) {
+        return res.status(400).json({ error: 'Paste the code shown after you approve on the Claude page.' });
+      }
+      if (!state) {
+        return res.status(400).json({ error: 'Sign-in state is missing. Restart the Claude sign-in.' });
+      }
+      await completeLogin(state, code.trim());
+      return res.json({ success: true, connected: true, provider });
+    }
+    if (provider === 'chatgpt' || provider === 'grok') {
+      if (!deviceCode) {
+        return res.status(400).json({ error: 'deviceCode is required.' });
+      }
+      const r = await pollLogin(String(deviceCode));
+      if (r.status === 'done') {
+        return res.json({ success: true, connected: true, provider });
+      }
+      if (r.status === 'pending') {
+        return res.status(400).json({
+          error: 'Not approved yet. Approve the code on the provider page, then click Verify again.',
+        });
+      }
+      return res.status(400).json({ error: r.error || 'Sign-in failed. Start a new sign-in.' });
+    }
+    return res.status(400).json({ error: `Unsupported provider: ${provider}` });
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message || 'Sign-in failed.' });
+  }
+});
+
+// 5. POST /api/oauth/logout: revoke the locally stored subscription tokens
+app.post('/api/oauth/logout', (req: Request, res: Response) => {
+  const { provider } = req.body || {};
+  const internal = INTERNAL_PROVIDER[provider];
+  if (!internal) {
+    return res.status(400).json({ error: `Unsupported provider: ${provider}` });
+  }
+  try {
+    oauthLogout(internal);
+    return res.json({ ok: true, connected: false, provider });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Logout failed.' });
+  }
+});
+
+// 6. POST /api/settings/gemini-key: save the Gemini API key the user pastes in Settings.
+// NEVER echoes the key back.
+app.post('/api/settings/gemini-key', (req: Request, res: Response) => {
+  const key = String(req.body?.apiKey || '').trim();
+  if (!/^[A-Za-z0-9_\-]{10,}$/.test(key)) {
+    return res.status(400).json({ error: 'That does not look like a valid Gemini API key.' });
+  }
+  try {
+    saveGeminiKey(key);
+    getGemini();
+    return res.json({ ok: true, connected: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Could not save the API key.' });
+  }
+});
+
+// 6a. GET /api/models/available: the models THIS account may really use, asked of each
+// provider with its own stored token. The models.dev catalogue is not account-aware, so it
+// suggests ids a subscription login cannot call. Gemini has no OAuth here (API key), so it
+// reports separately and never blocks the others.
+let availableModelsCache: { at: number; payload: any } | null = null;
+
+app.get('/api/models/available', async (_req: Request, res: Response) => {
+  if (availableModelsCache && Date.now() - availableModelsCache.at < 300_000) {
+    return res.json(availableModelsCache.payload);
+  }
+  const providers: Record<string, { id: string; name: string; source: string }[]> = {};
+  const errors: Record<string, string> = {};
+
+  await Promise.all(
+    (['claude', 'grok', 'chatgpt'] as const).map(async (uiId) => {
+      if (!isProviderConnected(uiId)) {
+        errors[uiId] = 'Not signed in.';
+        providers[uiId] = [];
+        return;
+      }
+      const internal = INTERNAL_PROVIDER[uiId];
+      const result = await oauthListModels(internal as 'codex' | 'xai' | 'claude');
+      providers[uiId] = (result.models || []).map((m) => ({ id: m.id, name: m.name || m.id, source: 'account' }));
+      if (result.error) errors[uiId] = result.error;
+    }),
+  );
+
+  // Gemini is key-based: list from the public API when a key is present.
+  if (isProviderConnected('gemini')) {
+    try {
+      const key = geminiKey();
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}&pageSize=200`);
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(b?.error?.message || `HTTP ${r.status}`);
+      providers.gemini = ((b.models || []) as any[])
+        .filter((m) => Array.isArray(m?.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+        .map((m) => ({ id: String(m?.name || '').replace(/^models\//, ''), name: String(m?.displayName || m?.name || ''), source: 'account' }))
+        .filter((m) => m.id);
+    } catch (e: any) {
+      providers.gemini = [];
+      errors.gemini = e?.message || 'Could not list Gemini models.';
+    }
+  } else {
+    providers.gemini = [];
+    errors.gemini = 'No Gemini API key saved.';
+  }
+
+  const payload = { providers, errors, fetchedAt: new Date().toISOString() };
+  availableModelsCache = { at: Date.now(), payload };
+  return res.json(payload);
+});
+
+// 6b. GET /api/models/catalog: optional live model catalog from models.dev.
+// Used by Settings to suggest current model ids / context sizes. Cached for an
+// hour; a network failure is reported honestly (the static defaults still work).
+const CATALOG_PROVIDER_MAP: Record<string, string> = {
+  chatgpt: 'openai',
+  claude: 'anthropic',
+  gemini: 'google',
+  grok: 'xai',
+};
+let modelsCatalogCache: { at: number; payload: any } | null = null;
+
+app.get('/api/models/catalog', async (_req: Request, res: Response) => {
+  if (modelsCatalogCache && Date.now() - modelsCatalogCache.at < 3_600_000) {
+    return res.json(modelsCatalogCache.payload);
+  }
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12_000);
+    let raw: any;
+    try {
+      const upstream = await fetch('https://models.dev/api.json', { signal: controller.signal });
+      if (!upstream.ok) throw new Error(`models.dev returned HTTP ${upstream.status}`);
+      raw = await upstream.json();
+    } finally {
+      clearTimeout(timer);
+    }
+    const providers: Record<string, { id: string; name: string; context: number | null; released: string | null }[]> = {};
+    for (const [ours, theirs] of Object.entries(CATALOG_PROVIDER_MAP)) {
+      const entry = raw?.[theirs];
+      const modelsObj = entry?.models && typeof entry.models === 'object' ? entry.models : {};
+      providers[ours] = Object.values(modelsObj)
+        .map((m: any) => ({
+          id: typeof m?.id === 'string' ? m.id : '',
+          name: typeof m?.name === 'string' ? m.name : (typeof m?.id === 'string' ? m.id : ''),
+          context: typeof m?.limit?.context === 'number' ? m.limit.context : null,
+          released: typeof m?.release_date === 'string' ? m.release_date : null,
+        }))
+        .filter((m) => m.id)
+        .sort((a, b) => String(b.released ?? '').localeCompare(String(a.released ?? '')))
+        .slice(0, 60);
+    }
+    const payload = { providers, fetchedAt: new Date().toISOString() };
+    modelsCatalogCache = { at: Date.now(), payload };
+    return res.json(payload);
+  } catch (err: any) {
+    return res.status(502).json({ error: `Could not load the live model catalog (${err?.message || 'network error'}).` });
+  }
+});
+
+// ==========================================
+// AI COMPLETION ROUTES
+// ==========================================
+
+// POST /api/ai/complete -> {text}. real provider calls only; errors are surfaced, never fabricated.
+app.post('/api/ai/complete', async (req: Request, res: Response) => {
+  const { provider, model, system, messages, json, effort } = req.body || {};
+  if (!provider) {
+    return res.status(400).json({ error: 'No AI provider selected. Connect an AI provider in Settings.' });
+  }
+  if (!Array.isArray(messages) || messages.length === 0 || messages.some((m: any) => !m || typeof m.content !== 'string')) {
+    return res.status(400).json({ error: 'messages must be an array of {role, content}.' });
+  }
+  try {
+    const text = await runCompletion({ provider, model, system, messages, json, effort });
+    if (!text || !text.trim()) {
+      return res.status(502).json({ error: 'The AI provider returned an empty response. Try again.' });
+    }
+    return res.json({ success: true, text, model: model || DEFAULT_MODELS[provider] });
+  } catch (err: any) {
+    const status = err instanceof ApiError ? err.status : 502;
+    return res.status(status).json({ error: err?.message || 'AI request failed.' });
+  }
+});
+
+// ---------- tutor-chat (kept for AITutorView; backed by the same real completion path) ----------
+
+const PERSONA_PROMPTS: Record<string, string> = {
+  BOARD_MASTER: 'You are the PULSE MED Board Exam Master for NEET-PG / INI-CET / AMC CAT: razor-sharp high-yield clinical breakdowns, distractor (trap) dissection, and exam-board pearls.',
+  ATTENDING: 'You are the PULSE MED Socratic Attending Physician on teaching rounds: reason step by step with the resident, ask and answer like a senior clinician.',
+  PHARMACOLOGIST: 'You are the PULSE MED Mechanism & Kinetics Specialist: pharmacodynamics, pharmacokinetics, receptor and antimicrobial-resistance mechanisms explained precisely.',
+};
+
+function parseJsonBlock(raw: string): any | null {
+  if (!raw) return null;
+  let text = raw.trim();
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) text = fence[1].trim();
+  const start = text.search(/[[{]/);
+  if (start > 0) text = text.slice(start);
+  const end = Math.max(text.lastIndexOf('}'), text.lastIndexOf(']'));
+  if (end > -1) text = text.slice(0, end + 1);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
+  const body = req.body || {};
+  const message: string = typeof body.message === 'string' ? body.message : '';
+  const persona: string = typeof body.persona === 'string' ? body.persona : typeof body.activePersona === 'string' ? body.activePersona : 'BOARD_MASTER';
+  const contextQuestion = body.contextQuestion;
+
+  if (!message.trim()) {
+    return res.status(400).json({ error: 'message is required.' });
+  }
+
+  // The client sends its ACTIVE provider/model; if absent, resolve any connected provider.
+  let provider: string = typeof body.provider === 'string' ? body.provider : '';
+  if (!provider) {
+    const candidates = ['chatgpt', 'claude', 'grok'];
+    provider =
+      candidates.find((p) => isProviderConnected(p)) || (isProviderConnected('gemini') ? 'gemini' : '');
+  }
+  if (!provider) {
+    return res.status(401).json({ error: 'No AI provider is connected yet. Connect an AI provider in Settings → AI Subscription Hub.' });
+  }
+
+  const system = [
+    'You are the PULSE MED clinical AI tutor for postgraduate medical exams (NEET-PG, INI-CET, AMC CAT).',
+    typeof body.exam === 'string' && body.exam
+      ? `The learner's active exam is ${String(body.exam).replace('_', '-')}. Tailor depth, terminology and guidelines to that exam (AMC CAT: Australian eTG/TGA and RACGP guidance; NEET-PG/INI-CET: Indian and international standard references).`
+      : '',
+    PERSONA_PROMPTS[persona] || PERSONA_PROMPTS.BOARD_MASTER,
+    'Rules:',
+    '- High-yield, clinically grounded answers. Cite standard textbooks/guidelines when relevant (e.g., Harrison\'s Principles 21st Ed, Robbins Pathology 10th Ed, Australian Therapeutic Guidelines eTG).',
+    '- Explain the cognitive trap and discriminative reasoning when dissecting a question.',
+    contextQuestion?.stem
+      ? `- The resident attached an exam question (subject: ${contextQuestion.subject || 'n/a'}, subtopic: ${contextQuestion.subtopic || 'n/a'}). Analyse it in context: correct answer, reasoning, and trap.\nAttached stem: "${contextQuestion.stem}"\nMarked key: ${contextQuestion.correctOption || 'n/a'}${contextQuestion.trapExplanation ? `\nKnown trap note: ${String(contextQuestion.trapExplanation).slice(0, 400)}` : ''}`
+      : '',
+    'Respond with ONLY a single valid JSON object (no markdown fences) shaped exactly like:',
+    '{"reply": "your main markdown answer", "reasoningSteps": [{"step": "short step name", "detail": "one or two sentences"}], "pearl": "one-line high-yield board pearl or empty string", "citations": ["textbook / guideline citations"], "suggestedFollowups": ["2-3 probing follow-up questions the resident could ask next"]}',
+    '- reasoningSteps: 2-5 steps when the answer involves reasoning; may be empty for simple facts.',
+    '- "reply" must contain the complete answer itself, not a summary of the other fields.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const history: OAuthChatMessage[] = Array.isArray(body.history)
+    ? body.history
+        .filter((m: any) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+        .slice(-8)
+        .map((m: any) => ({ role: m.role, content: m.content }))
+    : [];
+
+  const messages: OAuthChatMessage[] = [...history, { role: 'user', content: message }];
+
+  try {
+    const raw = await runCompletion({
+      provider,
+      model: typeof body.model === 'string' ? body.model : undefined,
+      system,
+      messages,
+      json: true,
+      effort: typeof body.effort === 'string' ? body.effort : undefined,
+    });
+
+    const parsed = parseJsonBlock(raw);
+    let reply: string | null = null;
+    if (parsed && !Array.isArray(parsed) && typeof parsed.reply === 'string' && parsed.reply.trim()) {
+      reply = parsed.reply;
+    }
+    if (!reply) {
+      // fall back to plain text in "reply" — never fabricate structured content
+      reply = raw.trim();
+    }
+
+    const result: any = { success: true, reply, modelUsed: body.model || DEFAULT_MODELS[provider] };
+
+    if (parsed && !Array.isArray(parsed)) {
+      if (Array.isArray(parsed.reasoningSteps)) {
+        const steps = parsed.reasoningSteps
+          .filter((s: any) => s && typeof s.step === 'string' && typeof s.detail === 'string' && s.step.trim() && s.detail.trim())
+          .map((s: any) => ({ step: s.step, detail: s.detail }))
+          .slice(0, 6);
+        if (steps.length) result.reasoningSteps = steps;
+      }
+      if (typeof parsed.pearl === 'string' && parsed.pearl.trim()) result.pearl = parsed.pearl.trim();
+      if (Array.isArray(parsed.citations)) {
+        const citations = parsed.citations.filter((c: any) => typeof c === 'string' && c.trim()).slice(0, 6);
+        if (citations.length) result.citations = citations;
+      }
+      if (Array.isArray(parsed.suggestedFollowups)) {
+        const followups = parsed.suggestedFollowups.filter((f: any) => typeof f === 'string' && f.trim()).slice(0, 4);
+        if (followups.length) result.suggestedFollowups = followups;
       }
     }
-  });
+
+    return res.json(result);
+  } catch (err: any) {
+    const status = err instanceof ApiError ? err.status : 502;
+    return res.status(status).json({ error: err?.message || 'AI request failed.' });
+  }
 });
 
-// 2. POST /api/oauth/start: Initiate device code or PKCE login
-app.post('/api/oauth/start', (req: Request, res: Response) => {
-  const { provider } = req.body;
-  const { session } = getSession(req, res);
-
-  if (provider === 'chatgpt') {
-    const userCode = 'GPT-' + crypto.randomBytes(3).toString('hex').toUpperCase();
-    const deviceCode = 'dcode_gpt_' + crypto.randomBytes(16).toString('hex');
-    const verificationUri = 'https://auth0.openai.com/activate';
-    
-    session.pendingAuth['chatgpt'] = {
-      flow: 'device_code',
-      userCode,
-      deviceCode,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + 15 * 60 * 1000,
-      approved: false,
-    };
-
-    return res.json({
-      success: true,
-      provider: 'chatgpt',
-      flow: 'device_code',
-      userCode,
-      verificationUri,
-      deviceCode,
-      expiresIn: 900,
-      interval: 2,
-    });
+// POST /api/web/research {query} -> real internet search (DuckDuckGo + PubMed).
+// Sources carry their URLs; the client may ask the AI to summarise them. Never canned.
+app.post('/api/web/research', async (req: Request, res: Response) => {
+  const query = typeof req.body?.query === 'string' ? req.body.query : '';
+  try {
+    const out = await webResearch(query);
+    return res.json({ success: true, sources: out.sources, retrievedAt: out.retrievedAt });
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'Web research failed.' });
   }
-
-  if (provider === 'grok') {
-    const userCode = 'GROK-' + crypto.randomBytes(3).toString('hex').toUpperCase();
-    const deviceCode = 'dcode_grok_' + crypto.randomBytes(16).toString('hex');
-    const verificationUri = 'https://x.ai/oauth/device';
-
-    session.pendingAuth['grok'] = {
-      flow: 'device_code',
-      userCode,
-      deviceCode,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + 15 * 60 * 1000,
-      approved: false,
-    };
-
-    return res.json({
-      success: true,
-      provider: 'grok',
-      flow: 'device_code',
-      userCode,
-      verificationUri,
-      deviceCode,
-      expiresIn: 900,
-      interval: 2,
-    });
-  }
-
-  if (provider === 'claude') {
-    const codeVerifier = crypto.randomBytes(32).toString('base64url');
-    const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
-    const state = 'claude_' + crypto.randomBytes(12).toString('hex');
-    const authUrl = `https://claude.ai/oauth/authorize?response_type=code&client_id=pulse-med-engine&redirect_uri=urn:ietf:wg:oauth:2.0:oob&scope=claude.chat&state=${state}&code_challenge=${codeChallenge}&code_challenge_method=S256`;
-
-    session.pendingAuth['claude'] = {
-      flow: 'pkce',
-      codeVerifier,
-      state,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + 15 * 60 * 1000,
-      approved: false,
-    };
-
-    return res.json({
-      success: true,
-      provider: 'claude',
-      flow: 'pkce',
-      authUrl,
-      state,
-      codeChallenge,
-    });
-  }
-
-  return res.status(400).json({ error: `Unsupported OAuth provider: ${provider}` });
 });
 
-// 3. POST /api/oauth/poll: Poll status of device code authorization
-app.post('/api/oauth/poll', (req: Request, res: Response) => {
-  const { provider, deviceCode } = req.body;
-  const { session } = getSession(req, res);
-
-  // If already connected in session, return success
-  if (session.tokens[provider]) {
-    return res.json({ status: 'success', connected: true });
-  }
-
-  const pending = session.pendingAuth[provider];
-  if (!pending || (deviceCode && pending.deviceCode !== deviceCode)) {
-    return res.json({ status: 'expired', connected: false });
-  }
-
-  if (Date.now() > pending.expiresAt) {
-    delete session.pendingAuth[provider];
-    return res.json({ status: 'expired', connected: false });
-  }
-
-  if (pending.approved) {
-    session.tokens[provider] = {
-      token: `${provider}_live_token_` + crypto.randomBytes(32).toString('hex'),
-      tokenType: 'Bearer',
-      connectedAt: Date.now(),
-      userEmail: `${provider}-subscriber@pulse-med.internal`
-    };
-    delete session.pendingAuth[provider];
-    return res.json({ status: 'success', connected: true });
-  }
-
-  return res.json({ status: 'authorization_pending', connected: false });
-});
-
-// 4. POST /api/oauth/complete: Finish authorization (paste code for Claude or complete device approval)
-app.post('/api/oauth/complete', (req: Request, res: Response) => {
-  const { provider, code, state, deviceCode } = req.body;
-  const { session } = getSession(req, res);
-
-  if (provider === 'claude') {
-    if (!code || typeof code !== 'string' || !code.trim()) {
-      return res.status(400).json({ error: 'Authorization code is required to complete Claude sign-in' });
-    }
-
-    // Secure server-side token generation/exchange (held strictly on server)
-    session.tokens['claude'] = {
-      token: 'claude_live_token_' + crypto.randomBytes(32).toString('hex'),
-      tokenType: 'Bearer',
-      connectedAt: Date.now(),
-      userEmail: 'claude-subscriber@pulse-med.internal'
-    };
-    delete session.pendingAuth['claude'];
-
-    return res.json({
-      success: true,
-      connected: true,
-      provider: 'claude'
-    });
-  }
-
-  if (provider === 'chatgpt' || provider === 'grok') {
-    const pending = session.pendingAuth[provider];
-    if (pending) {
-      pending.approved = true;
-    }
-
-    // Save token strictly in server session
-    session.tokens[provider] = {
-      token: `${provider}_live_token_` + crypto.randomBytes(32).toString('hex'),
-      tokenType: 'Bearer',
-      connectedAt: Date.now(),
-      userEmail: `${provider}-subscriber@pulse-med.internal`
-    };
-    delete session.pendingAuth[provider];
-
-    return res.json({
-      success: true,
-      connected: true,
-      provider
-    });
-  }
-
-  return res.status(400).json({ error: 'Invalid provider specified' });
-});
-
-// 5. POST /api/oauth/logout: Revoke server session token
-app.post('/api/oauth/logout', (req: Request, res: Response) => {
-  const { provider } = req.body;
-  const { session } = getSession(req, res);
-
-  if (provider && session.tokens[provider]) {
-    delete session.tokens[provider];
-  }
-  if (provider && session.pendingAuth[provider]) {
-    delete session.pendingAuth[provider];
-  }
-
-  return res.json({ success: true, connected: false, provider });
-});
-
-// 6. POST /api/oauth/chat: Model chat using verified server token
-app.post('/api/oauth/chat', async (req: Request, res: Response) => {
-  const { provider, message, activePersona, customRules } = req.body;
-  const { session } = getSession(req, res);
-
-  if (!provider) {
-    return res.status(400).json({ error: 'Provider parameter is required' });
-  }
-
-  if (provider === 'gemini') {
-    if (!ai) {
-      return res.status(400).json({ error: 'Gemini API key is not configured on the server environment' });
-    }
-
-    try {
-      const systemInstruction = `You are the PULSE MED Senior Clinical Faculty & Academic Partner for postgraduate medical exams.
-Persona: ${activePersona || 'Board Master'}. Rules: ${customRules ? customRules.join(', ') : 'Strict clinical evidence'}.`;
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: message,
-        config: { systemInstruction, temperature: 0.7 }
-      });
-      return res.json({
-        success: true,
-        reply: response.text,
-        modelUsed: 'gemini-3.8-flash',
-        authenticated: true
-      });
-    } catch (err: any) {
-      return res.status(500).json({ error: err.message });
-    }
-  }
-
-  // 3P OAuth Providers: Check that server has real token
-  const tokenData = session.tokens[provider];
-  if (!tokenData) {
-    return res.status(401).json({ 
-      error: `Not signed in with ${provider}. Please sign in via Settings > AI Subscription Hub first.` 
-    });
-  }
-
-  const modelMap: Record<string, string> = {
-    chatgpt: 'gpt-4o-2024-08-06',
-    claude: 'claude-3-5-sonnet-20241022',
-    grok: 'grok-2-medical-fine-tune'
-  };
-
-  const modelName = modelMap[provider] || `${provider}-subscription`;
-
-  return res.json({
-    success: true,
-    reply: `### ${provider.toUpperCase()} Faculty Reasoning\n\n**Authenticated Channel:** Verified server session token.\n\n**Clinical Breakdown:** Analysis for "${message}":\n\nIn high-yield postgraduate medical examinations (NEET-PG, INI-CET, AMC CAT), diagnostic discrimination relies upon recognizing hallmark pathophysiological triggers before proceeding with confirmatory testing or interventions. Check organ status, avoid drug interactions, and proceed with first-line guidelines.`,
-    modelUsed: modelName,
-    authenticated: true
-  });
-});
-
-// Legacy Provider Status endpoint synced with server OAuth state (No fake latency)
+// Legacy provider list endpoint, now reporting ONLY real connection state (no latency fakes).
 app.get('/api/providers/status', (req: Request, res: Response) => {
-  const { session } = getSession(req, res);
-  const geminiConnected = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim() !== '');
-
   res.json({
-    providers: [
-      {
-        id: 'gemini',
-        name: 'Gemini (Google AI & Advanced)',
-        model: 'gemini-3.8-flash',
-        status: geminiConnected ? 'connected' : 'ready',
-        type: 'Server Environment API Key',
-        features: ['Active Server SDK', '1M-2M Context Window', 'Verified Citations'],
-        isDefault: true,
-        hasTokenConfigured: geminiConnected,
-      },
-      {
-        id: 'claude',
-        name: 'Claude (Anthropic Subscription)',
-        model: 'claude-3-5-sonnet-20241022',
-        status: session.tokens['claude'] ? 'connected' : 'ready',
-        type: 'PKCE Subscription Sign-In',
-        features: ['Extended Reasoning', 'High-Yield Clinical RAG', 'Multi-Vignette Formatting'],
-        isDefault: false,
-        hasTokenConfigured: Boolean(session.tokens['claude']),
-      },
-      {
-        id: 'chatgpt',
-        name: 'ChatGPT (OpenAI Subscription)',
-        model: 'gpt-4o-2024-08-06',
-        status: session.tokens['chatgpt'] ? 'connected' : 'ready',
-        type: 'Device Code Sign-In',
-        features: ['Vision Analysis', 'Structured Schema Output', 'Code Interpreter'],
-        isDefault: false,
-        hasTokenConfigured: Boolean(session.tokens['chatgpt']),
-      },
-      {
-        id: 'grok',
-        name: 'Grok (xAI SuperGrok)',
-        model: 'grok-2-medical-fine-tune',
-        status: session.tokens['grok'] ? 'connected' : 'ready',
-        type: 'Device Code Sign-In',
-        features: ['Real-time Clinical Literature Access', 'Uncensored Diagnostic Stems'],
-        isDefault: false,
-        hasTokenConfigured: Boolean(session.tokens['grok']),
-      },
-    ],
+    providers: (['gemini', 'chatgpt', 'claude', 'grok'] as string[]).map((id) => ({
+      id,
+      model: DEFAULT_MODELS[id],
+      connected: isProviderConnected(id),
+    })),
   });
 });
 
@@ -485,8 +588,8 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Pulse Med Server] Running on http://localhost:${PORT}`);
+  app.listen(PORT, '127.0.0.1', () => {
+    console.log(`[Pulse Med Server] Running on http://127.0.0.1:${PORT}`);
   });
 }
 

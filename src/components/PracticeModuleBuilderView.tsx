@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import { 
   Sliders, 
   Layers, 
@@ -18,13 +18,16 @@ import {
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
-import { ExamType, AppView, DifficultyTier, DifficultySubLevel, INISyllabusMode } from '../types.ts';
+import { ExamType, AppView, DifficultyTier, DifficultySubLevel, INISyllabusMode, ClinicalQuestion } from '../types.ts';
 import { 
   NEET_PG_SUBJECTS, 
   INI_CET_DOMAINS_6, 
   AMC_CAT_DOMAINS_6 
 } from '../data/mockClinicalData.ts';
 import { SUBTOPICS } from '../data/subtopics.ts';
+import { generateExamQuestions, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel } from '../lib/ai.ts';
+import { summarizeAttempts, attemptsToday, listAttempts } from '../utils/attemptStore.ts';
+import { listUserHighlights } from '../utils/userHighlightsStore.ts';
 
 interface PracticeModuleBuilderViewProps {
   currentExam: ExamType;
@@ -35,10 +38,49 @@ interface PracticeModuleBuilderViewProps {
     subjects: string[], 
     difficultyTier: DifficultyTier,
     difficultySubLevel?: DifficultySubLevel,
-    chosenSubtopics?: string[]
+    chosenSubtopics?: string[],
+    generatedQuestions?: ClinicalQuestion[]
   ) => void;
   onNavigate: (view: AppView) => void;
 }
+
+// ---- Section-14 AI writing options (chips passed into the AI prompt) ----
+const QUESTION_TYPE_CHIPS = [
+  'Clinical vignette',
+  'One-liner recall',
+  'Match the following',
+  'Multiple statements ("1 and 3 only")',
+  'ECG / X-ray interpretation',
+  'Identify the structure',
+];
+const STEM_PATTERN_CHIPS = [
+  'Most likely diagnosis',
+  'Next best step',
+  'Drug of choice',
+  'Investigation of choice',
+  'Treatment of choice',
+  'Most appropriate advice',
+];
+const EVIDENCE_SOURCE_CHIPS = [
+  'Australian eTG',
+  'RACGP Red Book',
+  'National Immunisation Program (NIP)',
+  'Good Medical Practice (Ahpra/Medical Board)',
+];
+const PATIENT_GROUP_CHIPS = [
+  "Women's health",
+  "Men's health",
+  'Children & adolescents',
+  'Older adults',
+  'Aboriginal & Torres Strait Islander health',
+  'Culturally & linguistically diverse patients',
+  'Mental health presentations',
+];
+const PRESENTING_PROBLEM_CHIPS = [
+  'Chest pain', 'Dyspnoea', 'Fever', 'Abdominal pain', 'Headache', 'Dizziness/vertigo',
+  'Cough', 'Fatigue', 'Back pain', 'Joint pain', 'Palpitations', 'Weight loss',
+  'Anaemia', 'Jaundice', 'Confusion', 'Syncope', 'Dysuria', 'Rash', 'Sleep problems', 'Low mood',
+];
 
 export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps> = ({
   currentExam,
@@ -79,6 +121,40 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
 
   // Collapsed / Expanded state per subject
   const [expandedSubjects, setExpandedSubjects] = useState<Record<string, boolean>>({});
+
+  // AI question generation state (real AI provider; progressive batches of <=10)
+  const [genState, setGenState] = useState<{
+    busy: boolean;
+    generated: number;
+    total: number;
+    batch: number;
+    totalBatches: number;
+    dropped: number;
+    error: string | null;
+  }>({ busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0, error: null });
+  const stopEarlyRef = useRef(false);
+
+  // Section-14 AI writing options
+  const [questionTypes, setQuestionTypes] = useState<string[]>([]);
+  const [stemPatterns, setStemPatterns] = useState<string[]>([]);
+  const [evidenceSources, setEvidenceSources] = useState<string[]>([]);
+  const [patientGroup, setPatientGroup] = useState<string>('');
+  const [presentingProblems, setPresentingProblems] = useState<string[]>([]);
+
+  // Question source (PARITY section 2): new AI items, or MCQs derived from the
+  // learner's real saved notes. The bank sources open the Question Bank screen.
+  const [sourceMode, setSourceMode] = useState<'AI' | 'MY_NOTES'>('AI');
+
+  const toggleFromList = (list: string[], setList: (v: string[]) => void, value: string) => {
+    setList(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
+  };
+
+  const chip = (selected: boolean) =>
+    `px-2.5 py-1 rounded-full text-[10px] font-semibold border transition-colors ${
+      selected
+        ? 'bg-[#0f8b8d]/10 border-[#0f8b8d]/40 text-[#00696b]'
+        : 'bg-slate-50 border-slate-200 text-slate-600 hover:border-slate-300'
+    }`;
 
   const toggleSubjectExpanded = (key: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
@@ -189,23 +265,107 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     },
   };
 
-  const handleLaunch = () => {
-    let subjects: string[] = [];
-    if (selectedExam === 'NEET_PG') {
-      subjects = selectedNeetSubjects;
-    } else if (selectedExam === 'INI_CET') {
-      subjects = iniSyllabusMode === '19_SUBJECTS' ? selectedIniSubjects : selectedIniDomains;
-    } else {
-      subjects = selectedAmcDomains;
-    }
+  // Launch: generate the questions with the ACTIVE AI provider (batches <=10), validate,
+  // then hand the generated list to the Test Runner launch path. No canned question fallback.
+  const resolveSubjects = () => {
+    if (selectedExam === 'NEET_PG') return selectedNeetSubjects;
+    if (selectedExam === 'INI_CET') return iniSyllabusMode === '19_SUBJECTS' ? selectedIniSubjects : selectedIniDomains;
+    return selectedAmcDomains;
+  };
 
+  const handleLaunch = async () => {
+    if (genState.busy) return;
+
+    const subjects = resolveSubjects();
     const chosenSubtopics: string[] = [];
     subjects.forEach(subj => {
       const list = selectedSubtopics[subj] ?? SUBTOPICS[subj] ?? [];
       chosenSubtopics.push(...list);
     });
 
-    onLaunchModule(selectedExam, questionCount, mode, subjects, difficultyTier, difficultySubLevel, chosenSubtopics);
+    if (!getActiveProvider()) {
+      setGenState({ busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0, error: `No AI provider is active. ${NOT_CONNECTED_MESSAGE}` });
+      return;
+    }
+
+    // "My notes" only works when real notes exist — never invent source material.
+    let sourceMaterial: string | undefined;
+    if (sourceMode === 'MY_NOTES') {
+      const highlights = listUserHighlights();
+      if (!highlights.length) {
+        setGenState({
+          busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0,
+          error: 'No saved notes yet. Save a highlight or an AI note first, or switch the source to AI-generated questions.',
+        });
+        return;
+      }
+      sourceMaterial = highlights
+        .slice(0, 60)
+        .map((h, i) => `[${i + 1}] ${h.subject} — ${h.subtopic}\n${h.quote}${h.memoryAnchor || h.note ? `\nKey point: ${h.memoryAnchor || h.note}` : ''}`)
+        .join('\n\n')
+        .slice(0, 12000);
+    }
+
+    setGenState({ busy: true, generated: 0, total: questionCount, batch: 0, totalBatches: Math.ceil(questionCount / 10), dropped: 0, error: null });
+    stopEarlyRef.current = false;
+
+    try {
+      const { questions, dropped } = await generateExamQuestions({
+        exam: selectedExam,
+        count: questionCount,
+        subjectSubtopics: subjects.map(s => ({ subject: s, subtopics: selectedSubtopics[s] ?? SUBTOPICS[s] ?? [] })),
+        difficultyTier,
+        difficultySubLevel,
+        onProgress: (generated, total, batch, totalBatches) =>
+          setGenState(st => ({ ...st, generated, batch, totalBatches })),
+        shouldStop: () => stopEarlyRef.current,
+        questionTypes,
+        stemPatterns,
+        evidenceSources: selectedExam === 'AMC_CAT' ? evidenceSources : undefined,
+        patientGroup: selectedExam === 'AMC_CAT' && patientGroup ? patientGroup : undefined,
+        presentingProblems: selectedExam === 'AMC_CAT' ? presentingProblems : undefined,
+        sourceMaterial,
+      });
+
+      if (questions.length === 0) {
+        const stopped = stopEarlyRef.current;
+        setGenState({
+          busy: false,
+          generated: 0,
+          total: questionCount,
+          batch: 0,
+          totalBatches: 0,
+          dropped,
+          error: stopped
+            ? 'Generation stopped before the first batch returned a valid question. Try again or reduce the count.'
+            : `The AI provider returned 0 valid questions (${dropped} dropped by validation). Try again, reduce the count, or change the active provider in Settings.`,
+        });
+        return;
+      }
+
+      setGenState({
+        busy: false,
+        generated: questions.length,
+        total: questionCount,
+        batch: Math.ceil(questions.length / 10),
+        totalBatches: Math.ceil(questionCount / 10),
+        dropped,
+        error: null,
+      });
+      onLaunchModule(
+        selectedExam,
+        questions.length,
+        mode,
+        subjects,
+        difficultyTier,
+        difficultySubLevel,
+        chosenSubtopics,
+        questions
+      );
+    } catch (err: any) {
+      const message = err instanceof AiError ? err.message : (err?.message || 'AI question generation failed.');
+      setGenState({ busy: false, generated: 0, total: questionCount, batch: 0, totalBatches: 0, dropped: 0, error: message });
+    }
   };
 
   const totalChosenSubtopicsCount = (() => {
@@ -222,6 +382,36 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       return sum + count;
     }, 0);
   })();
+
+  // Real progress (PARITY section 2): computed only from stored attempts.
+  const progressStats = useMemo(() => {
+    const summary = summarizeAttempts();
+    const today = attemptsToday();
+    const last = listAttempts()[0] ?? null;
+    return { summary, todayCount: today.length, last };
+  }, []);
+
+  // Targeted drill (PARITY section 2): only subjects the learner has actually answered,
+  // lowest accuracy first. Subject names come from real attempt records.
+  const subjectNames = useMemo(() => NEET_PG_SUBJECTS.map((s) => s.name), []);
+  const canDrillBySubject = selectedExam === 'NEET_PG' || (selectedExam === 'INI_CET' && iniSyllabusMode === '19_SUBJECTS');
+  const weakForDrill = useMemo(
+    () => progressStats.summary.weakSubjects.filter((w) => subjectNames.includes(w.subject)),
+    [progressStats.summary.weakSubjects, subjectNames],
+  );
+
+  const applyWeakDrill = () => {
+    const targets = weakForDrill.map((w) => w.subject);
+    if (!targets.length) return;
+    if (selectedExam === 'NEET_PG') setSelectedNeetSubjects(targets);
+    else setSelectedIniSubjects(targets);
+    setSelectedSubtopics((prev) => {
+      const next = { ...prev };
+      for (const subject of targets) next[subject] = [...(SUBTOPICS[subject] ?? [])];
+      return next;
+    });
+    setGenState((st) => ({ ...st, error: null }));
+  };
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -249,6 +439,122 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             </span>
           </div>
         </div>
+      </div>
+
+      {/* Real progress strip — modules today / overall accuracy / last module */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3.5">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Modules today</div>
+          <div className="text-2xl font-mono font-bold text-slate-900 mt-0.5">{progressStats.todayCount}</div>
+          <div className="text-[10px] text-slate-400">{progressStats.summary.modules} submitted in total</div>
+        </div>
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3.5">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Overall accuracy</div>
+          <div className="text-2xl font-mono font-bold text-[#0f8b8d] mt-0.5">
+            {progressStats.summary.accuracyPercent === null ? '—' : `${progressStats.summary.accuracyPercent}%`}
+          </div>
+          <div className="text-[10px] text-slate-400">
+            {progressStats.summary.questionsAnswered > 0
+              ? `${progressStats.summary.correct} correct of ${progressStats.summary.questionsAnswered} answered`
+              : 'No questions answered yet'}
+          </div>
+        </div>
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3.5">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Last module</div>
+          <div className="text-sm font-bold text-slate-900 mt-1 truncate">
+            {progressStats.last
+              ? `${progressStats.last.correct}/${progressStats.last.attempted} correct · ${progressStats.last.exam.replace('_', '-')}`
+              : 'No module submitted yet'}
+          </div>
+          <div className="text-[10px] text-slate-400">
+            {progressStats.last
+              ? `${progressStats.last.mode === 'EXAM' ? 'Strict exam' : 'Tutor'} mode · ${new Date(progressStats.last.at).toLocaleString()}`
+              : 'Finish a module to see your summary here'}
+          </div>
+        </div>
+      </div>
+
+      {/* Targeted drill from real weak topics (only when analysed attempts exist) */}
+      {progressStats.summary.modules > 0 && (
+        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+              <Target className="w-4 h-4 text-rose-500" /> Targeted drill — weakest real topics
+            </h3>
+            <span className="text-[10px] text-slate-500">
+              Built only from your submitted modules ({progressStats.summary.questionsAnswered} answers)
+            </span>
+          </div>
+          {weakForDrill.length === 0 ? (
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              {canDrillBySubject
+                ? 'Not enough answers per subject yet (at least 3 per subject) to rank weak topics. Submit another module.'
+                : 'Weak-topic ranking uses NEET-PG / INI-CET subject names. Switch the target exam (or INI syllabus mode) to drill by subject.'}
+            </p>
+          ) : (
+            <>
+              <div className="flex flex-wrap gap-1.5">
+                {weakForDrill.map((w) => (
+                  <span
+                    key={w.subject}
+                    className="px-2.5 py-1 rounded-full text-[10px] font-semibold border bg-rose-50 border-rose-200 text-rose-800"
+                    title={`${w.correct} correct of ${w.total} answered`}
+                  >
+                    {w.subject} · {w.accuracy}% ({w.correct}/{w.total})
+                  </span>
+                ))}
+              </div>
+              <button
+                onClick={applyWeakDrill}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#001432] hover:bg-[#13294b] text-white text-[11px] font-bold"
+              >
+                <Target className="w-3.5 h-3.5 text-[#8ff3f4]" />
+                Select these {weakForDrill.length} subject{weakForDrill.length === 1 ? '' : 's'} + all their subtopics
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Question source (PARITY section 2) — AI items, own notes, or an existing bank */}
+      <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+            <BookOpen className="w-4 h-4 text-[#0f8b8d]" /> Question source
+          </h3>
+          <span className="text-[10px] text-slate-500">
+            {sourceMode === 'MY_NOTES'
+              ? `${listUserHighlights().length} saved note${listUserHighlights().length === 1 ? '' : 's'} will ground the questions`
+              : 'Fresh questions written by your active AI provider'}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button onClick={() => setSourceMode('AI')} className={chip(sourceMode === 'AI')}>
+            New AI questions
+          </button>
+          <button onClick={() => setSourceMode('MY_NOTES')} className={chip(sourceMode === 'MY_NOTES')}>
+            My notes → MCQs
+          </button>
+          <span className="w-px h-5 bg-slate-200 mx-1" />
+          <button onClick={() => onNavigate('mistakes')} className={chip(false)} title="Open the Mistake Notebook and its real SRS sprint">
+            My mistakes ↗
+          </button>
+          <button onClick={() => onNavigate('question-bank')} className={chip(false)} title="Open the Question Bank (load your own bank files there)">
+            Recall bank ↗
+          </button>
+          <button onClick={() => onNavigate('question-bank')} className={chip(false)} title="Open the Question Bank (load your own bank files there)">
+            eMedici ↗
+          </button>
+          <button onClick={() => onNavigate('question-bank')} className={chip(false)} title="Open the Question Bank (load your own bank files there)">
+            AMC SUCCESS ↗
+          </button>
+        </div>
+        {sourceMode === 'MY_NOTES' && (
+          <p className="text-[10px] text-slate-500 leading-relaxed">
+            Questions are written only from the highlights and AI notes you have saved. Nothing else is invented; the
+            note's citation is carried into the generated question.
+          </p>
+        )}
       </div>
 
       {/* Main Grid Setup */}
@@ -957,6 +1263,79 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             </div>
           </div>
 
+          {/* Section-14: AI writing options (types, stem patterns, AMC evidence & patient context) */}
+          <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900">AI Writing Options</h3>
+              <span className="text-[10px] text-slate-500 font-mono">sent to the AI with every batch</span>
+            </div>
+
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Question types</div>
+              <div className="flex flex-wrap gap-1.5">
+                {QUESTION_TYPE_CHIPS.map((q) => (
+                  <button key={q} onClick={() => toggleFromList(questionTypes, setQuestionTypes, q)} className={chip(questionTypes.includes(q))}>
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Stem patterns</div>
+              <div className="flex flex-wrap gap-1.5">
+                {STEM_PATTERN_CHIPS.map((p) => (
+                  <button key={p} onClick={() => toggleFromList(stemPatterns, setStemPatterns, p)} className={chip(stemPatterns.includes(p))}>
+                    {p}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {selectedExam === 'AMC_CAT' && (
+              <>
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
+                    Evidence sources (AMC practice)
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {EVIDENCE_SOURCE_CHIPS.map((src) => (
+                      <button key={src} onClick={() => toggleFromList(evidenceSources, setEvidenceSources, src)} className={chip(evidenceSources.includes(src))}>
+                        {src}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Patient group (AMC blueprint)</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {PATIENT_GROUP_CHIPS.map((g) => (
+                      <button
+                        key={g}
+                        onClick={() => setPatientGroup(patientGroup === g ? '' : g)}
+                        className={chip(patientGroup === g)}
+                      >
+                        {g}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Presenting problems (Murtagh)</div>
+                  <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+                    {PRESENTING_PROBLEM_CHIPS.map((pp) => (
+                      <button key={pp} onClick={() => toggleFromList(presentingProblems, setPresentingProblems, pp)} className={chip(presentingProblems.includes(pp))}>
+                        {pp}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
           {/* Module Launch Action Card */}
           <div className="bg-gradient-to-br from-[#001432] to-[#13294b] text-white rounded-2xl p-5 border border-[#13294b] shadow-lg space-y-4">
             <div>
@@ -971,13 +1350,75 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               </p>
             </div>
 
-            <button
-              onClick={handleLaunch}
-              className="w-full py-3 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-xl transition-all shadow-md flex items-center justify-center gap-2 transform active:scale-95"
-            >
-              <Play className="w-4 h-4 fill-current" /> Launch Clinical Module
-            </button>
+            {/* AI generation status */}
+            <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-[11px] font-mono text-slate-200 space-y-1">
+              <div className="flex justify-between">
+                <span className="text-[#8ff3f4] font-bold uppercase tracking-wider">AI Generator</span>
+                <span>{getActiveProvider() ? `${getActiveProvider()} · ${getEffectiveModel(getActiveProvider()!)}` : 'no active provider'}</span>
+              </div>
+              {genState.busy ? (
+                <>
+                  <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
+                    <div
+                      className="h-full bg-[#0f8b8d] transition-all"
+                      style={{ width: `${genState.total > 0 ? Math.min(100, Math.round((genState.generated / genState.total) * 100)) : 0}%` }}
+                    />
+                  </div>
+                  <div>
+                    Batch {genState.batch} of {genState.totalBatches} · {genState.generated} / {genState.total} ready
+                    {genState.dropped > 0 ? ` · ${genState.dropped} dropped invalid` : ''}
+                  </div>
+                </>
+              ) : (
+                <div>Questions are written live by your active AI provider on launch.</div>
+              )}
+            </div>
+
+            {genState.error && (
+              <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-200 text-[11px] leading-relaxed flex items-start gap-2">
+                <ShieldAlert className="w-3.5 h-3.5 mt-0.5 shrink-0 text-rose-400" />
+                <span>{genState.error}</span>
+              </div>
+            )}
           </div>
+
+          <button
+            onClick={handleLaunch}
+            disabled={genState.busy || !getActiveProvider()}
+            className="w-full py-3 bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl transition-all shadow-md flex items-center justify-center gap-2 transform active:scale-95"
+          >
+            {genState.busy ? (
+              <>
+                <Sparkles className="w-4 h-4 animate-spin" />
+                <span>Generating… {genState.generated}/{genState.total}</span>
+              </>
+            ) : !getActiveProvider() ? (
+              <>
+                <ShieldAlert className="w-4 h-4" />
+                <span>Connect an AI provider in Settings</span>
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4 fill-current" /> Launch Clinical Module
+              </>
+            )}
+          </button>
+
+          {genState.busy && genState.generated > 0 && (
+            <button
+              onClick={() => { stopEarlyRef.current = true; }}
+              className="w-full py-2.5 bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2"
+            >
+              <ShieldAlert className="w-4 h-4" />
+              Stop &amp; launch with {genState.generated} ready
+            </button>
+          )}
+
+          {genState.total > 0 && genState.dropped > 0 && !genState.busy && !genState.error && (
+            <p className="text-[11px] text-white/70 font-mono">
+              Validation report: {genState.generated} valid questions, {genState.dropped} dropped by the validator.
+            </p>
+          )}
         </div>
       </div>
     </div>

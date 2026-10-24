@@ -1,8 +1,24 @@
+# dependencies
 node_modules/
-build/
+
+# build output
 dist/
-coverage/
-.DS_Store
+build/
+release/
+
+# generated server bundle (produced by `npm run bundle:server`)
+server.mjs
+server.cjs
+
+# logs / coverage
 *.log
-.env*
+coverage/
+
+# local secrets — never commit
+.env
+.env.*
 !.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db

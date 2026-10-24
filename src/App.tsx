@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AppView, ExamType, DifficultyTier, DifficultySubLevel, ClinicalQuestion } from './types.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { TopBar } from './components/TopBar.tsx';
@@ -12,15 +12,25 @@ import { QuestionBankPracticeView } from './components/QuestionBankPracticeView.
 import { TestRunnerView } from './components/TestRunnerView.tsx';
 import { AITutorView } from './components/AITutorView.tsx';
 import { PDFReaderView } from './components/PDFReaderView.tsx';
-import { generatePracticeQuestions } from './data/mockClinicalData.ts';
+import { JobsBanner } from './components/JobsBanner.tsx';
+import { dueCount } from './utils/flashcardStore.ts';
+import { listCapturedQuestions } from './utils/mistakeStore.ts';
+import { subscribeDataChanged } from './utils/dataEvents.ts';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<AppView>('analytics');
   const [currentExam, setCurrentExam] = useState<ExamType>('INI_CET');
-  const [activeQuestionId, setActiveQuestionId] = useState<string>('Q10');
+  const [activeQuestionId, setActiveQuestionId] = useState<string>('');
   const [activeTestQuestions, setActiveTestQuestions] = useState<ClinicalQuestion[] | undefined>(undefined);
   const [activeTestMode, setActiveTestMode] = useState<'EXAM' | 'TUTOR'>('TUTOR');
   const [isDarkMode, setIsDarkMode] = useState<boolean>(false);
+  // Bumped whenever a store writes, so the sidebar badges stay truthful.
+  const [, setDataVersion] = useState(0);
+  useEffect(() => subscribeDataChanged(() => setDataVersion((v) => v + 1)), []);
+
+  // Real sidebar badges: captured-but-unresolved mistakes and cards due now.
+  const unresolvedMistakes = listCapturedQuestions().filter((q) => q.status === 'unresolved').length;
+  const srsDue = dueCount();
 
   const handleNavigate = (view: AppView, targetId?: string) => {
     setCurrentView(view);
@@ -31,7 +41,11 @@ export default function App() {
   };
 
   const handleSearchSubmit = (query: string) => {
-    setCurrentView('pdf-reader');
+    const q = query.trim();
+    if (!q) return;
+    try { sessionStorage.setItem('pulse.research.query', q); } catch { /* storage unavailable */ }
+    setCurrentView('research');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleLaunchModule = (
@@ -41,11 +55,18 @@ export default function App() {
     subjects: string[],
     difficultyTier: DifficultyTier,
     difficultySubLevel?: DifficultySubLevel,
-    chosenSubtopics?: string[]
+    chosenSubtopics?: string[],
+    generatedQuestions?: ClinicalQuestion[]
   ) => {
     setCurrentExam(exam);
     setActiveTestMode(mode);
-    const questions = generatePracticeQuestions(exam, count, subjects, difficultyTier, difficultySubLevel, chosenSubtopics);
+    // Only real, validated AI-generated questions may launch a module. There is no
+    // sample-question fallback: an empty batch is reported by the builder itself.
+    const questions = generatedQuestions ?? [];
+    if (questions.length === 0) {
+      setCurrentView('practice');
+      return;
+    }
     const tagged = questions.map(q => ({
       ...q,
       sourceType: 'ai-generator' as const,
@@ -110,7 +131,14 @@ export default function App() {
         return (
           <MistakeNotebookView 
             onNavigate={handleNavigate}
-            onLaunchTestWithFilter={() => handleNavigate('test-runner', 'Q-PA-1049')}
+            onStartSprint={(questions) => {
+              if (!questions.length) return;
+              setActiveTestMode('TUTOR');
+              setActiveTestQuestions(questions);
+              setActiveQuestionId(questions[0].id);
+              setCurrentView('test-runner');
+            }}
+            currentExam={currentExam}
           />
         );
       case 'highlights':
@@ -123,7 +151,13 @@ export default function App() {
         return (
           <AITutorView 
             initialQuestionId={activeQuestionId}
+            attachedQuestion={
+              (activeQuestionId
+                ? activeTestQuestions?.find((q) => q.id === activeQuestionId)
+                : null) ?? null
+            }
             onNavigate={handleNavigate}
+            currentExam={currentExam}
           />
         );
       case 'pdf-reader':
@@ -167,8 +201,8 @@ export default function App() {
         onSelectExam={setCurrentExam}
         darkMode={isDarkMode}
         onToggleDarkMode={() => setIsDarkMode(!isDarkMode)}
-        unresolvedMistakesCount={16}
-        srsDueCount={7}
+        unresolvedMistakesCount={unresolvedMistakes}
+        srsDueCount={srsDue}
       />
 
       {/* Main Content Area */}
@@ -185,6 +219,9 @@ export default function App() {
           {renderActiveView()}
         </main>
       </div>
+
+      {/* Background task registry banner (OCR, page notes, indexing) */}
+      <JobsBanner />
     </div>
   );
 }

@@ -118,10 +118,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'practice' as AppView, label: 'Practice Builder', icon: FileQuestion },
     { id: 'question-bank' as AppView, label: 'Question Bank', icon: Database },
     { id: 'test-runner' as AppView, label: 'Active Test Runner', icon: Timer, badge: 'Live' },
-    { id: 'mistakes' as AppView, label: 'Mistake Notebook', icon: AlertOctagon, badge: unresolvedMistakesCount > 0 ? String(unresolvedMistakesCount) : undefined },
-    { id: 'highlights' as AppView, label: 'Flashcards & Memory', icon: Bookmark, badge: srsDueCount > 0 ? `${srsDueCount} Due` : undefined },
+    { id: 'mistakes' as AppView, label: 'Mistakes & Spaced Review', icon: AlertOctagon, badge: srsDueCount > 0 ? `${srsDueCount} due` : unresolvedMistakesCount > 0 ? String(unresolvedMistakesCount) : undefined },
+    { id: 'highlights' as AppView, label: 'Highlights & Memory', icon: Bookmark },
     { id: 'ai-tutor' as AppView, label: 'Clinical AI Tutor', icon: Brain },
-    { id: 'pdf-reader' as AppView, label: 'PDF Reader & SIMD OCR', icon: BookOpen, badge: '12W' },
+    { id: 'pdf-reader' as AppView, label: 'PDF Reader & OCR', icon: BookOpen },
     { id: 'research' as AppView, label: 'Clinical Evidence Browser', icon: Compass },
     { id: 'settings' as AppView, label: 'AI Subscriptions & OCR', icon: Sliders },
   ];

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   RotateCcw,
   ShieldCheck,
@@ -13,10 +13,54 @@ import {
   FileCheck,
 } from 'lucide-react';
 import { AppView, ExamType } from '../types.ts';
+import { summarizeAttempts, listAttempts, AttemptRecord } from '../utils/attemptStore.ts';
 
 interface PerformanceAnalyticsViewProps {
   onNavigate: (view: AppView) => void;
   onLaunchRemediation: (subject: string) => void;
+}
+
+interface SubjectRow {
+  name: string;
+  sub: string;
+  solved: number;
+  incorrect: number;
+  accuracy: number;
+  status: 'Mastered' | 'Solid' | 'Steady' | 'Developing' | 'Needs Focus' | 'Red Flag';
+  statusColor: string;
+  barColor: string;
+}
+
+const statusConfig = {
+  Mastered: { label: 'Mastered', color: 'bg-teal-50 text-teal-800 border-teal-200', bar: 'bg-[#0f8b8d]' },
+  Solid: { label: 'Solid', color: 'bg-emerald-50 text-emerald-700 border-emerald-200', bar: 'bg-[#1f9d55]' },
+  Steady: { label: 'Steady', color: 'bg-slate-100 text-slate-700 border-slate-200', bar: 'bg-[#0f8b8d]' },
+  Developing: { label: 'Developing', color: 'bg-amber-50 text-amber-700 border-amber-200', bar: 'bg-[#f2a541]' },
+  'Needs Focus': { label: 'Needs Focus', color: 'bg-amber-50 text-amber-700 border-amber-200', bar: 'bg-[#f2a541]' },
+  'Red Flag': { label: 'Red Flag', color: 'bg-red-50 text-red-700 border-red-200', bar: 'bg-[#d64545]' },
+};
+
+function getStatus(accuracy: number, solved: number): keyof typeof statusConfig {
+  if (solved === 0) return 'Needs Focus';
+  if (accuracy >= 85) return 'Mastered';
+  if (accuracy >= 75) return 'Solid';
+  if (accuracy >= 70) return 'Steady';
+  if (accuracy >= 60) return 'Developing';
+  if (accuracy >= 50) return 'Needs Focus';
+  return 'Red Flag';
+}
+
+function getExamDate(exam: ExamType): string | null {
+  if (typeof window === 'undefined') return null;
+  const key = `exam.date.${exam}`;
+  const val = localStorage.getItem(key);
+  return val || null;
+}
+
+function formatDateForCountdown(dateStr: string): string {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
 export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> = ({
@@ -26,215 +70,88 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
   const [activeCohort, setActiveCohort] = useState<'NEET_PG' | 'INI_CET' | 'AMC_CAT'>('NEET_PG');
   const [sortBy, setSortBy] = useState<'lowest' | 'highest' | 'solved'>('lowest');
   const [downloadSuccess, setDownloadSuccess] = useState(false);
-
-  const getCohortSubjects = () => {
-    if (activeCohort === 'AMC_CAT') {
-      return [
-        {
-          name: 'Adult Health – Medicine',
-          sub: 'Cardiology, Pulmonology, eTG Protocols (30%)',
-          solved: 1350,
-          incorrect: 320,
-          accuracy: 76,
-          status: 'Solid',
-          statusColor: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-          barColor: 'bg-[#1f9d55]',
-        },
-        {
-          name: 'Adult Health – Surgery',
-          sub: 'Acute Abdomen, Trauma, Pre-Op (20%)',
-          solved: 920,
-          incorrect: 240,
-          accuracy: 73,
-          status: 'Steady',
-          statusColor: 'bg-slate-100 text-slate-700 border-slate-200',
-          barColor: 'bg-[#0f8b8d]',
-        },
-        {
-          name: "Women's Health (O&G)",
-          sub: 'Antenatal, Eclampsia, Contraception (12.5%)',
-          solved: 580,
-          incorrect: 180,
-          accuracy: 69,
-          status: 'Needs Focus',
-          statusColor: 'bg-amber-50 text-amber-700 border-amber-200',
-          barColor: 'bg-[#f2a541]',
-        },
-        {
-          name: 'Child Health (Paediatrics)',
-          sub: 'Neonatal Sepsis, Milestones, Aus Schedule (12.5%)',
-          solved: 540,
-          incorrect: 130,
-          accuracy: 76,
-          status: 'Solid',
-          statusColor: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-          barColor: 'bg-[#1f9d55]',
-        },
-        {
-          name: 'Mental Health (Psychiatry)',
-          sub: 'Self-Harm Triage, Psychosis, Mental Health Act (12.5%)',
-          solved: 490,
-          incorrect: 98,
-          accuracy: 80,
-          status: 'Mastered',
-          statusColor: 'bg-teal-50 text-teal-800 border-teal-200',
-          barColor: 'bg-[#0f8b8d]',
-        },
-        {
-          name: 'Population Health & Ethics',
-          sub: 'RACGP Preventive, Notification, Legal (12.5%)',
-          solved: 480,
-          incorrect: 110,
-          accuracy: 77,
-          status: 'Solid',
-          statusColor: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-          barColor: 'bg-[#1f9d55]',
-        },
-      ];
-    }
-
-    if (activeCohort === 'INI_CET') {
-      return [
-        {
-          name: 'Applied Basic Sciences & Genetics',
-          sub: 'Molecular Pathology, Transposons, Receptors',
-          solved: 720,
-          incorrect: 270,
-          accuracy: 62,
-          status: 'Needs Focus',
-          statusColor: 'bg-amber-50 text-amber-700 border-amber-200',
-          barColor: 'bg-[#f2a541]',
-        },
-        {
-          name: 'Systemic Therapeutics & Critical Care',
-          sub: 'Sepsis, Inotropes, Anti-arrhythmics, ICU',
-          solved: 1140,
-          incorrect: 280,
-          accuracy: 75,
-          status: 'Solid',
-          statusColor: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-          barColor: 'bg-[#1f9d55]',
-        },
-        {
-          name: 'Surgical Specialties & Trauma',
-          sub: 'ATLS, Operative Anatomy, Vascular Staging',
-          solved: 840,
-          incorrect: 220,
-          accuracy: 74,
-          status: 'Steady',
-          statusColor: 'bg-slate-100 text-slate-700 border-slate-200',
-          barColor: 'bg-[#0f8b8d]',
-        },
-        {
-          name: 'Maternal & Child Health',
-          sub: 'Neonatal Sepsis, PPH, Eclampsia, IEM',
-          solved: 680,
-          incorrect: 150,
-          accuracy: 78,
-          status: 'Solid',
-          statusColor: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-          barColor: 'bg-[#1f9d55]',
-        },
-        {
-          name: 'Diagnostic Sciences & Imaging',
-          sub: 'Silver Stains, IF Patterns, CT Signs',
-          solved: 620,
-          incorrect: 190,
-          accuracy: 69,
-          status: 'Developing',
-          statusColor: 'bg-amber-50 text-amber-700 border-amber-200',
-          barColor: 'bg-[#f2a541]',
-        },
-      ];
-    }
-
-    // Default: NEET_PG 19 NMC Disciplines
-    return [
-      {
-        name: 'Biochemistry',
-        sub: 'Metabolic Pathways, Inborn Errors, Genetics',
-        solved: 510,
-        incorrect: 214,
-        accuracy: 58,
-        status: 'Red Flag',
-        statusColor: 'bg-red-50 text-red-700 border-red-200',
-        barColor: 'bg-[#d64545]',
-      },
-      {
-        name: 'Pharmacology',
-        sub: 'Autonomic, Antimicrobial Resistance, Kinetics',
-        solved: 608,
-        incorrect: 218,
-        accuracy: 64,
-        status: 'Needs Focus',
-        statusColor: 'bg-amber-50 text-amber-700 border-amber-200',
-        barColor: 'bg-[#f2a541]',
-      },
-      {
-        name: 'General Surgery',
-        sub: 'General, Polytrauma, Acute Abdomen, Oncology',
-        solved: 838,
-        incorrect: 243,
-        accuracy: 71,
-        status: 'Developing',
-        statusColor: 'bg-slate-100 text-slate-700 border-slate-200',
-        barColor: 'bg-[#0f8b8d]',
-      },
-      {
-        name: 'Anatomy',
-        sub: 'Head & Neck, Brachial Plexus, Embryology',
-        solved: 620,
-        incorrect: 155,
-        accuracy: 75,
-        status: 'Steady',
-        statusColor: 'bg-slate-100 text-slate-700 border-slate-200',
-        barColor: 'bg-[#0f8b8d]',
-      },
-      {
-        name: 'Obstetrics & Gynaecology',
-        sub: 'Labor Complications, CTG, Contraception',
-        solved: 676,
-        incorrect: 162,
-        accuracy: 76,
-        status: 'Solid',
-        statusColor: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-        barColor: 'bg-[#1f9d55]',
-      },
-      {
-        name: 'Pathology & Microbiology',
-        sub: 'Neoplasia, RPGN Crescents, Bacteriology',
-        solved: 1021,
-        incorrect: 224,
-        accuracy: 78,
-        status: 'Solid',
-        statusColor: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-        barColor: 'bg-[#1f9d55]',
-      },
-      {
-        name: 'General Medicine',
-        sub: 'Cardiology, Neurology, Nephrology, Endocrine',
-        solved: 1164,
-        incorrect: 209,
-        accuracy: 82,
-        status: 'Mastered',
-        statusColor: 'bg-teal-50 text-teal-800 border-teal-200',
-        barColor: 'bg-[#0f8b8d]',
-      },
-    ];
-  };
-
-  const subjectData = getCohortSubjects();
-
-  const sortedSubjects = [...subjectData].sort((a, b) => {
-    if (sortBy === 'lowest') return a.accuracy - b.accuracy;
-    if (sortBy === 'highest') return b.accuracy - a.accuracy;
-    return b.solved - a.solved;
+  const [summary, setSummary] = useState<ReturnType<typeof summarizeAttempts>>({
+    modules: 0,
+    questionsAnswered: 0,
+    correct: 0,
+    accuracyPercent: null,
+    weakSubjects: [],
+    lastAttemptAt: null,
   });
+  const [attempts, setAttempts] = useState<AttemptRecord[]>([]);
+
+  useEffect(() => {
+    setSummary(summarizeAttempts());
+    setAttempts(listAttempts());
+  }, [activeCohort]);
+
+  // Filter attempts for current cohort
+  const cohortAttempts = useMemo(() => attempts.filter(a => a.exam === activeCohort), [attempts, activeCohort]);
+
+  // Build subject rows from cohort attempts
+  const subjectRows = useMemo((): SubjectRow[] => {
+    const agg: Record<string, { total: number; correct: number }> = {};
+    for (const a of cohortAttempts) {
+      for (const [subject, s] of Object.entries(a.subjects)) {
+        const cur = agg[subject] ?? (agg[subject] = { total: 0, correct: 0 });
+        cur.total += s.total;
+        cur.correct += s.correct;
+      }
+    }
+    return Object.entries(agg)
+      .filter(([, s]) => s.total > 0)
+      .map(([name, s]) => {
+        const solved = s.total;
+        const correct = s.correct;
+        const incorrect = solved - correct;
+        const accuracy = Math.round((correct / solved) * 100);
+        const status = getStatus(accuracy, solved);
+        const cfg = statusConfig[status];
+        // Try to infer a sub-description from subject name
+        let sub = '';
+        if (name.toLowerCase().includes('biochem')) sub = 'Metabolic Pathways, Inborn Errors, Genetics';
+        else if (name.toLowerCase().includes('pharma')) sub = 'Autonomic, Antimicrobial Resistance, Kinetics';
+        else if (name.toLowerCase().includes('surgery')) sub = 'General, Polytrauma, Acute Abdomen, Oncology';
+        else if (name.toLowerCase().includes('anatomy')) sub = 'Head & Neck, Brachial Plexus, Embryology';
+        else if (name.toLowerCase().includes('obstet') || name.toLowerCase().includes('gyn')) sub = 'Labor Complications, CTG, Contraception';
+        else if (name.toLowerCase().includes('patholog') || name.toLowerCase().includes('micro')) sub = 'Neoplasia, RPGN Crescents, Bacteriology';
+        else if (name.toLowerCase().includes('medicine')) sub = 'Cardiology, Neurology, Nephrology, Endocrine';
+        else if (name.toLowerCase().includes('applied basic')) sub = 'Molecular Pathology, Transposons, Receptors';
+        else if (name.toLowerCase().includes('systemic')) sub = 'Sepsis, Inotropes, Anti-arrhythmics, ICU';
+        else if (name.toLowerCase().includes('surgical special')) sub = 'ATLS, Operative Anatomy, Vascular Staging';
+        else if (name.toLowerCase().includes('maternal') || name.toLowerCase().includes('child')) sub = 'Neonatal Sepsis, PPH, Eclampsia, IEM';
+        else if (name.toLowerCase().includes('diagnostic') || name.toLowerCase().includes('imag')) sub = 'Silver Stains, IF Patterns, CT Signs';
+        else if (name.toLowerCase().includes('adult health') && name.toLowerCase().includes('medicine')) sub = 'Cardiology, Pulmonology, eTG Protocols (30%)';
+        else if (name.toLowerCase().includes('adult health') && name.toLowerCase().includes('surgery')) sub = 'Acute Abdomen, Trauma, Pre-Op (20%)';
+        else if (name.toLowerCase().includes('women') || name.toLowerCase().includes('o&g')) sub = 'Antenatal, Eclampsia, Contraception (12.5%)';
+        else if (name.toLowerCase().includes('child') || name.toLowerCase().includes('paediatr')) sub = 'Neonatal Sepsis, Milestones, Aus Schedule (12.5%)';
+        else if (name.toLowerCase().includes('mental') || name.toLowerCase().includes('psych')) sub = 'Self-Harm Triage, Psychosis, Mental Health Act (12.5%)';
+        else if (name.toLowerCase().includes('population') || name.toLowerCase().includes('ethic')) sub = 'RACGP Preventive, Notification, Legal (12.5%)';
+        else sub = 'Core topics';
+
+        return { name, sub, solved, incorrect, accuracy, status, statusColor: cfg.color, barColor: cfg.bar };
+      });
+  }, [cohortAttempts]);
+
+  const sortedSubjects = useMemo(() => {
+    const arr = [...subjectRows];
+    if (sortBy === 'lowest') return arr.sort((a, b) => a.accuracy - b.accuracy);
+    if (sortBy === 'highest') return arr.sort((a, b) => b.accuracy - a.accuracy);
+    return arr.sort((a, b) => b.solved - a.solved);
+  }, [subjectRows, sortBy]);
+
+  const weakSubjects = summary.weakSubjects.filter(w => w.accuracy < 70).slice(0, 5);
 
   const handleExportPDF = () => {
     setDownloadSuccess(true);
     setTimeout(() => setDownloadSuccess(false), 3000);
   };
+
+  const examDate = getExamDate(activeCohort);
+  const daysToExam = examDate ? Math.ceil((new Date(examDate).getTime() - Date.now()) / 86400000) : null;
+
+  const hasData = summary.questionsAnswered > 0;
+  const cohortHasData = cohortAttempts.length > 0;
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
@@ -250,7 +167,7 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
             Comprehensive Learning Progress & Accuracy Matrix
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            Detailed clinical performance across 19 specialties, difficulty tiers, and multi-exam cohorts.
+            Detailed clinical performance across specialties, difficulty tiers, and multi-exam cohorts.
           </p>
         </div>
 
@@ -301,13 +218,19 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
           </div>
           <div className="flex items-baseline gap-1.5">
             <span className="text-3xl font-extrabold text-[#13294b] font-mono tabular-nums tracking-tight">
-              12,450
+              {hasData ? summary.questionsAnswered.toLocaleString() : '—'}
             </span>
-            <span className="text-xs text-slate-500 font-medium">/ 18,000 Qs</span>
+            <span className="text-xs text-slate-500 font-medium">questions answered</span>
           </div>
           <div className="mt-3 flex items-center justify-between text-xs font-medium pt-2 border-t border-slate-100">
-            <span className="text-emerald-700 font-semibold">69.2% Syllabus covered</span>
-            <span className="text-slate-500">5,550 Remaining</span>
+            <span className={hasData ? 'text-emerald-700 font-semibold' : 'text-slate-500'}>
+              {hasData
+                ? `${summary.accuracyPercent}% accuracy`
+                : 'No marked questions yet'}
+            </span>
+            <span className="text-slate-500">
+              {hasData ? `${summary.correct.toLocaleString()} correct` : '—'}
+            </span>
           </div>
         </div>
 
@@ -319,22 +242,34 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
           </div>
           <div className="flex items-baseline gap-2">
             <span className="text-3xl font-extrabold text-[#13294b] font-mono tabular-nums tracking-tight">
-              76.4%
+              {hasData ? `${summary.accuracyPercent}%` : '—'}
             </span>
-            <span className="text-xs font-bold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded border border-teal-200">
-              ↗+2.3%
-            </span>
+            {hasData && summary.accuracyPercent !== null && summary.accuracyPercent >= 70 && (
+              <span className="text-xs font-bold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded border border-teal-200">
+                ↗ On track
+              </span>
+            )}
           </div>
-          <p className="text-[11px] text-slate-500 mt-1">vs national cohort average (74.1%)</p>
+          <p className="text-[11px] text-slate-500 mt-1">
+            {hasData
+              ? `Based on ${summary.questionsAnswered.toLocaleString()} real attempts across ${summary.modules} modules`
+              : 'Complete practice modules to see cumulative accuracy'}
+          </p>
           <div className="mt-2 flex items-center gap-3 text-xs font-medium pt-2 border-t border-slate-100">
-            <span className="flex items-center gap-1 text-slate-700">
-              <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-              <strong className="font-mono">9,512</strong> Correct
-            </span>
-            <span className="flex items-center gap-1 text-slate-700">
-              <span className="w-2 h-2 rounded-full bg-red-500"></span>
-              <strong className="font-mono">2,410</strong> Wrong
-            </span>
+            {hasData && (
+              <>
+                <span className="flex items-center gap-1 text-slate-700">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                  <strong className="font-mono">{summary.correct.toLocaleString()}</strong> Correct
+                </span>
+                <span className="flex items-center gap-1 text-slate-700">
+                  <span className="w-2 h-2 rounded-full bg-red-500"></span>
+                  <strong className="font-mono">
+                    {(summary.questionsAnswered - summary.correct).toLocaleString()}
+                  </strong> Wrong
+                </span>
+              </>
+            )}
           </div>
         </div>
 
@@ -347,53 +282,57 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
           <div className="grid grid-cols-3 gap-2 text-center mt-1">
             <div>
               <div className="text-[11px] text-slate-500 font-medium">Correct</div>
-              <div className="text-base font-bold text-emerald-700 font-mono">9,512</div>
+              <div className="text-base font-bold text-emerald-700 font-mono">
+                {hasData ? summary.correct.toLocaleString() : '—'}
+              </div>
             </div>
             <div>
               <div className="text-[11px] text-slate-500 font-medium">Incorrect</div>
-              <div className="text-base font-bold text-red-600 font-mono">2,410</div>
+              <div className="text-base font-bold text-red-600 font-mono">
+                {hasData ? (summary.questionsAnswered - summary.correct).toLocaleString() : '—'}
+              </div>
             </div>
             <div>
               <div className="text-[11px] text-slate-500 font-medium">Skipped</div>
-              <div className="text-base font-bold text-slate-600 font-mono">528</div>
+              <div className="text-base font-bold text-slate-600 font-mono">—</div>
             </div>
           </div>
           {/* Multi-segmented bar */}
           <div className="mt-3 w-full h-2 rounded-full bg-slate-100 overflow-hidden flex">
-            <div className="h-full bg-emerald-500" style={{ width: '76.4%' }} title="Correct: 76.4%"></div>
-            <div className="h-full bg-red-500" style={{ width: '19.4%' }} title="Incorrect: 19.4%"></div>
-            <div className="h-full bg-slate-400" style={{ width: '4.2%' }} title="Skipped: 4.2%"></div>
+            {hasData && summary.accuracyPercent !== null && (
+              <>
+                <div className="h-full bg-emerald-500" style={{ width: `${summary.accuracyPercent}%` }} title={`Correct: ${summary.accuracyPercent}%`}></div>
+                <div className="h-full bg-red-500" style={{ width: `${100 - summary.accuracyPercent}%` }} title={`Incorrect: ${100 - summary.accuracyPercent}%`}></div>
+              </>
+            )}
           </div>
         </div>
 
-        {/* National Standing */}
-        {/* National Standing or AMC Scaled Score */}
+        {/* National Standing / Exam Date Countdown */}
         <div className="bg-white border border-[#e3e7ee] rounded-xl p-4 shadow-xs bg-linear-to-br from-white to-slate-50/80">
           <div className="flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-            <span>
-              {activeCohort === 'AMC_CAT' ? 'AMC CAT SCALED SCORE' : activeCohort === 'INI_CET' ? 'INI-CET STANDING' : 'NATIONAL STANDING'}
-            </span>
-            <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded ${
-              activeCohort === 'AMC_CAT' ? 'bg-emerald-100 text-emerald-800' : 'bg-teal-100 text-teal-800'
-            }`}>
-              {activeCohort === 'AMC_CAT' ? 'PASS (>=250)' : 'PROJECTION'}
+            <span>EXAM COUNTDOWN</span>
+            <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-teal-100 text-teal-800">
+              {activeCohort}
             </span>
           </div>
           <div className="flex items-baseline gap-2">
             <span className="text-3xl font-extrabold text-[#13294b] font-mono tabular-nums tracking-tight">
-              {activeCohort === 'AMC_CAT' ? '284 / 500' : activeCohort === 'INI_CET' ? '98.4 %ile' : 'AIR 1,450'}
+              {daysToExam !== null && daysToExam > 0 ? `${daysToExam}d` : daysToExam !== null && daysToExam <= 0 ? 'TODAY' : '—'}
             </span>
           </div>
           <p className="text-[11px] text-slate-600 font-medium mt-1">
-            {activeCohort === 'AMC_CAT' 
-              ? 'Required Pass Threshold: 250 (Exceeded by +34 pts)' 
-              : activeCohort === 'INI_CET' 
-                ? 'AIIMS New Delhi Merit Benchmark (Top 1.6%)' 
-                : 'Top 3.2% percentile cohort benchmark'}
+            {examDate
+              ? daysToExam !== null && daysToExam > 0
+                ? `${daysToExam} days until ${activeCohort} (${formatDateForCountdown(examDate)})`
+                : daysToExam !== null && daysToExam <= 0
+                ? `Exam date reached (${formatDateForCountdown(examDate)})`
+                : `Set exam date for ${activeCohort} in Sidebar`
+              : `Set exam date for ${activeCohort} in Sidebar`}
           </p>
           <div className="mt-2 pt-2 border-t border-slate-100 flex items-center gap-1.5 text-xs text-slate-700 font-semibold">
             <Trophy className="w-3.5 h-3.5 text-[#f2a541]" />
-            {activeCohort === 'AMC_CAT' ? 'Target: Safe Margin > 300' : 'Target: Sub-1,000 for Clinical Seat'}
+            {hasData ? `Accuracy: ${summary.accuracyPercent}%` : 'No data yet'}
           </div>
         </div>
       </div>
@@ -406,7 +345,7 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
             <div>
               <h2 className="text-base font-bold text-[#13294b]">Specialty & Subject Accuracy Table</h2>
               <p className="text-xs text-slate-500">
-                Continuous mastery tracking across core clinical & pre-clinical curricula
+                Continuous mastery tracking from real attempts
               </p>
             </div>
             <div className="flex items-center gap-2 text-xs">
@@ -435,122 +374,106 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {sortedSubjects.map((sub) => (
-                  <tr key={sub.name} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="py-3 px-3">
-                      <div className="font-bold text-sm text-[#13294b]">{sub.name}</div>
-                      <div className="text-[11px] text-slate-500">{sub.sub}</div>
-                    </td>
-                    <td className="py-3 px-3">
-                      <div className="font-mono font-bold text-slate-800">{sub.solved} Qs</div>
-                      <div className="text-[11px] text-red-600 font-mono font-medium">
-                        {sub.incorrect} Incorrect
-                      </div>
-                    </td>
-                    <td className="py-3 px-3 min-w-36">
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full ${sub.barColor} rounded-full`}
-                            style={{ width: `${sub.accuracy}%` }}
-                          ></div>
+                {cohortHasData && sortedSubjects.length > 0 ? (
+                  sortedSubjects.map((sub) => (
+                    <tr key={sub.name} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="py-3 px-3">
+                        <div className="font-bold text-sm text-[#13294b]">{sub.name}</div>
+                        <div className="text-[11px] text-slate-500">{sub.sub}</div>
+                      </td>
+                      <td className="py-3 px-3">
+                        <div className="font-mono font-bold text-slate-800">{sub.solved} Qs</div>
+                        <div className="text-[11px] text-red-600 font-mono font-medium">
+                          {sub.incorrect} Incorrect
                         </div>
-                        <span className="font-mono font-bold text-slate-800 text-xs w-8 text-right">
-                          {sub.accuracy}%
+                      </td>
+                      <td className="py-3 px-3 min-w-36">
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+                            <div
+                              className={`h-full ${sub.barColor} rounded-full`}
+                              style={{ width: `${sub.accuracy}%` }}
+                            ></div>
+                          </div>
+                          <span className="font-mono font-bold text-slate-800 text-xs w-8 text-right">
+                            {sub.accuracy}%
+                          </span>
+                        </div>
+                      </td>
+                      <td className="py-3 px-3">
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold border ${sub.statusColor}`}
+                        >
+                          {sub.status === 'Red Flag' && '● '}
+                          {sub.status}
                         </span>
-                      </div>
-                    </td>
-                    <td className="py-3 px-3">
-                      <span
-                        className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold border ${sub.statusColor}`}
-                      >
-                        {sub.status === 'Red Flag' && '● '}
-                        {sub.status}
-                      </span>
-                    </td>
-                    <td className="py-3 px-3 text-right">
-                      <button
-                        onClick={() => onLaunchRemediation(sub.name)}
-                        className={`px-3 py-1 rounded-md text-xs font-semibold transition-all shadow-xs ${
-                          sub.accuracy < 65
-                            ? 'bg-[#d64545] hover:bg-red-700 text-white'
-                            : 'bg-[#0f8b8d] hover:bg-[#00696b] text-white'
-                        }`}
-                      >
-                        Remediate
-                      </button>
+                      </td>
+                      <td className="py-3 px-3 text-right">
+                        <button
+                          onClick={() => onLaunchRemediation(sub.name)}
+                          className={`px-3 py-1 rounded-md text-xs font-semibold transition-all shadow-xs ${
+                            sub.accuracy < 65
+                              ? 'bg-[#d64545] hover:bg-red-700 text-white'
+                              : 'bg-[#0f8b8d] hover:bg-[#00696b] text-white'
+                          }`}
+                        >
+                          Remediate
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5} className="py-8 text-center text-slate-500 text-sm">
+                      No marked questions yet for {activeCohort}
                     </td>
                   </tr>
-                ))}
+                )}
               </tbody>
             </table>
           </div>
         </div>
 
-        {/* Right Column (1 Col wide): Difficulty & Synthesis Cards */}
+        {/* Right Column (1 Col wide): Weak Subjects & Synthesis Cards */}
         <div className="space-y-4">
-          {/* Difficulty Tier Accuracy Card */}
+          {/* Weak Subjects Card (from summarizeAttempts) */}
           <div className="bg-white border border-[#e3e7ee] rounded-xl p-5 shadow-xs">
-            <h3 className="text-sm font-bold text-[#13294b]">Difficulty Tier Accuracy</h3>
+            <h3 className="text-sm font-bold text-[#13294b]">Weak Subjects (Focus Areas)</h3>
             <p className="text-[11px] text-slate-500 mb-4">
-              Accuracy performance segregated across clinical cognitive load
+              Subjects with accuracy below 70% (minimum 3 questions)
             </p>
 
-            <div className="space-y-4">
-              {/* Tier 1 */}
-              <div>
-                <div className="flex items-center justify-between text-xs font-bold text-slate-800 mb-1">
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-teal-600"></span>
-                    Tier 1: Direct Recall
-                  </span>
-                  <span className="font-mono text-teal-700 font-bold">85%</span>
-                </div>
-                <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                  <div className="h-full bg-teal-600 rounded-full" style={{ width: '85%' }}></div>
-                </div>
-                <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
-                  <span>5,120 Solved</span>
-                  <span className="text-emerald-700 font-semibold">Target met</span>
-                </div>
+            {weakSubjects.length > 0 ? (
+              <div className="space-y-3">
+                {weakSubjects.map((w, idx) => (
+                  <div key={`${w.subject}-${idx}`}>
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-800 mb-1">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-[#d64545]"></span>
+                        {w.subject}
+                      </span>
+                      <span className="font-mono text-red-600 font-bold">{w.accuracy}%</span>
+                    </div>
+                    <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                      <div className="h-full bg-[#d64545] rounded-full" style={{ width: `${w.accuracy}%` }}></div>
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
+                      <span>{w.correct} / {w.total} correct</span>
+                      <button
+                        onClick={() => onLaunchRemediation(w.subject)}
+                        className="text-xs font-semibold text-[#d64545] hover:underline"
+                      >
+                        Remediate
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
-
-              {/* Tier 2 */}
-              <div>
-                <div className="flex items-center justify-between text-xs font-bold text-slate-800 mb-1">
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-[#0f8b8d]"></span>
-                    Tier 2: Clinical 2-Step
-                  </span>
-                  <span className="font-mono text-[#0f8b8d] font-bold">72%</span>
-                </div>
-                <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                  <div className="h-full bg-[#0f8b8d] rounded-full" style={{ width: '72%' }}></div>
-                </div>
-                <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
-                  <span>5,480 Solved</span>
-                  <span className="text-slate-600 font-medium">Optimal pace</span>
-                </div>
+            ) : (
+              <div className="text-center py-4 text-slate-500 text-sm">
+                {hasData ? 'No weak subjects detected (all ≥ 70%)' : 'Complete practice modules to identify weak areas'}
               </div>
-
-              {/* Tier 3 */}
-              <div>
-                <div className="flex items-center justify-between text-xs font-bold text-slate-800 mb-1">
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-[#d64545]"></span>
-                    Tier 3: Multi-Step & IBQ
-                  </span>
-                  <span className="font-mono text-red-600 font-bold">48%</span>
-                </div>
-                <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                  <div className="h-full bg-[#d64545] rounded-full" style={{ width: '48%' }}></div>
-                </div>
-                <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
-                  <span>1,850 Solved</span>
-                  <span className="text-red-600 font-bold">Urgent remediation</span>
-                </div>
-              </div>
-            </div>
+            )}
           </div>
 
           {/* Cognitive Synthesis Insight Callout */}
@@ -560,7 +483,11 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
               <div>
                 <h4 className="text-xs font-bold text-[#13294b]">Cognitive Synthesis Insight</h4>
                 <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                  IBQs (Image-Based Questions) in Tier 3 account for <strong>41% of errors</strong>. Prioritize Robbins slide evaluations in Pathology before the next mock test.
+                  {hasData && weakSubjects.length > 0
+                    ? `Your weakest area is <strong>${weakSubjects[0].subject}</strong> at ${weakSubjects[0].accuracy}%. Prioritize remediation before the next mock test.`
+                    : hasData
+                    ? 'All subjects are above 70% accuracy. Maintain consistency across all topics.'
+                    : 'Complete practice modules to generate personalized insights.'}
                 </p>
               </div>
             </div>
@@ -577,7 +504,11 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
               </div>
               <div>
                 <div className="text-xs font-bold text-[#13294b]">Mistake Notebook Sync</div>
-                <div className="text-[11px] text-slate-500">2,410 questions queued for spaced review</div>
+                <div className="text-[11px] text-slate-500">
+                  {hasData
+                    ? `${summary.questionsAnswered - summary.correct} questions queued for spaced review`
+                    : 'No mistakes recorded yet'}
+                </div>
               </div>
             </div>
             <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-[#0f8b8d] group-hover:translate-x-1 transition-all" />
@@ -585,7 +516,7 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
         </div>
       </div>
 
-      {/* Bottom Section: Recent Completed Modules History */}
+      {/* Bottom Section: Recent Completed Modules History (from real attempts) */}
       <div className="bg-white border border-[#e3e7ee] rounded-xl p-5 shadow-xs">
         <div className="flex items-center justify-between pb-3 border-b border-slate-100">
           <div>
@@ -602,83 +533,50 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
         </div>
 
         <div className="divide-y divide-slate-100 text-xs">
-          {/* Row 1 */}
-          <div className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div>
-              <div className="text-[11px] text-slate-400 font-mono">Today, 08:30 AM</div>
-              <div className="font-bold text-sm text-[#13294b] flex items-center gap-2">
-                <span>INI-CET: Antimicrobial Resistance 20 Qs</span>
-                <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-blue-50 text-blue-800">
-                  Exam Mode
-                </span>
+          {cohortAttempts.length > 0 ? (
+            cohortAttempts.slice(0, 10).map((a, idx) => (
+              <div key={`${a.id}-${idx}`} className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <div className="text-[11px] text-slate-400 font-mono">
+                    {new Date(a.at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                  </div>
+                  <div className="font-bold text-sm text-[#13294b] flex items-center gap-2">
+                    <span>{a.exam}: {a.mode} ({a.total} Qs)</span>
+                    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
+                      a.mode === 'EXAM' ? 'bg-blue-50 text-blue-800' : 'bg-slate-100 text-slate-800'
+                    }`}>
+                      {a.mode}
+                    </span>
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    {Object.entries(a.subjects)
+                      .map(([s, v]) => `${s}: ${v.correct}/${v.total}`)
+                      .join(', ')}
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <div className="text-right">
+                    <span className="font-mono font-bold text-sm text-[#13294b]">
+                      {a.correct} / {a.attempted}
+                    </span>
+                    <span className="ml-1.5 font-bold text-emerald-700">
+                      ({a.attempted > 0 ? Math.round((a.correct / a.attempted) * 100) : 0}%)
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => onNavigate('test-runner')}
+                    className="text-xs font-semibold text-[#0f8b8d] hover:underline flex items-center gap-1"
+                  >
+                    Review Answers →
+                  </button>
+                </div>
               </div>
-              <div className="text-xs text-slate-500">Pharmacology + Microbiology Integrated</div>
+            ))
+          ) : (
+            <div className="py-8 text-center text-slate-500 text-sm">
+              No completed modules for {activeCohort} yet
             </div>
-            <div className="flex items-center gap-4">
-              <div className="text-right">
-                <span className="font-mono font-bold text-sm text-[#13294b]">16 / 20</span>
-                <span className="ml-1.5 font-bold text-emerald-700">(80%)</span>
-              </div>
-              <button
-                onClick={() => onNavigate('test-runner')}
-                className="text-xs font-semibold text-[#0f8b8d] hover:underline flex items-center gap-1"
-              >
-                Review Answers →
-              </button>
-            </div>
-          </div>
-
-          {/* Row 2 */}
-          <div className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div>
-              <div className="text-[11px] text-slate-400 font-mono">Yesterday, 04:15 PM</div>
-              <div className="font-bold text-sm text-[#13294b] flex items-center gap-2">
-                <span>AMC CAT: Emergency Triage Vignettes 50 Qs</span>
-                <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-800">
-                  Practice
-                </span>
-              </div>
-              <div className="text-xs text-slate-500">Surgery & Critical Care Cohort</div>
-            </div>
-            <div className="flex items-center gap-4">
-              <div className="text-right">
-                <span className="font-mono font-bold text-sm text-[#13294b]">38 / 50</span>
-                <span className="ml-1.5 font-bold text-teal-700">(76%)</span>
-              </div>
-              <button
-                onClick={() => onNavigate('test-runner')}
-                className="text-xs font-semibold text-[#0f8b8d] hover:underline flex items-center gap-1"
-              >
-                Review Answers →
-              </button>
-            </div>
-          </div>
-
-          {/* Row 3 */}
-          <div className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div>
-              <div className="text-[11px] text-slate-400 font-mono">22 Oct, 11:00 AM</div>
-              <div className="font-bold text-sm text-[#13294b] flex items-center gap-2">
-                <span>NEET PG: High-Yield Cardiology Grand Drill</span>
-                <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-blue-50 text-blue-800">
-                  Exam Mode
-                </span>
-              </div>
-              <div className="text-xs text-slate-500">General Medicine (ECGs & Murmurs)</div>
-            </div>
-            <div className="flex items-center gap-4">
-              <div className="text-right">
-                <span className="font-mono font-bold text-sm text-[#13294b]">82 / 100</span>
-                <span className="ml-1.5 font-bold text-emerald-700">(82%)</span>
-              </div>
-              <button
-                onClick={() => onNavigate('test-runner')}
-                className="text-xs font-semibold text-[#0f8b8d] hover:underline flex items-center gap-1"
-              >
-                Review Answers →
-              </button>
-            </div>
-          </div>
+          )}
         </div>
       </div>
     </div>

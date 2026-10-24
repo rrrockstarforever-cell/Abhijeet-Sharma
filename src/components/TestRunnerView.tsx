@@ -17,7 +17,8 @@ import {
   Layers
 } from 'lucide-react';
 import { ClinicalQuestion, AppView, ExamType } from '../types.ts';
-import { INITIAL_QUESTIONS } from '../data/mockClinicalData.ts';
+import { AiQuestionTools } from './AiQuestionTools.tsx';
+import { addAttempt } from '../utils/attemptStore.ts';
 
 interface TestRunnerViewProps {
   initialQuestionId?: string;
@@ -32,9 +33,9 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
   questions: propQuestions,
   mode = 'TUTOR',
 }) => {
-  const [questions, setQuestions] = useState<ClinicalQuestion[]>(
-    propQuestions && propQuestions.length > 0 ? propQuestions : INITIAL_QUESTIONS
-  );
+  // Only real questions ever reach the runner. With no module launched there is
+  // nothing to answer, so the view shows an empty state instead of sample items.
+  const [questions, setQuestions] = useState<ClinicalQuestion[]>(propQuestions ?? []);
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [userAnswers, setUserAnswers] = useState<Record<string, 'A' | 'B' | 'C' | 'D' | 'E'>>({});
   const [flaggedIds, setFlaggedIds] = useState<Record<string, boolean>>({});
@@ -109,17 +110,91 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
     setFlaggedIds(prev => ({ ...prev, [currentQ.id]: !prev[currentQ.id] }));
   };
 
+  // Record a REAL attempt so analytics / revision stats are computed from actual history
+  // (PARITY section 12: progress must be computed from stored attempts, not mocks).
+  const recordAttempt = (_submitters: 'exam' | 'module') => {
+    try {
+      const subjects: Record<string, { total: number; correct: number }> = {};
+      for (const q of questions) {
+        // Only answered questions count toward subject accuracy — unanswered items
+        // must never be silently scored as wrong.
+        if (!userAnswers[q.id]) continue;
+        const s = subjects[q.subject] ?? (subjects[q.subject] = { total: 0, correct: 0 });
+        s.total += 1;
+        if (userAnswers[q.id] === q.correctOption) s.correct += 1;
+      }
+      const attemptedQs = questions.filter((q) => userAnswers[q.id]);
+      let correct = 0;
+      for (const q of attemptedQs) {
+        if (userAnswers[q.id] === q.correctOption) correct += 1;
+      }
+      addAttempt({
+        exam: questions[0]?.examType ?? 'NEET_PG',
+        mode,
+        total: questions.length,
+        attempted: attemptedQs.length,
+        correct,
+        subjects,
+        questionIds: questions.map((q) => q.id),
+        incorrectIds: attemptedQs.filter((q) => userAnswers[q.id] !== q.correctOption).map((q) => q.id),
+      });
+    } catch { /* never block the run on history bookkeeping */ }
+  };
+
+  // Real submit confirmation: names how many questions are still unanswered.
+  const confirmSubmit = (label: string): boolean => {
+    const unanswered = questions.length - answeredCount;
+    if (unanswered <= 0) return true;
+    return window.confirm(
+      `${unanswered} of ${questions.length} question${questions.length === 1 ? '' : 's'} are unanswered. Submit ${label} anyway?`,
+    );
+  };
+
   const handleSubmitExam = () => {
+    if (!confirmSubmit('the exam')) return;
+    recordAttempt('exam');
     setExamSubmitted(true);
     setShowExplanation(true);
     setShowResultsScreen(true);
   };
 
   const handleSubmitModule = () => {
+    if (!confirmSubmit('this module')) return;
+    recordAttempt('module');
     setExamSubmitted(true);
     setShowExplanation(true);
     setShowResultsScreen(true);
   };
+
+  if (questions.length === 0) {
+    return (
+      <div className="max-w-2xl mx-auto mt-10">
+        <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-10 text-center space-y-3">
+          <BookOpen className="w-9 h-9 text-slate-300 mx-auto" />
+          <h2 className="text-base font-bold text-slate-900">No active module</h2>
+          <p className="text-xs text-slate-500 leading-relaxed max-w-md mx-auto">
+            The runner only shows questions you actually launched. Build a module in the Practice
+            Builder, or open a question from your bank, and it will appear here with your answers
+            recorded to your real progress.
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+            <button
+              onClick={() => onNavigate('practice')}
+              className="px-4 py-2 rounded-xl bg-[#001432] hover:bg-[#13294b] text-white text-xs font-bold"
+            >
+              Open Practice Builder
+            </button>
+            <button
+              onClick={() => onNavigate('question-bank')}
+              className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold"
+            >
+              Open Question Bank
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -555,6 +630,12 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                     <span className="text-slate-600">{currentQ.citations.join(' · ')}</span>
                   </div>
                 )}
+
+                {/* Per-question AI tools (explain every option / notes / topic notes) */}
+                <AiQuestionTools
+                  question={currentQ}
+                  userChoice={selectedAnswer ?? undefined}
+                />
               </div>
             )}
 

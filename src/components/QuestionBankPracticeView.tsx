@@ -57,6 +57,223 @@ export const BANK_CONFIGS: Record<BankId, { name: string; key: string; desc: str
 
 export type ActiveBankTab = 'emedici' | 'success' | 'amc' | 'all';
 
+type BankQuestionWithMeta = BankQuestion & {
+  paper?: string;
+  updatedAt?: string;
+  redFlag?: boolean;
+  redFlags?: string[];
+};
+
+interface ExtraMeta {
+  paper?: string;
+  updatedAt?: string;
+  redFlag?: boolean;
+  redFlags?: string[];
+}
+
+interface PastedRecallParse {
+  items: Array<Record<string, unknown>>;
+  invalidBlocks: number;
+}
+
+type RecentWindow = 'any' | '7' | '30' | '90';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const normalizeQuestionKey = (text: string): string =>
+  text.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+const parseDateValue = (value: unknown): string | undefined => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const fromNumber = new Date(value);
+    return Number.isNaN(fromNumber.getTime()) ? undefined : fromNumber.toISOString();
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const fromString = new Date(value.trim());
+    return Number.isNaN(fromString.getTime()) ? undefined : fromString.toISOString();
+  }
+  return undefined;
+};
+
+// Only fields that are actually present in the imported file are carried over.
+const extractExtraMeta = (item: any): ExtraMeta => {
+  const meta: ExtraMeta = {};
+  if (!item || typeof item !== 'object') return meta;
+
+  if (typeof item.paper === 'string' && item.paper.trim()) {
+    meta.paper = item.paper.trim();
+  } else if (typeof item.paper === 'number' && Number.isFinite(item.paper)) {
+    meta.paper = String(item.paper);
+  }
+
+  const updatedAt = parseDateValue(
+    item.updatedAt ?? item.updated ?? item.lastUpdated ?? item.lastUpdatedAt ?? item.modifiedAt
+  );
+  if (updatedAt) meta.updatedAt = updatedAt;
+
+  if (typeof item.redFlag === 'boolean') {
+    meta.redFlag = item.redFlag;
+  } else if (typeof item.redFlag === 'string' && /^(true|yes|1|y)$/i.test(item.redFlag.trim())) {
+    meta.redFlag = true;
+  } else if (typeof item.redFlag === 'string' && /^(false|no|0|n)$/i.test(item.redFlag.trim())) {
+    meta.redFlag = false;
+  }
+
+  if (Array.isArray(item.redFlags)) {
+    const flags = item.redFlags
+      .filter((flag: unknown): flag is string => typeof flag === 'string' && flag.trim() !== '')
+      .map((flag: string) => flag.trim());
+    meta.redFlags = flags;
+    if (flags.length > 0) meta.redFlag = true;
+  } else if (typeof item.redFlags === 'string' && item.redFlags.trim()) {
+    meta.redFlags = [item.redFlags.trim()];
+    meta.redFlag = true;
+  }
+
+  return meta;
+};
+
+const stripCodeFence = (text: string): string => {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```[a-z]*\s*\n?([\s\S]*?)\n?```$/i);
+  return fenced ? fenced[1].trim() : trimmed;
+};
+
+const getRawQuestionList = (jsonText: string): any[] => {
+  try {
+    const parsed = JSON.parse(jsonText);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && Array.isArray(parsed.questions)) return parsed.questions;
+  } catch {
+    // Not JSON; the caller may parse it as plain recall text instead.
+  }
+  return [];
+};
+
+const extractExtrasFromRawList = (rawList: any[]): Map<string, ExtraMeta> => {
+  const extras = new Map<string, ExtraMeta>();
+  rawList.forEach(item => {
+    if (!item || typeof item.question !== 'string') return;
+    const key = normalizeQuestionKey(item.question);
+    if (!key) return;
+    const meta = extractExtraMeta(item);
+    if (Object.keys(meta).length > 0 && !extras.has(key)) extras.set(key, meta);
+  });
+  return extras;
+};
+
+// The shared validator only keeps its known fields, so re-attach paper/date/flag
+// metadata from the original items by matching normalised question text.
+const withExtraMeta = (questions: BankQuestion[], extras: Map<string, ExtraMeta>): BankQuestion[] =>
+  questions.map(question => {
+    const extra = extras.get(normalizeQuestionKey(question.question));
+    return extra ? ({ ...question, ...extra } as BankQuestionWithMeta) : question;
+  });
+
+const getBankQuestionMeta = (question: BankQuestion): BankQuestionWithMeta =>
+  question as BankQuestionWithMeta;
+
+const OPTION_LINE = /^([A-Ha-h])[).:\-]\s*(.+)$/;
+const ANSWER_LINE = /^(?:answer|correct answer|ans|key)\s*[:\-]\s*([A-Ha-h]|\d+)\b/i;
+const PAPER_LINE = /^paper(?:\s*(?:name|code|title))?\s*[:\-]\s*(.+)$/i;
+const UPDATED_LINE = /^(?:updated(?:\s*at)?|last updated|date)\s*[:\-]\s*(.+)$/i;
+const RED_FLAG_LINE = /^red\s*flags?(?:\s*notes?)?\s*[:\-]\s*(.+)$/i;
+
+// Plain recall blocks: stem lines, A./B./C. options, "Answer: B", and optional
+// "Paper:", "Updated:" and "Red flag:" lines. Blank line separates questions.
+const parseRecallText = (text: string): PastedRecallParse => {
+  const blocks = text
+    .replace(/\r\n/g, '\n')
+    .split(/\n\s*\n+/)
+    .map(block => block.trim())
+    .filter(Boolean);
+
+  const items: Array<Record<string, unknown>> = [];
+  let invalidBlocks = 0;
+
+  blocks.forEach(block => {
+    const lines = block
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    const stemLines: string[] = [];
+    const options: string[] = [];
+    let answerValue: string | undefined;
+    let paper: string | undefined;
+    let updatedAt: string | undefined;
+    let redFlag: boolean | undefined;
+
+    lines.forEach(line => {
+      const answerMatch = line.match(ANSWER_LINE);
+      if (answerMatch) {
+        answerValue = answerMatch[1];
+        return;
+      }
+
+      const paperMatch = line.match(PAPER_LINE);
+      if (paperMatch) {
+        paper = paperMatch[1].trim();
+        return;
+      }
+
+      const updatedMatch = line.match(UPDATED_LINE);
+      if (updatedMatch) {
+        updatedAt = parseDateValue(updatedMatch[1]);
+        return;
+      }
+
+      const redFlagMatch = line.match(RED_FLAG_LINE);
+      if (redFlagMatch) {
+        const value = redFlagMatch[1].trim();
+        redFlag = !/^(no|false|0|n)$/i.test(value);
+        return;
+      }
+
+      const optionMatch = line.match(OPTION_LINE);
+      if (optionMatch) {
+        const expectedIndex = options.length;
+        const optionIndex = optionMatch[1].toUpperCase().charCodeAt(0) - 65;
+        if (optionIndex === expectedIndex) {
+          options.push(optionMatch[2].trim());
+          return;
+        }
+      }
+
+      if (options.length === 0) {
+        stemLines.push(line);
+      }
+    });
+
+    const stem = stemLines.join(' ').trim();
+    let answerIndex = -1;
+    if (answerValue) {
+      if (/^\d+$/.test(answerValue)) {
+        answerIndex = Number(answerValue) - 1;
+      } else {
+        answerIndex = answerValue.toUpperCase().charCodeAt(0) - 65;
+      }
+    }
+
+    if (!stem || options.length < 2 || answerIndex < 0 || answerIndex >= options.length) {
+      invalidBlocks++;
+      return;
+    }
+
+    const item: Record<string, unknown> = {
+      question: stem,
+      options,
+      answerIndex,
+    };
+    if (paper) item.paper = paper;
+    if (updatedAt) item.updatedAt = updatedAt;
+    if (redFlag !== undefined) item.redFlag = redFlag;
+    items.push(item);
+  });
+
+  return { items, invalidBlocks };
+};
+
 interface QuestionBankPracticeViewProps {
   onNavigate: (view: AppView) => void;
   onLaunchTest: (questions: ClinicalQuestion[], mode: 'EXAM' | 'TUTOR', exam: ExamType) => void;
@@ -92,9 +309,17 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
   const [selectedSubjects, setSelectedSubjects] = useState<string[]>([]);
   const [selectedTopics, setSelectedTopics] = useState<string[]>([]);
   const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
+  const [selectedPapers, setSelectedPapers] = useState<string[]>([]);
+  const [recentWindow, setRecentWindow] = useState<RecentWindow>('any');
+  const [redFlagsOnly, setRedFlagsOnly] = useState<boolean>(false);
   const [unseenOnly, setUnseenOnly] = useState<boolean>(false);
   const [questionCount, setQuestionCount] = useState<number>(25);
   const [testMode, setTestMode] = useState<'EXAM' | 'TUTOR'>('TUTOR');
+
+  // Paste recall text
+  const [pasteBank, setPasteBank] = useState<BankId>('amc');
+  const [pasteText, setPasteText] = useState<string>('');
+  const pasteTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // File input refs per bank
   const fileInputRefs = {
@@ -158,7 +383,8 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
     try {
       const text = await file.text();
       const result = validateAndParseBankJSON(text, bankId);
-      await saveBankToIDB(bankId, result.valid, result.skippedCount);
+      const extras = extractExtrasFromRawList(getRawQuestionList(text));
+      await saveBankToIDB(bankId, withExtraMeta(result.valid, extras), result.skippedCount);
       await loadAllBanks();
       setImportMessage({
         type: 'success',
@@ -193,6 +419,108 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
       type: 'success',
       text: `Reset seen question tracker for ${BANK_CONFIGS[bankId].name}. Questions can now be drawn again.`
     });
+  };
+
+  // Clears seen history for the active bank only; other banks keep their history.
+  const handleStartOver = () => {
+    if (activeTab === 'all') return;
+    const bankName = BANK_CONFIGS[activeTab].name;
+    const confirmed = window.confirm(
+      `Start over and forget every seen question in ${bankName}? Questions and the other banks' seen history are not affected.`
+    );
+    if (!confirmed) return;
+
+    resetSeenQuestions(activeTab);
+    refreshSeenCounts();
+    setImportMessage({
+      type: 'success',
+      text: `Started over in ${bankName}: seen history cleared for this bank only. All ${bankMetas[activeTab]?.count || 0} questions can be drawn again.`
+    });
+  };
+
+  const handlePasteImport = async () => {
+    const pasted = stripCodeFence(pasteText);
+    if (!pasted) return;
+
+    const targetBank = pasteBank;
+
+    try {
+      // Accept either the same JSON schema as the file import or plain recall blocks.
+      let rawItems = getRawQuestionList(pasted);
+      let invalidBlocks = 0;
+      let sourceLabel = 'JSON';
+
+      if (rawItems.length === 0) {
+        const parsedText = parseRecallText(pasted);
+        rawItems = parsedText.items;
+        invalidBlocks = parsedText.invalidBlocks;
+        sourceLabel = 'recall text';
+      }
+
+      if (rawItems.length === 0) {
+        throw new Error(
+          invalidBlocks > 0
+            ? `Could not read any questions from the pasted text (${invalidBlocks} block(s) were missing a stem, at least two A./B. options, or a valid Answer line).`
+            : 'No questions found in pasted text. Paste bank JSON, or blocks with a stem, A./B./C. options and an "Answer: A" line.'
+        );
+      }
+
+      const result = validateAndParseBankJSON(JSON.stringify({ questions: rawItems }), targetBank);
+      if (result.valid.length === 0) {
+        throw new Error(
+          `No valid questions found in pasted ${sourceLabel} (${result.skippedCount} skipped for invalid format, duplicates or needs-review).`
+        );
+      }
+
+      const extras = extractExtrasFromRawList(rawItems);
+      const enriched = withExtraMeta(result.valid, extras);
+
+      const existing = bankQuestions[targetBank] || [];
+      const existingKeys = new Set(existing.map(q => normalizeQuestionKey(q.question)));
+      const usedIds = new Set(existing.map(q => q.id));
+      const additions: BankQuestion[] = [];
+
+      enriched.forEach((question, index) => {
+        const key = normalizeQuestionKey(question.question);
+        if (existingKeys.has(key)) return;
+
+        let id = question.id;
+        if (!id || usedIds.has(id)) {
+          id = `${targetBank}_paste_${Date.now()}_${index + 1}`;
+          while (usedIds.has(id)) id = `${id}_x`;
+        }
+        usedIds.add(id);
+        existingKeys.add(key);
+        additions.push({ ...question, id });
+      });
+
+      if (additions.length === 0) {
+        setImportMessage({
+          type: 'error',
+          text: `No new questions added to ${BANK_CONFIGS[targetBank].name}: all ${result.valid.length} pasted question(s) already exist in this bank.`
+        });
+        return;
+      }
+
+      await saveBankToIDB(
+        targetBank,
+        [...existing, ...additions],
+        (bankMetas[targetBank]?.skippedCount || 0) + result.skippedCount
+      );
+      await loadAllBanks();
+      setPasteText('');
+      setImportMessage({
+        type: 'success',
+        text: `Added ${additions.length} question(s) to ${BANK_CONFIGS[targetBank].name} from pasted ${sourceLabel}${
+          result.skippedCount ? ` (${result.skippedCount} skipped)` : ''
+        }${invalidBlocks ? `; ${invalidBlocks} block(s) could not be read` : ''}.`
+      });
+    } catch (err: any) {
+      setImportMessage({
+        type: 'error',
+        text: err?.message || 'Failed to import pasted recall text.'
+      });
+    }
   };
 
   // Determine current active questions pool
@@ -232,12 +560,64 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
     return Array.from(set).sort();
   }, [currentPool]);
 
+  // Paper / recent-update / red-flag filters only exist when the imported file has those fields.
+  const availablePapers = useMemo(() => {
+    const set = new Set<string>();
+    currentPool.forEach(q => {
+      const paper = getBankQuestionMeta(q).paper;
+      if (paper) set.add(paper);
+    });
+    return Array.from(set).sort();
+  }, [currentPool]);
+
+  const hasUpdatedField = useMemo(
+    () => currentPool.some(q => Boolean(getBankQuestionMeta(q).updatedAt)),
+    [currentPool]
+  );
+
+  const hasRedFlagField = useMemo(
+    () => currentPool.some(q => {
+      const meta = getBankQuestionMeta(q);
+      return typeof meta.redFlag === 'boolean' || Array.isArray(meta.redFlags);
+    }),
+    [currentPool]
+  );
+
+  const redFlagCount = useMemo(
+    () => currentPool.filter(q => {
+      const meta = getBankQuestionMeta(q);
+      return meta.redFlag === true || (Array.isArray(meta.redFlags) && meta.redFlags.length > 0);
+    }).length,
+    [currentPool]
+  );
+
+  const recentCounts = useMemo(() => {
+    const now = Date.now();
+    const counts = { d7: 0, d30: 0, d90: 0 };
+    currentPool.forEach(q => {
+      const updatedAt = getBankQuestionMeta(q).updatedAt;
+      if (!updatedAt) return;
+      const age = now - new Date(updatedAt).getTime();
+      if (Number.isNaN(age)) return;
+      if (age <= 7 * DAY_MS) counts.d7++;
+      if (age <= 30 * DAY_MS) counts.d30++;
+      if (age <= 90 * DAY_MS) counts.d90++;
+    });
+    return counts;
+  }, [currentPool]);
+
   // Reset selected filters when switching tabs if they don't exist in new pool
   useEffect(() => {
     setSelectedSubjects(prev => prev.filter(s => availableSubjects.includes(s)));
     setSelectedTopics(prev => prev.filter(t => availableTopics.includes(t)));
     setSelectedGroups(prev => prev.filter(g => availableGroups.includes(g)));
-  }, [activeTab, availableSubjects, availableTopics, availableGroups]);
+    setSelectedPapers(prev => prev.filter(p => availablePapers.includes(p)));
+  }, [activeTab, availableSubjects, availableTopics, availableGroups, availablePapers]);
+
+  useEffect(() => {
+    if (!hasUpdatedField) setRecentWindow('any');
+    if (!hasRedFlagField) setRedFlagsOnly(false);
+  }, [activeTab, hasUpdatedField, hasRedFlagField]);
 
   // Seen questions for current tab
   const currentSeenSet = useMemo(() => {
@@ -290,7 +670,36 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
         }
       }
 
-      // 5. Unseen Only Filter
+      // 5. Paper Filter
+      if (selectedPapers.length > 0) {
+        const paper = getBankQuestionMeta(q).paper;
+        if (!paper || !selectedPapers.includes(paper)) {
+          return false;
+        }
+      }
+
+      // 6. Recent Updates Filter
+      if (recentWindow !== 'any') {
+        const updatedAt = getBankQuestionMeta(q).updatedAt;
+        if (!updatedAt) {
+          return false;
+        }
+        const age = Date.now() - new Date(updatedAt).getTime();
+        if (Number.isNaN(age) || age > Number(recentWindow) * DAY_MS) {
+          return false;
+        }
+      }
+
+      // 7. Red Flags Filter
+      if (redFlagsOnly) {
+        const meta = getBankQuestionMeta(q);
+        const isFlagged = meta.redFlag === true || (Array.isArray(meta.redFlags) && meta.redFlags.length > 0);
+        if (!isFlagged) {
+          return false;
+        }
+      }
+
+      // 8. Unseen Only Filter
       if (unseenOnly) {
         if (currentSeenSet.has(q.id)) {
           return false;
@@ -299,7 +708,18 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
 
       return true;
     });
-  }, [currentPool, searchQuery, selectedSubjects, selectedTopics, selectedGroups, unseenOnly, currentSeenSet]);
+  }, [
+    currentPool,
+    searchQuery,
+    selectedSubjects,
+    selectedTopics,
+    selectedGroups,
+    selectedPapers,
+    recentWindow,
+    redFlagsOnly,
+    unseenOnly,
+    currentSeenSet
+  ]);
 
   const toggleItem = (list: string[], setList: React.Dispatch<React.SetStateAction<string[]>>, item: string) => {
     setList(prev => prev.includes(item) ? prev.filter(x => x !== item) : [...prev, item]);
@@ -548,6 +968,80 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
             );
           })}
         </div>
+
+        {/* Paste recall text (in addition to the JSON file import) */}
+        <div className="pt-4 border-t border-slate-200 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+            <div>
+              <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Upload className="w-3.5 h-3.5 text-[#0f8b8d]" />
+                Paste recall text
+              </h4>
+              <p className="text-xs text-slate-500 mt-0.5 max-w-2xl">
+                Paste bank JSON (same schema as the file import) or plain recall blocks: stem, then{' '}
+                <code className="font-mono">A.</code>/<code className="font-mono">B.</code> options and{' '}
+                <code className="font-mono">Answer: B</code>, with optional{' '}
+                <code className="font-mono">Paper:</code>, <code className="font-mono">Updated:</code> and{' '}
+                <code className="font-mono">Red flag:</code> lines. Pasted questions are added to the selected bank;
+                existing questions are kept and duplicates are skipped.
+              </p>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {(['emedici', 'success', 'amc'] as BankId[]).map(bankId => (
+                <button
+                  key={bankId}
+                  type="button"
+                  onClick={() => {
+                    setPasteBank(bankId);
+                    pasteTextareaRef.current?.focus();
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all ${
+                    pasteBank === bankId
+                      ? 'bg-[#001432] text-white ring-1 ring-[#0f8b8d]'
+                      : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
+                  }`}
+                  title={`Add pasted text to ${BANK_CONFIGS[bankId].name}`}
+                >
+                  {BANK_CONFIGS[bankId].name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <textarea
+            ref={pasteTextareaRef}
+            value={pasteText}
+            onChange={(e) => setPasteText(e.target.value)}
+            rows={5}
+            placeholder={`Paste JSON: [{"question":"...","options":["...","..."],"answerIndex":0,"paper":"2024 March","updatedAt":"2026-10-20","redFlag":true}]\n\nOr paste recall blocks separated by a blank line:\nA 62-year-old man presents with crushing central chest pain.\nA. Aortic dissection\nB. Acute myocardial infarction\nC. Pericarditis\nAnswer: B\nPaper: 2024 March`}
+            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 placeholder-slate-400 font-mono focus:outline-none focus:border-[#0f8b8d] focus:bg-white transition-all resize-y"
+          />
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <span className="text-[11px] text-slate-500">
+              Pasted questions are added to <strong className="text-slate-700">{BANK_CONFIGS[pasteBank].name}</strong>.
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPasteText('')}
+                disabled={!pasteText}
+                className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                onClick={handlePasteImport}
+                disabled={!pasteText.trim()}
+                className="px-4 py-1.5 rounded-lg bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                Import pasted text
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Main Bank Selection Tabs */}
@@ -668,6 +1162,19 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                   {currentPool.length - currentSeenSet.size} Unseen
                 </span>
               </label>
+
+              {/* Start over: clears seen history for the active bank only */}
+              {activeTab !== 'all' && (
+                <button
+                  type="button"
+                  onClick={handleStartOver}
+                  className="flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-white border border-amber-200 text-amber-800 hover:bg-amber-50 text-xs font-bold transition-colors shrink-0"
+                  title={`Clear seen history for ${BANK_CONFIGS[activeTab].name} only`}
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Start over (forget seen)
+                </button>
+              )}
             </div>
 
             {/* Dynamic Filters from Questions' Own Fields */}
@@ -801,6 +1308,122 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                 )}
               </div>
             </div>
+
+            {/* Optional Filters: rendered only when the imported bank actually has the field */}
+            {(availablePapers.length > 0 || hasUpdatedField || hasRedFlagField) && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* 4. Paper Filter */}
+                {availablePapers.length > 0 && (
+                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+                        Papers ({availablePapers.length})
+                      </span>
+                      {selectedPapers.length > 0 && (
+                        <button
+                          onClick={() => setSelectedPapers([])}
+                          className="text-[10px] text-teal-700 font-semibold hover:underline"
+                        >
+                          Clear ({selectedPapers.length})
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="max-h-44 overflow-y-auto space-y-1 pr-1">
+                      {availablePapers.map((paper) => {
+                        const isChecked = selectedPapers.includes(paper);
+                        return (
+                          <label
+                            key={paper}
+                            className={`flex items-center gap-2 p-1.5 rounded-lg text-xs cursor-pointer transition-colors ${
+                              isChecked ? 'bg-teal-50 text-teal-900 font-bold' : 'text-slate-700 hover:bg-slate-200/60'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => toggleItem(selectedPapers, setSelectedPapers, paper)}
+                              className="h-3.5 w-3.5 rounded border-slate-300 text-[#0f8b8d] accent-[#0f8b8d]"
+                            />
+                            <span className="truncate">{paper}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* 5. Recent Updates Filter */}
+                {hasUpdatedField && (
+                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5" /> Recent updates
+                      </span>
+                      {recentWindow !== 'any' && (
+                        <button
+                          onClick={() => setRecentWindow('any')}
+                          className="text-[10px] text-teal-700 font-semibold hover:underline"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+
+                    <select
+                      value={recentWindow}
+                      onChange={(e) => setRecentWindow(e.target.value as RecentWindow)}
+                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 focus:outline-none focus:border-[#0f8b8d]"
+                    >
+                      <option value="any">Any time ({currentPool.length})</option>
+                      <option value="7">Last 7 days ({recentCounts.d7})</option>
+                      <option value="30">Last 30 days ({recentCounts.d30})</option>
+                      <option value="90">Last 90 days ({recentCounts.d90})</option>
+                    </select>
+
+                    <p className="text-[10px] text-slate-500 leading-relaxed">
+                      Uses each question's own updated date from the imported file.
+                    </p>
+                  </div>
+                )}
+
+                {/* 6. Red Flags Filter */}
+                {hasRedFlagField && (
+                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5" /> Red flags ({redFlagCount})
+                      </span>
+                      {redFlagsOnly && (
+                        <button
+                          onClick={() => setRedFlagsOnly(false)}
+                          className="text-[10px] text-teal-700 font-semibold hover:underline"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+
+                    <label className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200 cursor-pointer hover:bg-slate-100 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={redFlagsOnly}
+                        onChange={(e) => setRedFlagsOnly(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-slate-300 text-[#0f8b8d] accent-[#0f8b8d]"
+                      />
+                      <span className="text-xs font-bold text-slate-700">Red-flagged only</span>
+                      <span className="ml-auto text-[10px] font-mono text-slate-500">
+                        {redFlagCount} flagged
+                      </span>
+                    </label>
+
+                    <p className="text-[10px] text-slate-500 leading-relaxed">
+                      Shows questions whose imported red-flag field is set.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Launch Settings & Execution Controls */}
             <div className="p-5 rounded-2xl bg-gradient-to-r from-slate-50 to-teal-50/30 border border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-6">
