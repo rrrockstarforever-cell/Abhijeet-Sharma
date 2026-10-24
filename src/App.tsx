@@ -8,6 +8,7 @@ import { HighlightsSavedView } from './components/HighlightsSavedView.tsx';
 import { SettingsAIView } from './components/SettingsAIView.tsx';
 import { ClinicalBrowserView } from './components/ClinicalBrowserView.tsx';
 import { PracticeModuleBuilderView } from './components/PracticeModuleBuilderView.tsx';
+import { QuestionBankPracticeView } from './components/QuestionBankPracticeView.tsx';
 import { TestRunnerView } from './components/TestRunnerView.tsx';
 import { AITutorView } from './components/AITutorView.tsx';
 import { PDFReaderView } from './components/PDFReaderView.tsx';
@@ -18,6 +19,7 @@ export default function App() {
   const [currentExam, setCurrentExam] = useState<ExamType>('INI_CET');
   const [activeQuestionId, setActiveQuestionId] = useState<string>('Q10');
   const [activeTestQuestions, setActiveTestQuestions] = useState<ClinicalQuestion[] | undefined>(undefined);
+  const [activeTestMode, setActiveTestMode] = useState<'EXAM' | 'TUTOR'>('TUTOR');
   const [isDarkMode, setIsDarkMode] = useState<boolean>(false);
 
   const handleNavigate = (view: AppView, targetId?: string) => {
@@ -39,13 +41,29 @@ export default function App() {
     subjects: string[],
     difficultyTier: DifficultyTier,
     difficultySubLevel?: DifficultySubLevel,
-    chosenSubtopics?: string[],
-    customQuestions?: ClinicalQuestion[]
+    chosenSubtopics?: string[]
   ) => {
     setCurrentExam(exam);
-    const questions = customQuestions && customQuestions.length > 0
-      ? customQuestions
-      : generatePracticeQuestions(exam, count, subjects, difficultyTier, difficultySubLevel, chosenSubtopics);
+    setActiveTestMode(mode);
+    const questions = generatePracticeQuestions(exam, count, subjects, difficultyTier, difficultySubLevel, chosenSubtopics);
+    const tagged = questions.map(q => ({
+      ...q,
+      sourceType: 'ai-generator' as const,
+    }));
+    setActiveTestQuestions(tagged);
+    if (tagged.length > 0) {
+      setActiveQuestionId(tagged[0].id);
+    }
+    setCurrentView('test-runner');
+  };
+
+  const handleLaunchBankQuestions = (
+    questions: ClinicalQuestion[], 
+    mode: 'EXAM' | 'TUTOR', 
+    exam: ExamType
+  ) => {
+    setCurrentExam(exam);
+    setActiveTestMode(mode);
     setActiveTestQuestions(questions);
     if (questions.length > 0) {
       setActiveQuestionId(questions[0].id);
@@ -72,12 +90,20 @@ export default function App() {
             onNavigate={handleNavigate}
           />
         );
+      case 'question-bank':
+        return (
+          <QuestionBankPracticeView 
+            onNavigate={handleNavigate}
+            onLaunchTest={handleLaunchBankQuestions}
+          />
+        );
       case 'test-runner':
         return (
           <TestRunnerView 
             initialQuestionId={activeQuestionId}
             onNavigate={handleNavigate}
             questions={activeTestQuestions}
+            mode={activeTestMode}
           />
         );
       case 'mistakes':
@@ -152,7 +178,6 @@ export default function App() {
           selectedExam={currentExam}
           onSearchSubmit={handleSearchSubmit}
           onNavigate={handleNavigate}
-          mockPace="1.1 m/Q"
         />
 
         {/* Dynamic Canvas Container */}

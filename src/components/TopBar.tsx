@@ -1,6 +1,16 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Search, Bell, Gauge, User, CheckCircle2, AlertCircle } from 'lucide-react';
 import { AppView, ExamType } from '../types.ts';
+
+function getInitials(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return '?';
+  const clean = trimmed.replace(/^dr\.?\s+/i, '');
+  const words = clean.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return trimmed.slice(0, 2).toUpperCase();
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+  return (words[0][0] + words[words.length - 1][0]).toUpperCase();
+}
 
 interface TopBarProps {
   onSearchSubmit: (query: string) => void;
@@ -13,10 +23,65 @@ export const TopBar: React.FC<TopBarProps> = ({
   onSearchSubmit,
   selectedExam,
   onNavigate,
-  mockPace = '1.1 m/Q',
+  mockPace = '-',
 }) => {
   const [searchVal, setSearchVal] = useState('');
   const [showNotificationToast, setShowNotificationToast] = useState(false);
+  
+  // Profile state backed by localStorage 'profile.name'
+  const [profileName, setProfileName] = useState<string>(() => {
+    return localStorage.getItem('profile.name') || '';
+  });
+  const [isEditingProfile, setIsEditingProfile] = useState<boolean>(false);
+  const [nameInput, setNameInput] = useState<string>('');
+  const profileEditorRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleStorage = () => {
+      setProfileName(localStorage.getItem('profile.name') || '');
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (profileEditorRef.current && !profileEditorRef.current.contains(event.target as Node)) {
+        setIsEditingProfile(false);
+      }
+    };
+    if (isEditingProfile) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isEditingProfile]);
+
+  const handleOpenEditor = () => {
+    setNameInput(profileName);
+    setIsEditingProfile(true);
+  };
+
+  const handleSaveProfile = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const trimmed = nameInput.trim();
+    if (trimmed) {
+      localStorage.setItem('profile.name', trimmed);
+      setProfileName(trimmed);
+    } else {
+      localStorage.removeItem('profile.name');
+      setProfileName('');
+    }
+    setIsEditingProfile(false);
+  };
+
+  const handleClearProfile = () => {
+    localStorage.removeItem('profile.name');
+    setProfileName('');
+    setNameInput('');
+    setIsEditingProfile(false);
+  };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && searchVal.trim()) {
@@ -91,19 +156,95 @@ export const TopBar: React.FC<TopBarProps> = ({
           )}
         </div>
 
-        {/* Resident Doctor Profile Lockup */}
-        <div className="flex items-center gap-2.5 pl-3 border-l border-slate-200">
-          <div className="text-right hidden md:block">
-            <div className="font-bold text-xs text-[#13294b] leading-tight">
-              Dr. Arya Sharma
+        {/* User Profile Lockup & Inline Editor */}
+        <div className="relative pl-3 border-l border-slate-200">
+          <button
+            type="button"
+            onClick={handleOpenEditor}
+            className="flex items-center gap-2.5 p-1 rounded-xl hover:bg-slate-100 transition-colors group text-left"
+            title="Click to edit profile name"
+          >
+            <div className="text-right hidden md:block">
+              {profileName ? (
+                <div className="font-bold text-xs text-[#13294b] leading-tight group-hover:text-[#0f8b8d] transition-colors">
+                  {profileName}
+                </div>
+              ) : (
+                <div className="text-xs font-semibold text-[#0f8b8d] hover:underline">
+                  Add your name
+                </div>
+              )}
             </div>
-            <div className="text-[10px] font-medium text-slate-500 font-mono">
-              MBBS · Res ID #9042
+
+            <div className="w-8 h-8 rounded-full bg-[#13294b] text-[#8ff3f4] font-bold text-xs flex items-center justify-center ring-2 ring-[#e3f4f4] group-hover:ring-[#8ff3f4] transition-all">
+              {profileName ? (
+                getInitials(profileName)
+              ) : (
+                <User className="w-4 h-4 text-[#8ff3f4]" />
+              )}
             </div>
-          </div>
-          <div className="w-8 h-8 rounded-full bg-[#13294b] text-[#8ff3f4] font-bold text-xs flex items-center justify-center ring-2 ring-[#e3f4f4]">
-            AS
-          </div>
+          </button>
+
+          {/* Inline Profile Editor Popover */}
+          {isEditingProfile && (
+            <div
+              ref={profileEditorRef}
+              className="absolute right-0 top-full mt-2 w-72 bg-white rounded-xl shadow-xl border border-slate-200 p-4 z-50 animate-in fade-in slide-in-from-top-1"
+            >
+              <div className="flex items-center justify-between pb-2 mb-3 border-b border-slate-100">
+                <span className="text-xs font-bold text-slate-800">Edit Profile Name</span>
+                <button
+                  type="button"
+                  onClick={() => setIsEditingProfile(false)}
+                  className="text-slate-400 hover:text-slate-600 text-xs font-bold px-1"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveProfile} className="space-y-3">
+                <div>
+                  <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                    Your Name:
+                  </label>
+                  <input
+                    type="text"
+                    value={nameInput}
+                    onChange={(e) => setNameInput(e.target.value)}
+                    placeholder="e.g. Dr. Jane Smith"
+                    autoFocus
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-[#0f8b8d] focus:ring-1 focus:ring-[#0f8b8d]"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  <button
+                    type="button"
+                    onClick={handleClearProfile}
+                    className="px-2.5 py-1 text-xs font-semibold text-slate-500 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition-colors"
+                  >
+                    Clear
+                  </button>
+
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingProfile(false)}
+                      className="px-2.5 py-1 text-xs text-slate-500 hover:bg-slate-100 rounded-lg transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-3 py-1 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-lg transition-colors shadow-xs"
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+          )}
         </div>
       </div>
     </header>

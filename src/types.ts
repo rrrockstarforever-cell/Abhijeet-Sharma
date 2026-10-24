@@ -3,6 +3,7 @@ export type ExamType = 'NEET_PG' | 'INI_CET' | 'AMC_CAT';
 export type AppView =
   | 'analytics'
   | 'practice'
+  | 'question-bank'
   | 'test-runner'
   | 'mistakes'
   | 'highlights'
@@ -28,6 +29,7 @@ export interface MCQStatement {
 export interface ClinicalQuestion {
   id: string;
   moduleCode?: string;
+  sourceType?: 'ai-generator' | 'emedici' | 'success' | 'amc';
   examType: ExamType;
   subject: string;
   subtopic: string;
@@ -36,6 +38,7 @@ export interface ClinicalQuestion {
   difficultySubLevel?: DifficultySubLevel;
   stem: string;
   questionText: string;
+  question?: string;
   statements?: MCQStatement[];
   options: {
     id: 'A' | 'B' | 'C' | 'D' | 'E';

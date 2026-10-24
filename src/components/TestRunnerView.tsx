@@ -23,36 +23,39 @@ interface TestRunnerViewProps {
   initialQuestionId?: string;
   onNavigate: (view: AppView, targetId?: string) => void;
   questions?: ClinicalQuestion[];
+  mode?: 'EXAM' | 'TUTOR';
 }
 
 export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
   initialQuestionId,
   onNavigate,
   questions: propQuestions,
+  mode = 'TUTOR',
 }) => {
   const [questions, setQuestions] = useState<ClinicalQuestion[]>(
     propQuestions && propQuestions.length > 0 ? propQuestions : INITIAL_QUESTIONS
   );
   const [currentIndex, setCurrentIndex] = useState<number>(0);
-  const [userAnswers, setUserAnswers] = useState<Record<string, 'A' | 'B' | 'C' | 'D' | 'E'>>({
-    'Q10': 'B',
-  });
+  const [userAnswers, setUserAnswers] = useState<Record<string, 'A' | 'B' | 'C' | 'D' | 'E'>>({});
   const [flaggedIds, setFlaggedIds] = useState<Record<string, boolean>>({});
-  const [showExplanation, setShowExplanation] = useState<boolean>(true);
-  const [secondsElapsed, setSecondsElapsed] = useState<number>(866);
+  const [examSubmitted, setExamSubmitted] = useState<boolean>(false);
+  const [showExplanation, setShowExplanation] = useState<boolean>(mode === 'TUTOR');
+  const [secondsElapsed, setSecondsElapsed] = useState<number>(0);
+  const [showResultsScreen, setShowResultsScreen] = useState<boolean>(false);
 
   // Sync questions if prop changes
   useEffect(() => {
     if (propQuestions && propQuestions.length > 0) {
       setQuestions(propQuestions);
       setCurrentIndex(0);
+      setUserAnswers({});
+      setFlaggedIds({});
+      setExamSubmitted(false);
+      setShowResultsScreen(false);
+      setShowExplanation(mode === 'TUTOR');
+      setSecondsElapsed(0);
     }
-  }, [propQuestions]);
-
-  // AMC CAT Adaptive State
-  const [adaptiveTheta, setAdaptiveTheta] = useState<number>(268); // Out of 500
-  const [adaptiveTier, setAdaptiveTier] = useState<'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME'>('MEDIUM');
-  const [consecutiveCorrect, setConsecutiveCorrect] = useState<number>(1);
+  }, [propQuestions, mode]);
 
   useEffect(() => {
     if (initialQuestionId) {
@@ -75,36 +78,47 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
   };
 
   const currentQ = questions[currentIndex] || questions[0];
-  const selectedAnswer = userAnswers[currentQ.id];
+  const selectedAnswer = userAnswers[currentQ?.id];
   const isAnswered = !!selectedAnswer;
-  const isFlagged = !!flaggedIds[currentQ.id];
-  const isAMC = currentQ.examType === 'AMC_CAT';
+  const isFlagged = !!flaggedIds[currentQ?.id];
+  const isAMC = (questions.length > 0 && questions.some(q => q.examType === 'AMC_CAT')) || currentQ?.examType === 'AMC_CAT';
+
+  // Computed session metrics strictly from real answers
+  const totalQuestions = questions.length;
+  const answeredCount = Object.keys(userAnswers).length;
+  const flaggedCount = Object.values(flaggedIds).filter(Boolean).length;
+  const correctCount = Object.entries(userAnswers).filter(([qid, chosen]) => {
+    const q = questions.find(item => item.id === qid);
+    return q && q.correctOption === chosen;
+  }).length;
+  const accuracy = answeredCount > 0 ? Math.round((correctCount / answeredCount) * 100) : null;
+  const paceSeconds = answeredCount > 0 ? Math.round(secondsElapsed / answeredCount) : null;
+  const paceDisplay = paceSeconds !== null ? `${paceSeconds}s / Q` : '-';
+  const amcEstimatedScore = accuracy !== null ? Math.round(100 + (accuracy / 100) * 400) : 0;
 
   const handleSelectOption = (optId: 'A' | 'B' | 'C' | 'D' | 'E') => {
+    if (!currentQ) return;
     setUserAnswers(prev => ({ ...prev, [currentQ.id]: optId }));
-    setShowExplanation(true);
-
-    // AMC CAT Adaptive Calibration
-    if (isAMC) {
-      const isCorrect = optId === currentQ.correctOption;
-      if (isCorrect) {
-        setAdaptiveTheta(prev => Math.min(500, prev + 16));
-        setConsecutiveCorrect(prev => {
-          const next = prev + 1;
-          if (next >= 2) setAdaptiveTier('HIGH');
-          if (next >= 4) setAdaptiveTier('EXTREME');
-          return next;
-        });
-      } else {
-        setAdaptiveTheta(prev => Math.max(100, prev - 18));
-        setConsecutiveCorrect(0);
-        setAdaptiveTier('LOW');
-      }
+    if (mode === 'TUTOR' || examSubmitted) {
+      setShowExplanation(true);
     }
   };
 
   const toggleFlag = () => {
+    if (!currentQ) return;
     setFlaggedIds(prev => ({ ...prev, [currentQ.id]: !prev[currentQ.id] }));
+  };
+
+  const handleSubmitExam = () => {
+    setExamSubmitted(true);
+    setShowExplanation(true);
+    setShowResultsScreen(true);
+  };
+
+  const handleSubmitModule = () => {
+    setExamSubmitted(true);
+    setShowExplanation(true);
+    setShowResultsScreen(true);
   };
 
   return (
@@ -113,9 +127,9 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
       <div className="bg-[#001432] rounded-2xl p-4 sm:p-5 text-white border border-[#13294b] shadow-md flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <button
-            onClick={() => onNavigate('practice')}
+            onClick={() => onNavigate(currentQ.sourceType ? 'question-bank' : 'practice')}
             className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
-            title="Back to Modules"
+            title="Back"
           >
             <ChevronLeft className="w-4 h-4" />
           </button>
@@ -129,10 +143,13 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                 {currentQ.cognitiveTier}
               </span>
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-                {currentQ.examType === 'NEET_PG' && 'NEET-PG (+4 / -1)'}
-                {currentQ.examType === 'INI_CET' && 'INI-CET (+1 / -0.33)'}
-                {currentQ.examType === 'AMC_CAT' && 'AMC CAT (Adaptive Item Response)'}
+                {mode === 'EXAM' ? 'Exam Mode (Strict Timed)' : 'Tutor Mode (Immediate Feedback)'}
               </span>
+              {currentQ.sourceType && (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-teal-900/60 text-[#8ff3f4] border border-teal-500/30">
+                  Bank: {currentQ.sourceType.toUpperCase()}
+                </span>
+              )}
             </div>
             <div className="text-xs text-slate-300 font-medium mt-1">
               {currentQ.subject} · {currentQ.subtopic}
@@ -140,11 +157,26 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
           </div>
         </div>
 
-        {/* Right side stats: Pace + Timer + Flag */}
+        {/* Right side stats: Pace + Timer + Submit + Flag */}
         <div className="flex items-center gap-3">
+          {mode === 'EXAM' && !examSubmitted && (
+            <button
+              onClick={handleSubmitExam}
+              className="px-3.5 py-1.5 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-xl transition-all shadow-xs"
+            >
+              Submit Exam
+            </button>
+          )}
+
+          {examSubmitted && (
+            <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs font-bold font-mono">
+              Exam Submitted
+            </span>
+          )}
+
           <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-800/80 border border-slate-700 text-xs font-mono">
-            <span className="text-slate-400">Pace:</span>
-            <span className="text-emerald-400 font-bold">1.1 m/Q [NOMINAL]</span>
+            <span className="text-slate-400">Mock Pace:</span>
+            <span className="text-emerald-400 font-bold">{paceDisplay}</span>
           </div>
 
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs font-mono font-bold text-white">
@@ -166,54 +198,190 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
         </div>
       </div>
 
-      {/* AMC CAT Real-Time Difficulty Calibration Bar */}
-      {isAMC && (
-        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs space-y-2.5">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+      {/* Honest Session Progress / Performance Panel */}
+      <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-[#0f8b8d]" />
+            <span className="font-bold text-slate-900">Session Progress:</span>
+            {answeredCount === 0 ? (
+              <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                0 attempted
+              </span>
+            ) : mode === 'EXAM' && !examSubmitted ? (
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                  Answered: {answeredCount} / {totalQuestions}
+                </span>
+                <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                  Flagged: {flaggedCount}
+                </span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                  Answered: {answeredCount} / {totalQuestions}
+                </span>
+                <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  Correct: {correctCount} / {answeredCount}
+                </span>
+                <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-teal-50 text-teal-700 border border-teal-200">
+                  Accuracy: {accuracy}%
+                </span>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-3 font-mono text-[11px]">
+            {answeredCount === 0 ? (
+              <span className="text-slate-400">0 attempted · No score or accuracy computed yet</span>
+            ) : mode === 'EXAM' && !examSubmitted ? (
+              <span className="text-slate-500">Exam Mode · Scoring withheld until submit</span>
+            ) : (
+              <span className="text-slate-600">
+                Session Accuracy: <strong className="text-slate-900">{accuracy}%</strong> ({correctCount}/{answeredCount})
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Real Progress Meter */}
+        <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+          <div 
+            className="h-full bg-[#0f8b8d] transition-all duration-300 rounded-full"
+            style={{ width: `${totalQuestions > 0 ? (answeredCount / totalQuestions) * 100 : 0}%` }}
+          />
+        </div>
+
+        <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+          <span>Question 1</span>
+          <span>
+            {answeredCount} of {totalQuestions} answered ({totalQuestions > 0 ? Math.round((answeredCount / totalQuestions) * 100) : 0}%)
+          </span>
+          <span>Question {totalQuestions}</span>
+        </div>
+      </div>
+
+      {/* Dedicated Results Screen when submitted */}
+      {showResultsScreen && (
+        <div className="bg-white rounded-2xl p-6 sm:p-8 border border-slate-200 shadow-md space-y-6 animate-in fade-in">
+          <div className="flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-slate-200">
+            <div>
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-6 h-6 text-[#0f8b8d]" />
+                <h2 className="text-xl font-bold text-slate-900">Session Results & Analysis</h2>
+                <span className="px-2.5 py-0.5 rounded text-xs font-mono font-bold bg-[#001432] text-[#8ff3f4]">
+                  {currentQ?.examType || 'CLINICAL BLOCK'}
+                </span>
+                <span className="px-2.5 py-0.5 rounded text-xs font-mono bg-slate-100 text-slate-600">
+                  {mode === 'EXAM' ? 'Exam Mode' : 'Tutor Mode'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                Completed in {formatTimer(secondsElapsed)} · {questions.length} Questions Block
+              </p>
+            </div>
+
             <div className="flex items-center gap-2">
-              <Activity className="w-4 h-4 text-[#0f8b8d]" />
-              <span className="font-bold text-slate-900">AMC CAT Adaptive Difficulty Calibration:</span>
-              <span className={`px-2 py-0.5 rounded text-[11px] font-mono font-bold ${
-                adaptiveTier === 'EXTREME' ? 'bg-purple-100 text-purple-800' :
-                adaptiveTier === 'HIGH' ? 'bg-rose-100 text-rose-800' :
-                adaptiveTier === 'MEDIUM' ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'
-              }`}>
-                Current Tier: {adaptiveTier}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-3 font-mono text-[11px]">
-              <span>Scaled Score: <strong className="text-slate-900">{adaptiveTheta} / 500</strong></span>
-              <span className={`font-bold px-1.5 py-0.5 rounded ${
-                adaptiveTheta >= 250 ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
-              }`}>
-                {adaptiveTheta >= 250 ? 'PASSING (>=250)' : 'BELOW PASS MARK'}
-              </span>
+              <button
+                onClick={() => setShowResultsScreen(false)}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-all"
+              >
+                Review Questions with Explanations
+              </button>
+              <button
+                onClick={() => onNavigate('analytics')}
+                className="px-4 py-2 rounded-xl bg-[#001432] hover:bg-[#13294b] text-white text-xs font-bold transition-all"
+              >
+                Go to Analytics
+              </button>
             </div>
           </div>
 
-          {/* Visual Dynamic Calibration Meter */}
-          <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden relative">
-            <div 
-              className={`h-full transition-all duration-500 rounded-full ${
-                adaptiveTier === 'EXTREME' ? 'bg-purple-600' :
-                adaptiveTier === 'HIGH' ? 'bg-rose-500' :
-                adaptiveTier === 'MEDIUM' ? 'bg-[#0f8b8d]' : 'bg-emerald-500'
-              }`}
-              style={{ width: `${(adaptiveTheta / 500) * 100}%` }}
-            />
-            {/* 250 Pass Mark Vertical Line */}
-            <div 
-              className="absolute top-0 bottom-0 w-0.5 bg-slate-700/80" 
-              style={{ left: '50%' }}
-              title="Pass Mark Threshold (250/500)"
-            />
+          {/* AMC CAT Scaled Score Card - ONLY appears on results screen for AMC CAT */}
+          {isAMC && (
+            <div className="p-5 rounded-2xl bg-[#001432] text-white border border-[#13294b] space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-bold text-[#8ff3f4] uppercase tracking-wider flex items-center gap-1.5">
+                  <Award className="w-4 h-4 text-[#8ff3f4]" /> AMC CAT Scaled Score
+                </div>
+                <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  Estimate
+                </span>
+              </div>
+              <div className="flex items-baseline gap-3">
+                <span className="text-3xl font-mono font-bold text-white">
+                  {amcEstimatedScore}
+                </span>
+                <span className="text-sm font-mono text-slate-400">/ 500</span>
+                <span className={`ml-auto px-2.5 py-1 rounded-lg text-xs font-mono font-bold ${
+                  amcEstimatedScore >= 250
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                }`}>
+                  {amcEstimatedScore >= 250 ? 'Estimated Pass (≥250)' : 'Below Passing Cutoff (<250)'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed border-t border-slate-700/60 pt-2.5">
+                <strong className="text-slate-100">Estimate Computation:</strong> Computed from this session's real performance ({correctCount} correct of {totalQuestions} total questions = {totalQuestions > 0 ? Math.round((correctCount / totalQuestions) * 100) : 0}%) using the standard linear scaling formula: <code className="bg-slate-800 px-1.5 py-0.5 rounded text-[#8ff3f4]">Score = 100 + (Accuracy % × 4)</code>. Official AMC CAT examinations apply multi-parameter Computerized Adaptive Testing (IRT 3PL model).
+              </p>
+            </div>
+          )}
+
+          {/* Performance Breakdown Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+              <div className="text-xs text-slate-500 font-semibold uppercase">Attempted</div>
+              <div className="text-2xl font-mono font-bold text-slate-900 mt-1">
+                {answeredCount} <span className="text-xs text-slate-400 font-normal">/ {totalQuestions}</span>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-emerald-50/70 border border-emerald-200">
+              <div className="text-xs text-emerald-800 font-semibold uppercase">Correct</div>
+              <div className="text-2xl font-mono font-bold text-emerald-700 mt-1">
+                {correctCount}
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-rose-50/70 border border-rose-200">
+              <div className="text-xs text-rose-800 font-semibold uppercase">Incorrect</div>
+              <div className="text-2xl font-mono font-bold text-rose-700 mt-1">
+                {answeredCount - correctCount}
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-teal-50/70 border border-teal-200">
+              <div className="text-xs text-teal-800 font-semibold uppercase">Session Accuracy</div>
+              <div className="text-2xl font-mono font-bold text-teal-700 mt-1">
+                {accuracy !== null ? `${accuracy}%` : '-'}
+              </div>
+            </div>
           </div>
 
-          <div className="flex justify-between text-[10px] text-slate-400 font-mono">
-            <span>Low Cognitive (100)</span>
-            <span className="font-bold text-slate-600">▲ 250 Pass Cutoff</span>
-            <span>Mastery Ranker (500)</span>
+          <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-2">
+            <div className="font-bold text-slate-900">Session Statistics:</div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-slate-600 font-mono">
+              <div>Time Elapsed: <strong className="text-slate-800">{formatTimer(secondsElapsed)}</strong></div>
+              <div>Average Pace: <strong className="text-slate-800">{paceDisplay}</strong></div>
+              <div>Flagged Questions: <strong className="text-slate-800">{flaggedCount}</strong></div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between pt-4 border-t border-slate-200">
+            <button
+              onClick={() => onNavigate(currentQ?.sourceType ? 'question-bank' : 'practice')}
+              className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              Back to {currentQ?.sourceType ? 'Question Bank' : 'Practice Builder'}
+            </button>
+
+            <button
+              onClick={() => setShowResultsScreen(false)}
+              className="px-4 py-2 rounded-xl bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold transition-all shadow-xs"
+            >
+              Review Test Questions with Explanations →
+            </button>
           </div>
         </div>
       )}
@@ -223,33 +391,45 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
         {/* Left Column: Question Details & Dissection */}
         <div className="lg:col-span-8 space-y-6">
           <div className="bg-white rounded-2xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6">
-            {/* Clinical Vignette Stem */}
-            <div className="p-4 rounded-xl bg-slate-50 border-l-4 border-[#001432] text-slate-800 text-sm leading-relaxed font-sans">
-              <span className="font-bold text-slate-900 block mb-1">
-                Clinical Vignette:
-              </span>
-              {currentQ.stem}
-            </div>
+            {/* Clinical Vignette Stem & Question Text: Render stem only if not missing or equal to question */}
+            {(() => {
+              const questionPrompt = ((currentQ as any)?.question || currentQ?.questionText || '').trim();
+              const rawStem = (currentQ?.stem || '').trim();
+              const isStemMissingOrEqual = !rawStem || rawStem.toLowerCase() === questionPrompt.toLowerCase();
 
-            {/* Embedded Image if available */}
-            {currentQ.image && (
-              <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-                <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                  <span>{currentQ.imageCaption || 'Histopathology Specimen'}</span>
-                  <span className="text-slate-400 font-mono">Special Stain</span>
-                </div>
-                <img 
-                  src={currentQ.image} 
-                  alt="Clinical Specimen" 
-                  className="w-full max-h-72 object-cover rounded-lg border border-slate-300 shadow-sm"
-                />
-              </div>
-            )}
+              return (
+                <>
+                  {!isStemMissingOrEqual && (
+                    <div className="p-4 rounded-xl bg-slate-50 border-l-4 border-[#001432] text-slate-800 text-sm leading-relaxed font-sans">
+                      <span className="font-bold text-slate-900 block mb-1">
+                        Clinical Vignette:
+                      </span>
+                      {rawStem}
+                    </div>
+                  )}
 
-            {/* Question Text */}
-            <h2 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
-              {currentQ.questionText}
-            </h2>
+                  {/* Embedded Image if available */}
+                  {currentQ?.image && (
+                    <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
+                      <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                        <span>{currentQ.imageCaption || 'Histopathology Specimen'}</span>
+                        <span className="text-slate-400 font-mono">Special Stain</span>
+                      </div>
+                      <img 
+                        src={currentQ.image} 
+                        alt="Clinical Specimen" 
+                        className="w-full max-h-72 object-cover rounded-lg border border-slate-300 shadow-sm"
+                      />
+                    </div>
+                  )}
+
+                  {/* Question Text */}
+                  <h2 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
+                    {questionPrompt}
+                  </h2>
+                </>
+              );
+            })()}
 
             {/* Statements List if multiple completion */}
             {currentQ.statements && currentQ.statements.length > 0 && (
@@ -412,7 +592,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-slate-900">Question Palette</h3>
               <span className="text-xs font-mono text-slate-500">
-                {Object.keys(userAnswers).length} / {questions.length} Attempted
+                {answeredCount} / {totalQuestions} Attempted
               </span>
             </div>
 
@@ -424,7 +604,9 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
 
                 let bgClass = 'bg-slate-100 text-slate-700 hover:bg-slate-200';
                 if (ans) {
-                  if (ans === q.correctOption) {
+                  if (mode === 'EXAM' && !examSubmitted) {
+                    bgClass = 'bg-[#001432] text-white font-bold';
+                  } else if (ans === q.correctOption) {
                     bgClass = 'bg-emerald-600 text-white font-bold';
                   } else {
                     bgClass = 'bg-rose-600 text-white font-bold';
@@ -452,37 +634,82 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
           {/* Module Score Card */}
           <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
             <h3 className="text-sm font-bold text-slate-900">
-              {isAMC ? 'AMC CAT Performance' : 'Board Scoring & Marking'}
+              Session Performance
             </h3>
             
-            <div className="grid grid-cols-2 gap-2 text-center">
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <div className="text-xl font-mono font-bold text-slate-900">
-                  {isAMC ? `${adaptiveTheta}` : '+1.67'}
+            {answeredCount === 0 ? (
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-100 text-center space-y-1">
+                <div className="text-base font-mono font-bold text-slate-700">0 attempted</div>
+                <div className="text-[11px] text-slate-400">No score or accuracy computed yet</div>
+              </div>
+            ) : mode === 'EXAM' && !examSubmitted ? (
+              <div className="space-y-2">
+                <div className="grid grid-cols-2 gap-2 text-center">
+                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
+                    <div className="text-xl font-mono font-bold text-slate-900">
+                      {answeredCount} / {totalQuestions}
+                    </div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">
+                      Answered
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
+                    <div className="text-xl font-mono font-bold text-amber-600">
+                      {flaggedCount}
+                    </div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">
+                      Flagged
+                    </div>
+                  </div>
                 </div>
-                <div className="text-[10px] text-slate-500 uppercase tracking-wide">
-                  {isAMC ? 'Scaled Score (500)' : 'Net Score'}
+                <div className="text-[11px] text-slate-500 text-center font-mono">
+                  Exam mode: scoring revealed upon submission
                 </div>
               </div>
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <div className="text-xl font-mono font-bold text-emerald-600">
-                  {isAMC ? (adaptiveTheta >= 250 ? 'PASS' : 'FAIL') : '100%'}
+            ) : (
+              <div className="grid grid-cols-2 gap-2 text-center">
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
+                  <div className="text-xl font-mono font-bold text-slate-900">
+                    {correctCount} / {answeredCount}
+                  </div>
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wide">
+                    Correct Answers
+                  </div>
                 </div>
-                <div className="text-[10px] text-slate-500 uppercase tracking-wide">
-                  {isAMC ? 'Result Status' : 'Accuracy'}
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
+                  <div className="text-xl font-mono font-bold text-emerald-600">
+                    {accuracy}%
+                  </div>
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wide">
+                    Session Accuracy
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
 
-            <button
-              onClick={() => {
-                alert('Module submitted! Results compiled into your Analytics dashboard.');
-                onNavigate('analytics');
-              }}
-              className="w-full mt-3 py-2.5 bg-[#001432] hover:bg-[#13294b] text-white text-xs font-bold rounded-xl transition-all"
-            >
-              Submit Module & View Analysis
-            </button>
+            {!examSubmitted ? (
+              <button
+                onClick={handleSubmitModule}
+                className="w-full mt-3 py-2.5 bg-[#001432] hover:bg-[#13294b] text-white text-xs font-bold rounded-xl transition-all"
+              >
+                {mode === 'EXAM' ? 'Submit Exam & View Results' : 'Submit Module & View Results'}
+              </button>
+            ) : (
+              <div className="space-y-2 mt-3">
+                <button
+                  onClick={() => setShowResultsScreen(true)}
+                  className="w-full py-2.5 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-xl transition-all shadow-xs"
+                >
+                  View Results Summary
+                </button>
+                <button
+                  onClick={() => onNavigate('analytics')}
+                  className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all"
+                >
+                  Go to Analytics
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
