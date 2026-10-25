@@ -111,6 +111,11 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
   const isAnswered = !!selectedAnswer;
   const isFlagged = !!flaggedIds[currentQ?.id];
   const isAMC = (questions.length > 0 && questions.some(q => q.examType === 'AMC_CAT')) || currentQ?.examType === 'AMC_CAT';
+  // A revealed question is final: in Tutor mode the key is shown on the first pick, and after
+  // submit everything is graded. Without this lock a second click silently re-scored the
+  // question (a wrong pick could be turned into a "correct" one, inflating accuracy).
+  // Exam mode BEFORE submit is deliberately not locked — changing answers there is the point.
+  const isLocked = (mode === 'TUTOR' || examSubmitted) && !!selectedAnswer;
 
   // Computed session metrics strictly from real answers
   const totalQuestions = questions.length;
@@ -127,6 +132,9 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
 
   const handleSelectOption = (optId: 'A' | 'B' | 'C' | 'D' | 'E') => {
     if (!currentQ) return;
+    // Already revealed/submitted: keep the first answer. This is the fix for the score
+    // flipping from 0/1 to 1/1 when another option was clicked after the key appeared.
+    if ((mode === 'TUTOR' || examSubmitted) && userAnswers[currentQ.id]) return;
     setUserAnswers(prev => ({ ...prev, [currentQ.id]: optId }));
     if (mode === 'TUTOR' || examSubmitted) {
       setShowExplanation(true);
@@ -583,7 +591,9 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                   const isSelected = selectedAnswer === opt.id;
                   const isCorrect = currentQ.correctOption === opt.id;
 
-                  let borderClass = 'border-slate-200 hover:border-slate-300 bg-white';
+                  let borderClass = isLocked
+                    ? 'border-slate-200 bg-white'
+                    : 'border-slate-200 hover:border-slate-300 bg-white';
                   let badgeClass = 'bg-slate-100 text-slate-700';
 
                   if (isAnswered && showExplanation) {
@@ -603,7 +613,8 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                     <div
                       key={opt.id}
                       onClick={() => handleSelectOption(opt.id)}
-                      className={`p-4 rounded-xl border cursor-pointer transition-all flex items-start gap-3.5 text-xs ${borderClass}`}
+                      aria-disabled={isLocked}
+                      className={`p-4 rounded-xl border transition-all flex items-start gap-3.5 text-xs ${isLocked ? 'cursor-default select-none' : 'cursor-pointer'} ${borderClass}`}
                     >
                       <span className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs shrink-0 mt-0.5 ${badgeClass}`}>
                         {opt.id}

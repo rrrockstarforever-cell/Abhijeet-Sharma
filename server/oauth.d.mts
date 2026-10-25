@@ -34,6 +34,8 @@ export interface OAuthChatOptions {
   json?: boolean;
   effort?: string;
   search?: boolean;
+  /** Aborts the upstream provider request (Stop button in the UI). */
+  signal?: AbortSignal;
 }
 
 export declare function startLogin(provider: OAuthProvider): Promise<OAuthStartResult>;

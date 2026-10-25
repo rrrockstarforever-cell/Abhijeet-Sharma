@@ -261,7 +261,7 @@ export async function listModels(provider) {
 }
 
 // ---------- chat ----------
-export async function chat({ provider, model, system, messages, json, effort, search }) {
+export async function chat({ provider, model, system, messages, json, effort, search, signal }) {
   const tok = await token(provider);
   if (provider === 'claude') {
     // Anthropic rejects an empty text block ("system: text content blocks must be
@@ -291,6 +291,7 @@ export async function chat({ provider, model, system, messages, json, effort, se
         'anthropic-beta': CLAUDE.betas, 'User-Agent': `claude-code/${CLAUDE.version} (external, cli)`,
       },
       body: JSON.stringify(thinking ? { ...claudeBody, thinking } : claudeBody),
+      signal,
     });
     let r = await sendClaude({ type: 'between_tools' });
     let b = await r.json().catch(() => ({}));
@@ -307,6 +308,7 @@ export async function chat({ provider, model, system, messages, json, effort, se
     const r = await fetch(`${XAI.cliBase}/responses`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', ...xaiHeaders(tok) },
       body: JSON.stringify({ model, ...(system && String(system).trim() ? { instructions: String(system) } : {}), input: messages.map((m) => ({ role: m.role, content: m.content })), tools: [{ type: 'web_search' }], max_output_tokens: 4000 }),
+      signal,
     });
     const b = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(`xAI web search refused (HTTP ${r.status}): ${providerMessage(b, r.status)}`.slice(0, 300));
@@ -330,11 +332,13 @@ export async function chat({ provider, model, system, messages, json, effort, se
     let r = await fetch(`${XAI.cliBase}/chat/completions`, {
       method: 'POST', headers: cliHeaders,
       body: JSON.stringify({ model, messages: xaiMessages, ...(json ? { response_format: { type: 'json_object' } } : {}) }),
+      signal,
     });
     if (r.status === 404 || r.status === 405) {
       r = await fetch(`${XAI.cliBase}/responses`, {
         method: 'POST', headers: cliHeaders,
         body: JSON.stringify({ model, input: xaiMessages, ...(json ? { text: { format: { type: 'json_object' } } } : {}) }),
+        signal,
       });
       const b = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(`xAI: ${providerMessage(b, r.status)}`);
@@ -359,6 +363,7 @@ export async function chat({ provider, model, system, messages, json, effort, se
       ...(json ? { text: { format: { type: 'json_object' } } } : {}),
       ...(/^(gpt-5|o\d)/i.test(model || '') ? { reasoning: { effort: { min: 'low', low: 'low', medium: 'medium', high: 'high', extra: 'high', ultra: 'high' }[effort || 'medium'] || 'medium' } } : {}),
     }),
+    signal,
   });
   if (!r.ok) {
     const t = await r.text();

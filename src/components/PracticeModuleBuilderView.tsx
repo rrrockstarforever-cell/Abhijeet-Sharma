@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { 
   Sliders, 
   Layers, 
@@ -15,6 +15,8 @@ import {
   ToggleLeft,
   ToggleRight,
   ShieldAlert,
+  Square,
+  MessageSquarePlus,
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
@@ -134,6 +136,20 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     error: string | null;
   }>({ busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0, error: null });
   const stopEarlyRef = useRef(false);
+  // Real cancellation: the Stop button aborts the in-flight batch request (and, with the
+  // server-side abort, the upstream provider call) instead of waiting for the batch.
+  const abortRef = useRef<AbortController | null>(null);
+  const [stopping, setStopping] = useState(false);
+  // Questions kept when the user stopped early: validated, never padded, launchable as-is.
+  const [partial, setPartial] = useState<ClinicalQuestion[] | null>(null);
+
+  // Suggestion box: a TEMPORARY generation profile. Held in component state only — never
+  // localStorage, never written to settings — so a reload or restart drops it.
+  const [profileDraft, setProfileDraft] = useState('');
+  const [appliedProfile, setAppliedProfile] = useState<string | null>(null);
+
+  // Leaving the screen mid-generation must not keep spending quota.
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
 
   // Section-14 AI writing options
   const [questionTypes, setQuestionTypes] = useState<string[]>([]);
@@ -309,9 +325,13 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
 
     setGenState({ busy: true, generated: 0, total: questionCount, batch: 0, totalBatches: Math.ceil(questionCount / 10), dropped: 0, error: null });
     stopEarlyRef.current = false;
+    setPartial(null);
+    setStopping(false);
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
-      const { questions, dropped } = await generateExamQuestions({
+      const { questions, dropped, stopped } = await generateExamQuestions({
         exam: selectedExam,
         count: questionCount,
         subjectSubtopics: subjects.map(s => ({ subject: s, subtopics: selectedSubtopics[s] ?? SUBTOPICS[s] ?? [] })),
@@ -320,6 +340,8 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         onProgress: (generated, total, batch, totalBatches) =>
           setGenState(st => ({ ...st, generated, batch, totalBatches })),
         shouldStop: () => stopEarlyRef.current,
+        signal: controller.signal,
+        customInstructions: appliedProfile ?? undefined,
         questionTypes,
         stemPatterns,
         evidenceSources: selectedExam === 'AMC_CAT' ? evidenceSources : undefined,
@@ -353,20 +375,58 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         dropped,
         error: null,
       });
-      onLaunchModule(
-        selectedExam,
-        questions.length,
-        mode,
-        subjects,
-        difficultyTier,
-        difficultySubLevel,
-        chosenSubtopics,
-        questions
-      );
+      if (stopped) {
+        // Stopped by the user: keep every validated question and let them launch it.
+        setPartial(questions);
+        return;
+      }
+      launchWith(questions, subjects, chosenSubtopics);
     } catch (err: any) {
-      const message = err instanceof AiError ? err.message : (err?.message || 'AI question generation failed.');
-      setGenState({ busy: false, generated: 0, total: questionCount, batch: 0, totalBatches: 0, dropped: 0, error: message });
+      const aborted = controller.signal.aborted || (err instanceof AiError && err.kind === 'aborted');
+      const message = aborted
+        ? 'Generation stopped.'
+        : err instanceof AiError ? err.message : (err?.message || 'AI question generation failed.');
+      setGenState({ busy: false, generated: 0, total: questionCount, batch: 0, totalBatches: 0, dropped: 0, error: aborted ? null : message });
+    } finally {
+      abortRef.current = null;
+      setStopping(false);
     }
+  };
+
+  /** Hand a question set to the Test Runner launch path. */
+  const launchWith = (questions: ClinicalQuestion[], subjects: string[], chosenSubtopics: string[]) => {
+    onLaunchModule(
+      selectedExam,
+      questions.length,
+      mode,
+      subjects,
+      difficultyTier,
+      difficultySubLevel,
+      chosenSubtopics,
+      questions
+    );
+  };
+
+  /** Stop button: cancel the in-flight batch now, keep everything already validated. */
+  const handleStop = () => {
+    if (!genState.busy || stopping) return;
+    stopEarlyRef.current = true;
+    setStopping(true);
+    setGenState(st => ({ ...st, error: null }));
+    abortRef.current?.abort();
+  };
+
+  /** Launch the questions kept from a stopped run. */
+  const handleLaunchPartial = () => {
+    if (!partial || partial.length === 0) return;
+    const subjects = resolveSubjects();
+    const chosenSubtopics: string[] = [];
+    subjects.forEach(subj => {
+      const list = selectedSubtopics[subj] ?? SUBTOPICS[subj] ?? [];
+      chosenSubtopics.push(...list);
+    });
+    setPartial(null);
+    launchWith(partial, subjects, chosenSubtopics);
   };
 
   const totalChosenSubtopicsCount = (() => {
@@ -1361,12 +1421,61 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               </p>
             </div>
 
+            {/* Suggestion box — a TEMPORARY generation profile (component state only, never
+                persisted). Only an applied profile is sent with the request. */}
+            <div className="rounded-xl bg-white/5 border border-white/10 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-[#8ff3f4]">
+                  <MessageSquarePlus className="w-3.5 h-3.5" /> Suggestion box
+                </div>
+                <span className="text-[9px] font-mono text-white/45">temporary &middot; never saved</span>
+              </div>
+              <p className="text-[10px] leading-relaxed text-white/60">
+                Tell the AI how to write <span className="italic">this</span> set — style, difficulty, stem length,
+                distractors, focus. It applies to the next generation only, and a reload clears it.
+              </p>
+              <textarea
+                value={profileDraft}
+                onChange={(e) => setProfileDraft(e.target.value)}
+                disabled={genState.busy}
+                rows={3}
+                placeholder={'e.g. "closer distractors, shorter stems, more next-best-step items, use Indian guidelines, drop classic one-liners"'}
+                className="w-full resize-y rounded-lg bg-black/30 border border-white/15 px-2.5 py-2 text-[11px] text-white placeholder:text-white/30 focus:outline-none focus:border-[#0f8b8d]/70 disabled:opacity-50"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setAppliedProfile(profileDraft.trim() || null)}
+                  disabled={genState.busy || !profileDraft.trim() || (appliedProfile ?? '') === profileDraft.trim()}
+                  className="flex-1 py-1.5 rounded-lg bg-[#0f8b8d]/90 hover:bg-[#00696b] disabled:opacity-40 disabled:cursor-not-allowed text-white text-[10px] font-bold transition-colors"
+                >
+                  {appliedProfile && appliedProfile === profileDraft.trim()
+                    ? 'Temporary profile applied'
+                    : 'Apply temporary profile'}
+                </button>
+                <button
+                  onClick={() => { setAppliedProfile(null); setProfileDraft(''); }}
+                  disabled={genState.busy || (!appliedProfile && !profileDraft.trim())}
+                  className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-40 disabled:cursor-not-allowed text-white/80 text-[10px] font-semibold transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
+              {appliedProfile && appliedProfile !== profileDraft.trim() && (
+                <p className="text-[10px] text-amber-300">Unapplied changes — press Apply to use the edited text.</p>
+              )}
+            </div>
+
             {/* AI generation status */}
             <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-[11px] font-mono text-slate-200 space-y-1">
               <div className="flex justify-between">
                 <span className="text-[#8ff3f4] font-bold uppercase tracking-wider">AI Generator</span>
                 <span>{getActiveProvider() ? `${getActiveProvider()} · ${getEffectiveModel(getActiveProvider()!)}` : 'no active provider'}</span>
               </div>
+              {appliedProfile && (
+                <div className="text-[10px] text-amber-200/90 truncate" title={appliedProfile}>
+                  Temporary profile active · not saved — {appliedProfile.slice(0, 84)}{appliedProfile.length > 84 ? '…' : ''}
+                </div>
+              )}
               {genState.busy ? (
                 <>
                   <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
@@ -1415,14 +1524,43 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             )}
           </button>
 
-          {genState.busy && genState.generated > 0 && (
+          {/* Stop is ALWAYS reachable while generating — the first batch can run for a
+              minute, and stopping used to be impossible until it returned. */}
+          {genState.busy && (
             <button
-              onClick={() => { stopEarlyRef.current = true; }}
-              className="w-full py-2.5 bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2"
+              onClick={handleStop}
+              disabled={stopping}
+              className="w-full py-2.5 bg-rose-600/90 hover:bg-rose-500 disabled:opacity-60 disabled:cursor-wait border border-rose-400/40 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2"
             >
-              <ShieldAlert className="w-4 h-4" />
-              Stop &amp; launch with {genState.generated} ready
+              <Square className="w-3.5 h-3.5 fill-current" />
+              {stopping
+                ? 'Stopping…'
+                : genState.generated > 0
+                  ? `Stop generating · keep ${genState.generated} ready`
+                  : 'Stop generating'}
             </button>
+          )}
+
+          {partial && partial.length > 0 && !genState.busy && (
+            <>
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-400/30 text-amber-100 text-[11px] leading-relaxed">
+                Stopped at {partial.length} of {genState.total} questions. Every one of them passed validation —
+                nothing was padded. Launch them as a module, or discard and generate again.
+              </div>
+              <button
+                onClick={handleLaunchPartial}
+                className="w-full py-3 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-xl transition-all shadow-md flex items-center justify-center gap-2 transform active:scale-95"
+              >
+                <Play className="w-4 h-4 fill-current" />
+                Launch with {partial.length} ready
+              </button>
+              <button
+                onClick={() => setPartial(null)}
+                className="w-full py-2 bg-white/5 hover:bg-white/10 border border-white/15 text-white/75 text-[11px] font-semibold rounded-xl transition-all"
+              >
+                Discard these {partial.length}
+              </button>
+            </>
           )}
 
           {genState.total > 0 && genState.dropped > 0 && !genState.busy && !genState.error && (

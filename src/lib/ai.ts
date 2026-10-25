@@ -20,7 +20,7 @@ export const DEFAULT_MODELS: Record<AiProviderId, string> = {
 export const NOT_CONNECTED_MESSAGE = 'Connect an AI provider in Settings → AI Subscription Hub.';
 
 export class AiError extends Error {
-  kind: 'not_connected' | 'api' | 'network' | 'invalid';
+  kind: 'not_connected' | 'api' | 'network' | 'invalid' | 'aborted';
   constructor(message: string, kind: AiError['kind'] = 'api') {
     super(message);
     this.name = 'AiError';
@@ -89,6 +89,8 @@ export interface AiCompleteOptions {
   effort?: string;
   provider?: AiProviderId;
   model?: string;
+  /** Cancels the HTTP request; the server also drops the upstream call (see /api/ai/complete). */
+  signal?: AbortSignal;
 }
 
 /** Calls POST /api/ai/complete with the active (or given) provider. Throws typed AiError on failure. */
@@ -112,8 +114,12 @@ export async function aiComplete(options: AiCompleteOptions): Promise<string> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: options.signal,
     });
   } catch (err: any) {
+    if (options.signal?.aborted || err?.name === 'AbortError') {
+      throw new AiError('Generation stopped.', 'aborted');
+    }
     throw new AiError(`Could not reach the local AI server (${err?.message || 'network error'}).`, 'network');
   }
 
@@ -280,10 +286,18 @@ export interface GenerateQuestionsOptions {
   presentingProblems?: string[];
   /** "My notes" source: real saved highlights/notes the questions must be derived from. */
   sourceMaterial?: string;
+  /**
+   * Learner's temporary generation profile (suggestion box in Practice Builder).
+   * Sent as a user-message instruction for THIS run only; never persisted, never edited
+   * into the system prompt.
+   */
+  customInstructions?: string;
   /** Progress after each completed batch: ready count, target total, batch number (1-based), planned batch count. */
   onProgress?: (ready: number, total: number, batch: number, totalBatches: number) => void;
   /** Checked between batches; return true to stop early and keep everything generated so far. */
   shouldStop?: () => boolean;
+  /** Aborts the in-flight batch request immediately (Stop button) and ends the loop. */
+  signal?: AbortSignal;
 }
 
 const SUB_LEVEL_DEFAULT: Record<'LOW' | 'MEDIUM' | 'HIGH', DifficultySubLevel> = {
@@ -379,13 +393,14 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
  * Generate `count` MCQs with the user's ACTIVE AI provider, in batches of <=10.
  * Returns validated ClinicalQuestion[] tagged sourceType:'ai-generator' plus the number dropped.
  */
-export async function generateExamQuestions(options: GenerateQuestionsOptions): Promise<{ questions: ClinicalQuestion[]; dropped: number }> {
+export async function generateExamQuestions(options: GenerateQuestionsOptions): Promise<{ questions: ClinicalQuestion[]; dropped: number; stopped: boolean }> {
   const {
     exam, count, subjectSubtopics, difficultyTier, difficultySubLevel, effort,
-    onProgress, shouldStop,
+    onProgress, shouldStop, signal,
     questionTypes, stemPatterns, evidenceSources, patientGroup, presentingProblems,
-    sourceMaterial,
+    sourceMaterial, customInstructions,
   } = options;
+  const learnerProfile = typeof customInstructions === 'string' ? customInstructions.trim().slice(0, 1500) : '';
 
   // Round-robin the subject -> subtopic pool so every batch samples across subjects.
   const pool: { subject: string; subtopic: string }[] = [];
@@ -414,8 +429,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const maxBatches = plannedBatches * 3 + 4; // refill allowance
   let consecutiveFailed = 0;
 
+  let stopped = false;
   while (questions.length < count && batch < maxBatches && consecutiveFailed < 3) {
-    if (shouldStop?.()) break;
+    if (shouldStop?.() || signal?.aborted) { stopped = true; break; }
     batch += 1;
     const batchSize = Math.min(10, count - questions.length);
     const before = questions.length;
@@ -479,21 +495,41 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       '  "trapExplanation": "why the most tempting distractor is wrong",',
       '  "targetAccuracy": 0-100 expected percent of examinees answering correctly',
       '}',
+      learnerProfile
+        ? [
+            "Learner's temporary instructions for THIS generation run only (the suggestion box). Apply them to style, focus, difficulty, stem construction, option design and distractor choice:",
+            '"""',
+            learnerProfile,
+            '"""',
+            'These instructions are subordinate to the JSON shape above, exactly one correct option, factual accuracy, and this exam pattern. Where a learner instruction conflicts with any of those, keep the pattern and the facts and ignore only that instruction.',
+          ].join('\n')
+        : '',
       GENERATION_RULES,
       'Use authentic current clinical knowledge; no obsolete trivia. Output ONLY the JSON object.',
     ].join('\n');
 
-    const raw = await aiComplete({
-      system: GENERATOR_SYSTEM,
-      messages: [
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-      json: true,
-      effort,
-    });
+    let raw: string;
+    try {
+      raw = await aiComplete({
+        system: GENERATOR_SYSTEM,
+        messages: [
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        json: true,
+        effort,
+        signal,
+      });
+    } catch (err: any) {
+      // A stopped generation is not a failure: keep every question already written.
+      if (signal?.aborted || err instanceof AiError && err.kind === 'aborted' || err?.name === 'AbortError') {
+        stopped = true;
+        break;
+      }
+      throw err;
+    }
 
     const parsed = extractJson<{ questions?: BatchQuestionSpec[] } | BatchQuestionSpec[]>(raw);
     let batchItems: BatchQuestionSpec[] | null = Array.isArray(parsed)
@@ -527,5 +563,5 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     onProgress?.(questions.length, count, batch, Math.max(plannedBatches, batch));
   }
 
-  return { questions, dropped };
+  return { questions, dropped, stopped };
 }

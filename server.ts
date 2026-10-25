@@ -118,8 +118,9 @@ async function runCompletion(opts: {
   json?: boolean;
   effort?: string;
   search?: boolean;
+  signal?: AbortSignal;
 }): Promise<string> {
-  const { provider, model, system, messages, json, effort, search } = opts;
+  const { provider, model, system, messages, json, effort, search, signal } = opts;
   if (provider === 'gemini') {
     const ai = getGemini();
     if (!ai) throw new ApiError(notConnectedMessage('gemini'), 401);
@@ -134,6 +135,7 @@ async function runCompletion(opts: {
       config: {
         systemInstruction: system,
         temperature: 0.7,
+        ...(signal ? { abortSignal: signal } : {}),
         ...(json ? { responseMimeType: 'application/json' } : {}),
       },
     });
@@ -151,6 +153,7 @@ async function runCompletion(opts: {
       json,
       effort,
       search,
+      signal,
     });
   } catch (err: any) {
     const msg = String(err?.message || 'AI request failed');
@@ -505,15 +508,23 @@ app.post('/api/ai/complete', async (req: Request, res: Response) => {
   if (!Array.isArray(messages) || messages.length === 0 || messages.some((m: any) => !m || typeof m.content !== 'string')) {
     return res.status(400).json({ error: 'messages must be an array of {role, content}.' });
   }
+  // The client's Stop button aborts its fetch; mirror that upstream so a stopped
+  // generation does not keep burning provider quota.
+  const controller = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) controller.abort();
+  });
   try {
-    const text = await runCompletion({ provider, model, system, messages, json, effort });
+    const text = await runCompletion({ provider, model, system, messages, json, effort, signal: controller.signal });
+    if (controller.signal.aborted) return;
     if (!text || !text.trim()) {
       return res.status(502).json({ error: 'The AI provider returned an empty response. Try again.' });
     }
     return res.json({ success: true, text, model: model || DEFAULT_MODELS[provider] });
   } catch (err: any) {
+    if (controller.signal.aborted) return; // client stopped it; nothing to answer
     const status = err instanceof ApiError ? err.status : 502;
-    return res.status(status).json({ error: err?.message || 'AI request failed.' });
+    if (!res.headersSent) return res.status(status).json({ error: err?.message || 'AI request failed.' });
   }
 });
 
