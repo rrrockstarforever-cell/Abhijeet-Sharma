@@ -21,6 +21,10 @@ export const NOT_CONNECTED_MESSAGE = 'Connect an AI provider in Settings → AI 
 
 export class AiError extends Error {
   kind: 'not_connected' | 'api' | 'network' | 'invalid' | 'aborted';
+  /** HTTP status when the failure came from the local server. */
+  status?: number;
+  /** Server-suggested wait (from Retry-After), capped. */
+  retryAfterMs?: number;
   constructor(message: string, kind: AiError['kind'] = 'api') {
     super(message);
     this.name = 'AiError';
@@ -131,7 +135,14 @@ export async function aiComplete(options: AiCompleteOptions): Promise<string> {
   if (!res.ok) {
     const srvMsg = typeof data?.error === 'string' ? data.error : `AI request failed (HTTP ${res.status}).`;
     if (res.status === 401) throw new AiError(`${provider.charAt(0).toUpperCase() + provider.slice(1)} is not connected. ${NOT_CONNECTED_MESSAGE}`, 'not_connected');
-    throw new AiError(srvMsg, 'api');
+    const err = new AiError(srvMsg, 'api');
+    err.status = res.status;
+    const ra = res.headers.get('retry-after');
+    if (ra) {
+      const secs = Number(ra);
+      if (Number.isFinite(secs)) err.retryAfterMs = Math.min(30_000, Math.max(0, secs * 1000));
+    }
+    throw err;
   }
   const text = typeof data?.text === 'string' ? data.text : '';
   if (!text.trim()) throw new AiError('The AI provider returned an empty response. Try again.', 'api');
@@ -298,6 +309,8 @@ export interface GenerateQuestionsOptions {
   shouldStop?: () => boolean;
   /** Aborts the in-flight batch request immediately (Stop button) and ends the loop. */
   signal?: AbortSignal;
+  /** Called when a batch is being retried: 1-based attempt, attempt limit, and why. */
+  onRetry?: (attempt: number, maxAttempts: number, reason: string) => void;
 }
 
 const SUB_LEVEL_DEFAULT: Record<'LOW' | 'MEDIUM' | 'HIGH', DifficultySubLevel> = {
@@ -318,6 +331,28 @@ const tierToCog: Record<'LOW' | 'MEDIUM' | 'HIGH', string> = {
   MEDIUM: 'Clinical 2-Step',
   HIGH: 'Multi-Step & IBQ',
 };
+
+/** setTimeout that resolves early (and harmlessly) when the run is aborted. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+}
+
+/** Turns a provider error into one sentence a learner can act on. */
+export function describeFailure(err: any): string {
+  if (!err) return 'the provider returned nothing';
+  const msg = String(err?.message || err).replace(/\s+/g, ' ').trim();
+  return msg.length > 220 ? msg.slice(0, 217) + '…' : msg;
+}
+
+/** Empty replies, 5xx and throttling are worth retrying; a missing login is not. */
+function isRetryable(err: any): boolean {
+  if (err instanceof AiError) return err.kind === 'api' || err.kind === 'network';
+  return true;
+}
 
 let globalSeq = 0;
 function nextId(exam: ExamType): string {
@@ -393,10 +428,10 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
  * Generate `count` MCQs with the user's ACTIVE AI provider, in batches of <=10.
  * Returns validated ClinicalQuestion[] tagged sourceType:'ai-generator' plus the number dropped.
  */
-export async function generateExamQuestions(options: GenerateQuestionsOptions): Promise<{ questions: ClinicalQuestion[]; dropped: number; stopped: boolean }> {
+export async function generateExamQuestions(options: GenerateQuestionsOptions): Promise<{ questions: ClinicalQuestion[]; dropped: number; stopped: boolean; failure: string | null }> {
   const {
     exam, count, subjectSubtopics, difficultyTier, difficultySubLevel, effort,
-    onProgress, shouldStop, signal,
+    onProgress, shouldStop, signal, onRetry,
     questionTypes, stemPatterns, evidenceSources, patientGroup, presentingProblems,
     sourceMaterial, customInstructions,
   } = options;
@@ -430,6 +465,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   let consecutiveFailed = 0;
 
   let stopped = false;
+  // Why the run ended short (after retries), so the UI can say more than "try again".
+  let failure: string | null = null;
+  let waited: number | undefined;
+
   while (questions.length < count && batch < maxBatches && consecutiveFailed < 3) {
     if (shouldStop?.() || signal?.aborted) { stopped = true; break; }
     batch += 1;
@@ -508,27 +547,55 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       'Use authentic current clinical knowledge; no obsolete trivia. Output ONLY the JSON object.',
     ].join('\n');
 
-    let raw: string;
-    try {
-      raw = await aiComplete({
-        system: GENERATOR_SYSTEM,
-        messages: [
-          {
-            role: 'user',
-            content: prompt,
-          },
-        ],
-        json: true,
-        effort,
-        signal,
-      });
-    } catch (err: any) {
-      // A stopped generation is not a failure: keep every question already written.
-      if (signal?.aborted || err instanceof AiError && err.kind === 'aborted' || err?.name === 'AbortError') {
-        stopped = true;
-        break;
+    // One bad batch must not throw away the batches that already succeeded, so each batch
+    // gets two retries (honouring Retry-After) before it is written off.
+    let raw = '';
+    let batchError: any = null;
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      if (attempt > 1) {
+        const wait = waited ?? (attempt === 2 ? 2000 : 6000);
+        onRetry?.(attempt - 1, MAX_ATTEMPTS - 1, describeFailure(batchError));
+        await sleep(wait, signal);
+        if (signal?.aborted || shouldStop?.()) { stopped = true; break; }
       }
-      throw err;
+      try {
+        raw = await aiComplete({
+          system: GENERATOR_SYSTEM,
+          messages: [
+            {
+              role: 'user',
+              content: prompt,
+            },
+          ],
+          json: true,
+          effort,
+          signal,
+        });
+        batchError = null;
+        break;
+      } catch (err: any) {
+        // A stopped generation is not a failure: keep every question already written.
+        if (signal?.aborted || (err instanceof AiError && err.kind === 'aborted') || err?.name === 'AbortError') {
+          stopped = true;
+          batchError = null;
+          break;
+        }
+        batchError = err;
+        waited = err instanceof AiError ? err.retryAfterMs : undefined;
+        // A missing login / cancelled run is not a "bad batch": stop at once instead of
+        // spending three more calls proving it.
+        if (err instanceof AiError && err.kind === 'not_connected') throw err;
+        if (!isRetryable(err)) break; // a missing login cannot be fixed by retrying
+      }
+    }
+    if (stopped) break;
+    if (batchError) {
+      dropped += batchSize;
+      consecutiveFailed += 1;
+      failure = describeFailure(batchError);
+      onProgress?.(questions.length, count, batch, Math.max(plannedBatches, batch));
+      continue;
     }
 
     const parsed = extractJson<{ questions?: BatchQuestionSpec[] } | BatchQuestionSpec[]>(raw);
@@ -561,7 +628,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }
 
     onProgress?.(questions.length, count, batch, Math.max(plannedBatches, batch));
+    if (questions.length < count) await sleep(700, signal);
   }
 
-  return { questions, dropped, stopped };
+  return { questions, dropped, stopped, failure };
 }

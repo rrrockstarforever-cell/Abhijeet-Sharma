@@ -1,7 +1,7 @@
 // Subscription logins (device-code OAuth) for ChatGPT/Codex and xAI Grok, same pattern Hermes uses.
 // Runs server-side because these endpoints don't allow browser (CORS) calls. Tokens live in
 // ~/.neet-pg-prep/oauth.json (mode 600) and never reach the web page.
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, appendFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -9,7 +9,19 @@ import { join } from 'node:path';
 // user-data folder (%APPDATA%\Pulse Med), so tokens live with the install's data and are
 // NEVER inside the installer or the asar. The home-dir path is a dev-only fallback for
 // `npm run dev`; it must never be __dirname or the app folder.
+const DATA_ROOT = process.env.PULSE_DATA_DIR || join(homedir(), '.pulse-med');
 const DIR = process.env.PULSE_DATA_DIR ? join(process.env.PULSE_DATA_DIR, 'oauth') : join(homedir(), '.neet-pg-prep');
+
+// Provider-call diagnostics. Packaged Electron discards the child's stdout, so this goes to a
+// file. Metadata only — provider, model, status, sizes, stop reasons. Never a token, prompt
+// or response body.
+export function aiLog(entry) {
+  try {
+    const dir = join(DATA_ROOT, 'logs');
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(join(dir, 'ai.log'), JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n');
+  } catch { /* logging must never break a request */ }
+}
 const FILE = join(DIR, 'oauth.json');
 
 const CODEX = {
@@ -284,7 +296,10 @@ export async function chat({ provider, model, system, messages, json, effort, se
     // Switch thinking off (the old app's models never thought) and fall back to omitting
     // the field for older models that do not recognise it.
     const claudeBody = {
-      model, max_tokens: json ? 16384 : 8192,
+      // A 10-item JSON batch (stems + 120-220 word explanations) is ~6-9k output tokens.
+      // 16k left no headroom, and a reply cut at max_tokens comes back with no text block at
+      // all — which reached the user as "the provider returned an empty response".
+      model, max_tokens: json ? 32000 : 8192,
       system: claudeSystem,
       messages,
     };
@@ -303,8 +318,22 @@ export async function chat({ provider, model, system, messages, json, effort, se
       r = await sendClaude(null);
       b = await r.json().catch(() => ({}));
     }
+    const blocks = Array.isArray(b?.content) ? b.content : [];
+    const text = blocks.filter((x) => x.type === 'text').map((x) => x.text || '').join('');
+    aiLog({ provider: 'claude', model, status: r.status, stop: b?.stop_reason,
+            out_tokens: b?.usage?.output_tokens, blocks: blocks.map((x) => x.type), text_len: text.length, json: !!json });
     if (!r.ok) throw new Error(`Claude: ${b?.error?.message || 'HTTP ' + r.status}`);
-    return (b.content || []).filter((x) => x.type === 'text').map((x) => x.text || '').join('');
+    if (!text.trim()) {
+      const reason = b?.stop_reason === 'max_tokens'
+        ? 'the reply hit the output token limit before any answer text (stop_reason: max_tokens)'
+        : b?.stop_reason === 'refusal'
+          ? 'the model refused the request (stop_reason: refusal)'
+          : blocks.length
+            ? `the reply contained only ${blocks.map((x) => x.type).join(', ')} blocks and no text`
+            : `the reply was empty (HTTP ${r.status})`;
+      throw new Error(`Claude returned no text: ${reason}.`);
+    }
+    return text;
   }
   if (provider === 'xai' && search) {
     // Web search is a Responses-API tool. The subscription token must call the
@@ -350,8 +379,21 @@ export async function chat({ provider, model, system, messages, json, effort, se
       return msg.map((c) => c.text || '').join('');
     }
     const b = await r.json().catch(() => ({}));
+    const msg = b.choices?.[0]?.message || {};
+    const raw = msg.content;
+    const text = Array.isArray(raw)
+      ? raw.map((c) => (typeof c === 'string' ? c : c?.text || '')).join('')
+      : (typeof raw === 'string' ? raw : '');
+    const finish = b.choices?.[0]?.finish_reason;
+    aiLog({ provider: 'xai', model, status: r.status, finish, text_len: text.length,
+            content_type: Array.isArray(raw) ? 'array' : typeof raw, reasoning: !!msg.reasoning_content, json: !!json });
     if (!r.ok) throw new Error(`xAI: ${providerMessage(b, r.status)}`);
-    return b.choices?.[0]?.message?.content ?? '';
+    if (!text.trim()) {
+      throw new Error(finish === 'length'
+        ? 'Grok returned no text: the reply hit the output limit (finish_reason: length).'
+        : `Grok returned no text (finish_reason: ${finish || 'unknown'}).`);
+    }
+    return text;
   }
   const claims = jwt(tok)['https://api.openai.com/auth'] || {};
   const r = await fetch(`${CODEX.base}/responses`, {
@@ -384,6 +426,10 @@ export async function chat({ provider, model, system, messages, json, effort, se
     throw new Error(`ChatGPT: ${msg} (HTTP ${r.status})`);
   }
   let out = '';
+  let doneText = '';
+  let completedText = '';
+  let finishReason = '';
+  const seen = new Set();
   const dec = new TextDecoder();
   let buf = '';
   for await (const chunk of r.body) {
@@ -396,12 +442,30 @@ export async function chat({ provider, model, system, messages, json, effort, se
       if (!line) continue;
       try {
         const j = JSON.parse(line.slice(5));
+        if (j.type) seen.add(j.type);
         if (j.type === 'response.output_text.delta') out += j.delta;
-        else if (j.type === 'response.failed' || j.type === 'error') throw new Error(j.response?.error?.message || j.message || 'Request failed');
+        // Some plans emit only the finished text, never deltas.
+        else if (j.type === 'response.output_text.done') doneText = j.text || doneText;
+        else if (j.type === 'response.completed') {
+          const msg = (j.response?.output || []).find((x) => x.type === 'message');
+          completedText = (msg?.content || []).map((c) => c?.text || '').join('') || completedText;
+        } else if (j.type === 'response.incomplete') {
+          finishReason = j.response?.incomplete_details?.reason || 'incomplete';
+        } else if (j.type === 'response.failed' || j.type === 'error') {
+          throw new Error(j.response?.error?.message || j.message || 'Request failed');
+        }
       } catch (e) { if (e.message && !(e instanceof SyntaxError)) throw e; }
     }
   }
-  return out;
+  const text = out || doneText || completedText;
+  aiLog({ provider: 'codex', model, status: r.status, text_len: text.length, finish: finishReason || 'completed',
+          events: [...seen].slice(0, 12), json: !!json });
+  if (!text.trim()) {
+    throw new Error(finishReason === 'max_output_tokens'
+      ? 'ChatGPT returned no text: the reply hit the output limit (incomplete: max_output_tokens).'
+      : `ChatGPT returned no text (events: ${[...seen].slice(0, 6).join(', ') || 'none'}).`);
+  }
+  return text;
 }
 
 // ---------- HTTP glue (connect-style) ----------

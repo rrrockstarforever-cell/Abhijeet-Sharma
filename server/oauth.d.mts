@@ -44,6 +44,9 @@ export declare function completeLogin(id: string, pastedCode: string): Promise<{
 export declare function status(): OAuthStatusResult;
 export declare function logout(provider: string): void;
 export declare function chat(options: OAuthChatOptions): Promise<string>;
+
+/** Metadata-only provider diagnostics (provider, model, status, stop reason, sizes). */
+export declare function aiLog(entry: Record<string, unknown>): void;
 export declare function image(prompt: string): Promise<string>;
 
 export interface OAuthModelInfo {

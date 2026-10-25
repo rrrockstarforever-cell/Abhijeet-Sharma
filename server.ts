@@ -15,6 +15,7 @@ import {
   listModels as oauthListModels,
   type OAuthChatMessage,
 } from './server/oauth.mjs';
+import { aiLog } from './server/oauth.mjs';
 import { research as webResearch } from './server/web.mjs';
 
 dotenv.config();
@@ -139,7 +140,23 @@ async function runCompletion(opts: {
         ...(json ? { responseMimeType: 'application/json' } : {}),
       },
     });
-    return response.text || '';
+    const gText = response.text || '';
+    const cand = response.candidates?.[0];
+    aiLog({
+      provider: 'gemini', model: model_, finish: cand?.finishReason,
+      text_len: gText.length, json: !!json, blocked: !!response.promptFeedback?.blockReason,
+    });
+    if (!gText.trim()) {
+      const why = response.promptFeedback?.blockReason
+        ? `the prompt was blocked (${response.promptFeedback.blockReason})`
+        : cand?.finishReason === 'MAX_TOKENS'
+          ? 'the reply hit the output token limit (finishReason: MAX_TOKENS)'
+          : cand?.finishReason
+            ? `no text (finishReason: ${cand.finishReason})`
+            : 'the reply was empty';
+      throw new ApiError(`Gemini returned no text: ${why}.`, 502);
+    }
+    return gText;
   }
 
   const internal = INTERNAL_PROVIDER[provider];
@@ -691,9 +708,15 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '127.0.0.1', () => {
+  const httpServer = app.listen(PORT, '127.0.0.1', () => {
     console.log(`[Pulse Med Server] Running on http://127.0.0.1:${PORT}`);
   });
+  // A 10-question JSON batch can legitimately take minutes. Node's default 300 s
+  // requestTimeout would destroy the socket mid-answer (and the client saw that as a
+  // generic empty response). The AI routes are bounded by their own abort signal instead.
+  httpServer.requestTimeout = 0;
+  httpServer.headersTimeout = 0;
+  httpServer.keepAliveTimeout = 120_000;
 }
 
 startServer();

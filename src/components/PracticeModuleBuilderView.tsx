@@ -200,6 +200,12 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   const abortRef = useRef<AbortController | null>(null);
   const [stopping, setStopping] = useState(false);
   const [partial, setPartial] = useState<ClinicalQuestion[] | null>(null);
+  // Why a run ended short (provider error after retries) — shown with the kept questions.
+  const [partialReason, setPartialReason] = useState<string | null>(null);
+  // "Batch 7 of 10 · retrying (1/2) · <why>"
+  const [retrying, setRetrying] = useState<string | null>(null);
+  // Questions kept from an earlier run that a Continue call appends to.
+  const appendBaseRef = useRef<ClinicalQuestion[] | null>(null);
 
   // Suggestion box: a TEMPORARY generation profile. Component state only — never persisted.
   const [profileDraft, setProfileDraft] = useState('');
@@ -330,8 +336,9 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     return chosen;
   };
 
-  const handleLaunch = async () => {
+  const handleLaunch = async (countOverride?: number) => {
     if (genState.busy) return;
+    const targetCount = Math.max(1, Math.min(100, Math.round(countOverride ?? questionCount)));
 
     const keys = resolveSubjects();
     if (keys.length === 0) {
@@ -367,27 +374,32 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         .slice(0, 12000);
     }
 
-    setGenState({ busy: true, generated: 0, total: questionCount, batch: 0, totalBatches: Math.ceil(questionCount / 10), dropped: 0, error: null });
+    setGenState({ busy: true, generated: 0, total: targetCount, batch: 0, totalBatches: Math.ceil(targetCount / 10), dropped: 0, error: null });
     stopEarlyRef.current = false;
-    setPartial(null);
     setStopping(false);
+    setRetrying(null);
+    setPartialReason(null);
     const controller = new AbortController();
     abortRef.current = controller;
 
     try {
-      const { questions, dropped, stopped } = await generateExamQuestions({
+      const { questions, dropped, stopped, failure } = await generateExamQuestions({
         exam: selectedExam,
-        count: questionCount,
+        count: targetCount,
         subjectSubtopics: keys.map((key, i) => ({
           subject: labels[i],
           subtopics: selectedSubtopics[key] ?? (subjectList.find((r) => r.key === key)?.topics ?? SUBTOPICS[key] ?? []),
         })),
         difficultyTier,
         difficultySubLevel,
-        onProgress: (generated, total, batch, totalBatches) =>
-          setGenState(st => ({ ...st, generated, batch, totalBatches })),
+        onProgress: (generated, total, batch, totalBatches) => {
+          setRetrying(null);
+          setGenState(st => ({ ...st, generated, batch, totalBatches }));
+        },
         shouldStop: () => stopEarlyRef.current,
         signal: controller.signal,
+        onRetry: (attempt, maxAttempts, reason) =>
+          setRetrying(`retrying ${attempt}/${maxAttempts} · ${reason}`),
         customInstructions: appliedProfile ?? undefined,
         questionTypes,
         stemPatterns,
@@ -397,42 +409,52 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         sourceMaterial,
       });
 
+      // A Continue call appends to the questions kept from the previous run.
+      const base = appendBaseRef.current;
+      appendBaseRef.current = null;
+      const merged = base ? [...base, ...questions] : questions;
+
       if (questions.length === 0) {
         const wasStopped = stopEarlyRef.current;
         setGenState({
           busy: false,
-          generated: 0,
-          total: questionCount,
+          generated: base ? base.length : 0,
+          total: targetCount,
           batch: 0,
           totalBatches: 0,
           dropped,
           error: wasStopped
             ? 'Generation stopped before the first batch returned a valid question. Try again or reduce the count.'
-            : `The AI provider returned 0 valid questions (${dropped} dropped by validation). Try again, reduce the count, or change the active provider in Settings.`,
+            : failure
+              ? `The provider failed on every attempt: ${failure}. Nothing new was kept — try again, lower the question count, or switch provider in Settings.`
+              : `The AI provider returned 0 valid questions (${dropped} dropped by validation). Try again, reduce the count, or change the active provider in Settings.`,
         });
+        if (base && base.length) { setPartial(base); setPartialReason(failure); }
         return;
       }
 
       setGenState({
         busy: false,
-        generated: questions.length,
-        total: questionCount,
-        batch: Math.ceil(questions.length / 10),
-        totalBatches: Math.ceil(questionCount / 10),
+        generated: merged.length,
+        total: targetCount,
+        batch: Math.ceil(merged.length / 10),
+        totalBatches: Math.ceil(targetCount / 10),
         dropped,
         error: null,
       });
-      if (stopped) {
-        setPartial(questions);
+      // Stopped, or the provider gave up mid-run: keep what is valid and say why.
+      if (stopped || failure) {
+        setPartial(merged);
+        setPartialReason(failure);
         return;
       }
-      launchWith(questions, labels, chosenSubtopics);
+      launchWith(merged, labels, chosenSubtopics);
     } catch (err: any) {
       const aborted = controller.signal.aborted || (err instanceof AiError && err.kind === 'aborted');
       const message = aborted
         ? 'Generation stopped.'
         : err instanceof AiError ? err.message : (err?.message || 'AI question generation failed.');
-      setGenState({ busy: false, generated: 0, total: questionCount, batch: 0, totalBatches: 0, dropped: 0, error: aborted ? null : message });
+      setGenState({ busy: false, generated: 0, total: targetCount, batch: 0, totalBatches: 0, dropped: 0, error: aborted ? null : message });
     } finally {
       abortRef.current = null;
       setStopping(false);
@@ -458,6 +480,16 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     setStopping(true);
     setGenState(st => ({ ...st, error: null }));
     abortRef.current?.abort();
+  };
+
+  /** Keep the questions we have and ask the provider for the rest. */
+  const handleContinue = () => {
+    if (!partial || partial.length === 0 || genState.busy) return;
+    const remaining = Math.max(1, questionCount - partial.length);
+    appendBaseRef.current = partial;
+    setPartial(null);
+    setPartialReason(null);
+    void handleLaunch(remaining);
   };
 
   const handleLaunchPartial = () => {
@@ -901,6 +933,11 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                   Batch {genState.batch} of {genState.totalBatches} · {genState.generated} / {genState.total} ready
                   {genState.dropped > 0 ? ` · ${genState.dropped} dropped` : ''}
                 </div>
+                {retrying && (
+                  <div className="text-[10px] font-mono text-amber-700 leading-snug">
+                    {retrying}
+                  </div>
+                )}
               </div>
             ) : (
               <p className="text-[10px] text-slate-500 leading-relaxed">
@@ -918,7 +955,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             )}
 
             <button
-              onClick={handleLaunch}
+              onClick={() => handleLaunch()}
               disabled={genState.busy || !getActiveProvider() || !canLaunch}
               className="w-full py-2.5 bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl transition-all shadow-sm flex items-center justify-center gap-2"
             >
@@ -958,8 +995,20 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             {partial && partial.length > 0 && !genState.busy && (
               <div className="space-y-2">
                 <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[10px] leading-relaxed">
-                  Stopped at {partial.length} of {genState.total} questions. Every one passed validation — nothing was padded.
+                  {partialReason
+                    ? `Generated ${partial.length} of ${genState.total} — the provider failed on a batch: ${partialReason}`
+                    : `Stopped at ${partial.length} of ${genState.total} questions.`}{' '}
+                  Every kept question passed validation; nothing was padded.
                 </div>
+                {partial.length < questionCount && (
+                  <button
+                    onClick={handleContinue}
+                    className="w-full py-2 rounded-xl bg-[#001432] hover:bg-[#13294b] text-white text-[11px] font-bold transition-colors flex items-center justify-center gap-2"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Continue generating the remaining {questionCount - partial.length}
+                  </button>
+                )}
                 <button
                   onClick={handleLaunchPartial}
                   className="w-full py-2.5 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2"
