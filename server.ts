@@ -303,20 +303,24 @@ app.post('/api/settings/gemini-key', (req: Request, res: Response) => {
 // provider with its own stored token. The models.dev catalogue is not account-aware, so it
 // suggests ids a subscription login cannot call. Gemini has no OAuth here (API key), so it
 // reports separately and never blocks the others.
+//
+// Fast by default: return the provider's own library exactly as reported. Probing every
+// model with a live prompt is opt-in (`?probe=1`) because a large library can take minutes
+// and a transient refusal must not erase models from the picker. `?refresh=1` bypasses the
+// cache; `?provider=claude` refreshes just one provider.
 let availableModelsCache: { at: number; payload: any } | null = null;
 
 // A model listed by the provider is not necessarily runnable on this subscription: some need
-// paid usage credits, some need a newer client version. Probe each model once with a tiny
-// prompt and remember the verdict, so the picker only offers models that actually answer.
-// Only definitive refusals hide a model; a timeout or 5xx keeps it (the failure is transient).
+// paid usage credits, some need a newer client version. The explicit Test button asks for a
+// verdict, and remembers it so the same model is not paid for twice.
 const modelVerdicts = new Map<string, { ok: boolean; reason?: string; at: number }>();
 const VERDICT_TTL_MS = 6 * 60 * 60 * 1000;
-const DEFINITIVE_REFUSAL = /usage credits|credits are required|does not support this model|not supported|not found|no access|permission|not available|unknown model|invalid model|deprecated/i;
+const DEFINITIVE_REFUSAL = /usage credits|credits are required|out of credits|spending.limit|balance exhausted|does not support this model|does not include|not supported|not found|no access|permission|not available|unknown model|invalid model|deprecated/i;
 
-async function probeModel(uiId: string, modelId: string): Promise<{ ok: boolean; reason?: string }> {
+async function probeModel(uiId: string, modelId: string, force = false): Promise<{ ok: boolean; reason?: string }> {
   const key = `${uiId}:${modelId}`;
   const cached = modelVerdicts.get(key);
-  if (cached && Date.now() - cached.at < VERDICT_TTL_MS) return cached;
+  if (!force && cached && Date.now() - cached.at < VERDICT_TTL_MS) return cached;
   let verdict: { ok: boolean; reason?: string } = { ok: true };
   try {
     const text = await Promise.race([
@@ -328,65 +332,115 @@ async function probeModel(uiId: string, modelId: string): Promise<{ ok: boolean;
   } catch (err: any) {
     const msg = String(err?.message || 'request failed');
     // Hide only on a definitive refusal; keep the model when the failure looks transient.
-    verdict = DEFINITIVE_REFUSAL.test(msg) ? { ok: false, reason: msg.replace(/^Claude:\s*/i, '').slice(0, 140) } : { ok: true };
+    verdict = DEFINITIVE_REFUSAL.test(msg) ? { ok: false, reason: msg.replace(/^Claude:\s*/i, '').slice(0, 200) } : { ok: true };
   }
   modelVerdicts.set(key, { ...verdict, at: Date.now() });
   return verdict;
 }
 
-app.get('/api/models/available', async (_req: Request, res: Response) => {
-  if (availableModelsCache && Date.now() - availableModelsCache.at < 300_000) {
+async function listProviderModels(uiId: 'claude' | 'grok' | 'chatgpt'): Promise<{ models: { id: string; name: string; source: string }[]; error?: string }> {
+  if (!isProviderConnected(uiId)) return { models: [], error: 'Not signed in.' };
+  const internal = INTERNAL_PROVIDER[uiId];
+  try {
+    const result = await oauthListModels(internal as 'codex' | 'xai' | 'claude');
+    return {
+      models: (result.models || []).map((m: any) => ({ id: String(m.id), name: String(m.name || m.id), source: 'account' })),
+      error: result.error,
+    };
+  } catch (err: any) {
+    return { models: [], error: err?.message || `Could not list ${uiId} models.` };
+  }
+}
+
+async function listGeminiModels(): Promise<{ models: { id: string; name: string; source: string }[]; error?: string }> {
+  if (!isProviderConnected('gemini')) return { models: [], error: 'No Gemini API key saved.' };
+  try {
+    const key = geminiKey();
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}&pageSize=200`);
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(b?.error?.message || `HTTP ${r.status}`);
+    return {
+      models: ((b.models || []) as any[])
+        .filter((m) => Array.isArray(m?.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+        .map((m) => ({ id: String(m?.name || '').replace(/^models\//, ''), name: String(m?.displayName || m?.name || ''), source: 'account' }))
+        .filter((m) => m.id),
+    };
+  } catch (e: any) {
+    return { models: [], error: e?.message || 'Could not list Gemini models.' };
+  }
+}
+
+app.get('/api/models/available', async (req: Request, res: Response) => {
+  const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+  const probe = req.query.probe === '1' || req.query.probe === 'true';
+  const only = String(req.query.provider || '').trim();
+  if (only && !['gemini', 'chatgpt', 'claude', 'grok'].includes(only)) {
+    return res.status(400).json({ error: `Unknown provider: ${only}` });
+  }
+  // The full, unprobed list is cacheable; targeted or probed requests are not.
+  if (!only && !probe && !refresh && availableModelsCache && Date.now() - availableModelsCache.at < 300_000) {
     return res.json(availableModelsCache.payload);
   }
+
   const providers: Record<string, { id: string; name: string; source: string }[]> = {};
   const errors: Record<string, string> = {};
+  const verified: Record<string, { model: string; ok: boolean; reason?: string }[]> = {};
 
+  const social = (['claude', 'grok', 'chatgpt'] as const).filter((id) => !only || only === id);
   await Promise.all(
-    (['claude', 'grok', 'chatgpt'] as const).map(async (uiId) => {
-      if (!isProviderConnected(uiId)) {
-        errors[uiId] = 'Not signed in.';
-        providers[uiId] = [];
-        return;
+    social.map(async (uiId) => {
+      const listed = await listProviderModels(uiId);
+      if (probe && listed.models.length) {
+        const verdicts = await Promise.all(listed.models.map((m) => probeModel(uiId, m.id)));
+        providers[uiId] = listed.models.filter((_, i) => verdicts[i].ok);
+        verified[uiId] = listed.models.map((m, i) => ({ model: m.id, ok: verdicts[i].ok, reason: verdicts[i].reason }));
+        const hidden = listed.models
+          .map((m, i) => ({ m, v: verdicts[i] }))
+          .filter((x) => !x.v.ok);
+        if (hidden.length) {
+          errors[uiId] = `${hidden.length} listed model${hidden.length === 1 ? '' : 's'} refused by this plan: ` +
+            hidden.map((x) => `${x.m.id} (${x.v.reason || 'refused'})`).join('; ');
+        }
+      } else {
+        providers[uiId] = listed.models;
       }
-      const internal = INTERNAL_PROVIDER[uiId];
-      const result = await oauthListModels(internal as 'codex' | 'xai' | 'claude');
-      const listed = (result.models || []).map((m) => ({ id: m.id, name: m.name || m.id, source: 'account' }));
-      const verdicts = await Promise.all(listed.map((m) => probeModel(uiId, m.id)));
-      providers[uiId] = listed.filter((_, i) => verdicts[i].ok);
-      const hidden = listed
-        .map((m, i) => ({ m, v: verdicts[i] }))
-        .filter((x) => !x.v.ok);
-      if (hidden.length) {
-        errors[uiId] = `${hidden.length} listed model${hidden.length === 1 ? '' : 's'} hidden because your plan cannot run ${hidden.length === 1 ? 'it' : 'them'}: ` +
-          hidden.map((x) => `${x.m.id} (${x.v.reason || 'refused'})`).join('; ');
-      }
-      if (result.error) errors[uiId] = result.error;
+      if (listed.error && !errors[uiId]) errors[uiId] = listed.error;
     }),
   );
 
-  // Gemini is key-based: list from the public API when a key is present.
-  if (isProviderConnected('gemini')) {
-    try {
-      const key = geminiKey();
-      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}&pageSize=200`);
-      const b = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(b?.error?.message || `HTTP ${r.status}`);
-      providers.gemini = ((b.models || []) as any[])
-        .filter((m) => Array.isArray(m?.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
-        .map((m) => ({ id: String(m?.name || '').replace(/^models\//, ''), name: String(m?.displayName || m?.name || ''), source: 'account' }))
-        .filter((m) => m.id);
-    } catch (e: any) {
-      providers.gemini = [];
-      errors.gemini = e?.message || 'Could not list Gemini models.';
-    }
-  } else {
-    providers.gemini = [];
-    errors.gemini = 'No Gemini API key saved.';
+  if (!only || only === 'gemini') {
+    const gem = await listGeminiModels();
+    providers.gemini = gem.models;
+    if (gem.error) errors.gemini = gem.error;
   }
 
-  const payload = { providers, errors, fetchedAt: new Date().toISOString() };
-  availableModelsCache = { at: Date.now(), payload };
+  const payload = {
+    providers,
+    errors,
+    verified: probe ? verified : undefined,
+    probed: probe,
+    fetchedAt: new Date().toISOString(),
+  };
+  if (!only && !probe) availableModelsCache = { at: Date.now(), payload };
   return res.json(payload);
+});
+
+// 6a-bis. POST /api/models/probe: explicitly test ONE model with a tiny real prompt.
+// This is the honest way to learn whether the subscription can run a listed model.
+app.post('/api/models/probe', async (req: Request, res: Response) => {
+  const provider = String(req.body?.provider || '').trim();
+  const model = String(req.body?.model || '').trim();
+  if (!['gemini', 'chatgpt', 'claude', 'grok'].includes(provider)) {
+    return res.status(400).json({ error: 'Choose a provider to test.' });
+  }
+  if (!model || model.length > 200) {
+    return res.status(400).json({ error: 'Choose a model id to test.' });
+  }
+  if (!isProviderConnected(provider)) {
+    return res.status(401).json({ error: notConnectedMessage(provider) });
+  }
+  const verdict = await probeModel(provider, model, true);
+  return res.json({ provider, model, ok: verdict.ok, reason: verdict.reason || null, at: new Date().toISOString() });
 });
 
 // 6b. GET /api/models/catalog: optional live model catalog from models.dev.

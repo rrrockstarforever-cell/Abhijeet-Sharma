@@ -12,7 +12,10 @@
     "lint": "tsc --noEmit",
     "app": "npm run build && npm run bundle:server && electron .",
     "appdist": "npm run build && npm run bundle:server && electron-builder --win nsis --x64",
-    "bundle:server": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=server.mjs --external:vite"
+    "bundle:server": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=server.mjs --external:vite",
+    "debug:center": "node tools/debug-center/server.mjs",
+    "debug:center:launch": "node tools/debug-center/launch.mjs",
+    "verify:debug-center": "node tools/debug-center/verify.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

@@ -19,6 +19,19 @@ const XAI = {
   clientId: 'b1a00492-073a-47ea-816f-4c329264a828',
   scope: 'openid profile email offline_access grok-cli:access api:access',
   base: 'https://api.x.ai/v1',
+  // A Grok subscription login is a *Grok CLI* token, not an xAI API key: api.x.ai
+  // answers 403 "run out of credits" for it while the CLI proxy works. Both the
+  // model library and chat therefore go through the proxy, which requires the
+  // same client-version header the CLI sends (426 "version (none) is outdated").
+  cliBase: 'https://cli-chat-proxy.grok.com/v1',
+  cliVersion: '1.0.13',
+};
+const xaiHeaders = (tok) => ({ Authorization: `Bearer ${tok}`, 'x-grok-client-version': XAI.cliVersion });
+const providerMessage = (b, status) => {
+  const e = b?.error;
+  if (typeof e === 'string' && e.trim()) return e;
+  if (e && typeof e === 'object' && (e.message || e.code)) return e.message || e.code;
+  return b?.message || `HTTP ${status}`;
 };
 
 const CLAUDE = {
@@ -209,13 +222,18 @@ export async function listModels(provider) {
     }
 
     if (provider === 'xai') {
-      const r = await fetch(`${XAI.base}/models`, { headers: { Authorization: `Bearer ${tok}` } });
-      if (!r.ok) return { models: [], error: `xAI returned HTTP ${r.status}` };
-      const b = await r.json();
+      // The subscription token can list its real library only on the CLI proxy.
+      const r = await fetch(`${XAI.cliBase}/models`, { headers: xaiHeaders(tok) });
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}));
+        return { models: [], error: `xAI returned HTTP ${r.status}: ${providerMessage(b, r.status)}` };
+      }
+      const b = await r.json().catch(() => ({}));
       const models = (b.data || [])
-        .map((m) => ({ id: m.id, name: m.id, created: null }))
+        .map((m) => ({ id: m.id, name: m.name || m.id, created: null, context: m.context_window || null }))
         .filter((m) => isChatModel(m.id));
-      return { models };
+      if (models.length) return { models };
+      return { models: [], error: 'xAI listed no chat models for this subscription.' };
     }
 
     // codex: the backend only lists models the signed-in plan is entitled to.
@@ -284,12 +302,14 @@ export async function chat({ provider, model, system, messages, json, effort, se
     return (b.content || []).filter((x) => x.type === 'text').map((x) => x.text || '').join('');
   }
   if (provider === 'xai' && search) {
-    const r = await fetch(`${XAI.base}/responses`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+    // Web search is a Responses-API tool. The subscription token must call the
+    // Grok CLI proxy, not api.x.ai (which answers 403 for CLI tokens).
+    const r = await fetch(`${XAI.cliBase}/responses`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...xaiHeaders(tok) },
       body: JSON.stringify({ model, ...(system && String(system).trim() ? { instructions: String(system) } : {}), input: messages.map((m) => ({ role: m.role, content: m.content })), tools: [{ type: 'web_search' }], max_output_tokens: 4000 }),
     });
     const b = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(`xAI web search refused (HTTP ${r.status}): ${b?.error || b?.message || ''}`.slice(0, 300));
+    if (!r.ok) throw new Error(`xAI web search refused (HTTP ${r.status}): ${providerMessage(b, r.status)}`.slice(0, 300));
     const msg = (b.output || []).filter((x) => x.type === 'message').flatMap((x) => x.content || []);
     const text = msg.map((c) => c.text || '').join('');
     if (!text) throw new Error('Empty response from Grok search.');
@@ -303,12 +323,26 @@ export async function chat({ provider, model, system, messages, json, effort, se
     const xaiMessages = system && String(system).trim()
       ? [{ role: 'system', content: String(system) }, ...messages]
       : messages;
-    const r = await fetch(`${XAI.base}/chat/completions`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+    // The Grok CLI talks Chat Completions by default (the model list's api_backend
+    // says which protocol a given model wants). Try the CLI default first, then
+    // fall back to the Responses API for models that only expose that backend.
+    const cliHeaders = { 'Content-Type': 'application/json', ...xaiHeaders(tok) };
+    let r = await fetch(`${XAI.cliBase}/chat/completions`, {
+      method: 'POST', headers: cliHeaders,
       body: JSON.stringify({ model, messages: xaiMessages, ...(json ? { response_format: { type: 'json_object' } } : {}) }),
     });
+    if (r.status === 404 || r.status === 405) {
+      r = await fetch(`${XAI.cliBase}/responses`, {
+        method: 'POST', headers: cliHeaders,
+        body: JSON.stringify({ model, input: xaiMessages, ...(json ? { text: { format: { type: 'json_object' } } } : {}) }),
+      });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(`xAI: ${providerMessage(b, r.status)}`);
+      const msg = (b.output || []).filter((x) => x.type === 'message').flatMap((x) => x.content || []);
+      return msg.map((c) => c.text || '').join('');
+    }
     const b = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(`xAI: ${b?.error?.message || b?.error || b?.message || 'HTTP ' + r.status}`);
+    if (!r.ok) throw new Error(`xAI: ${providerMessage(b, r.status)}`);
     return b.choices?.[0]?.message?.content ?? '';
   }
   const claims = jwt(tok)['https://api.openai.com/auth'] || {};

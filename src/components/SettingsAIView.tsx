@@ -15,7 +15,9 @@ import {
   HardDrive,
   Copy,
   LogOut,
-  Radio
+  Radio,
+  RefreshCw,
+  Search
 } from 'lucide-react';
 import { AIProvider } from '../types.ts';
 import {
@@ -114,6 +116,7 @@ export const SettingsAIView: React.FC = () => {
     REAL_PROVIDERS.forEach(p => { initial[p.id] = getEffectiveModel(p.id as any); });
     return initial;
   });
+  const [customModelEdit, setCustomModelEdit] = useState<Record<string, boolean>>({});
   
   // Real OAuth Sign-In Modal State
   const [selectedProvider, setSelectedProvider] = useState<AIProvider | null>(null);
@@ -153,6 +156,7 @@ export const SettingsAIView: React.FC = () => {
   const [accountModels, setAccountModels] = useState<Record<string, { id: string; name: string }[]>>({});
   const [accountErrors, setAccountErrors] = useState<Record<string, string>>({});
   const [accountBusy, setAccountBusy] = useState<boolean>(false);
+  const [accountAt, setAccountAt] = useState<string | null>(null);
 
   const loadModelCatalog = async () => {
     setCatalogInfo((s) => ({ ...s, busy: true, error: null }));
@@ -167,16 +171,24 @@ export const SettingsAIView: React.FC = () => {
     }
   };
 
-  const loadAccountModels = async () => {
+  const loadAccountModels = async (refresh = false, provider?: string) => {
     setAccountBusy(true);
     try {
-      const res = await fetch('/api/models/available');
+      const params = new URLSearchParams();
+      if (refresh) params.set('refresh', '1');
+      if (provider) params.set('provider', provider);
+      const res = await fetch(`/api/models/available${params.size ? `?${params.toString()}` : ''}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${res.status}`);
-      setAccountModels(data.providers ?? {});
-      setAccountErrors(data.errors ?? {});
+      setAccountModels(prev => ({ ...prev, ...(data.providers ?? {}) }));
+      setAccountErrors(prev => {
+        const next = { ...prev };
+        for (const id of Object.keys(data.providers ?? {})) delete next[id];
+        return { ...next, ...(data.errors ?? {}) };
+      });
+      setAccountAt(typeof data.fetchedAt === 'string' ? data.fetchedAt : new Date().toISOString());
     } catch (err: any) {
-      setAccountErrors({ _global: err?.message || 'Could not list the models on your account.' });
+      setAccountErrors(prev => ({ ...prev, _global: err?.message || 'Could not list the models on your account.' }));
     } finally {
       setAccountBusy(false);
     }
@@ -243,7 +255,7 @@ export const SettingsAIView: React.FC = () => {
     .join(',');
 
   useEffect(() => {
-    loadAccountModels();
+    loadAccountModels(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProviderId, connectedProviderKey]);
 
@@ -538,7 +550,8 @@ export const SettingsAIView: React.FC = () => {
     } catch (err: any) {
       setTestState({ id: providerId, status: 'fail', detail: err?.message || 'Test request failed.' });
     } finally {
-      setTimeout(() => setTestState(null), 6000);
+      // Keep the verdict visible long enough to read and copy the provider's reason.
+      setTimeout(() => setTestState(null), 15000);
     }
   };
 
@@ -650,23 +663,62 @@ export const SettingsAIView: React.FC = () => {
             </span>
           </div>
 
-          {/* Live model catalog status (models.dev) */}
+          {/* Live model catalog + account library status */}
           <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[10px] text-slate-500">
             <span>
+              {accountBusy
+                ? 'Searching each subscription’s model library…'
+                : Object.keys(accountModels).length
+                  ? `Account library: ${Object.values(accountModels).reduce((n, list) => n + list.length, 0)} models across ${Object.values(accountModels).filter((l) => l.length).length} connected provider(s)${accountAt ? ` · found ${new Date(accountAt).toLocaleTimeString()}` : ''}`
+                  : 'Account model library has not been searched yet.'}
               {catalogInfo.error
-                ? `Live catalog unavailable — static suggestions shown (${catalogInfo.error})`
+                ? ` · models.dev catalog unavailable (${catalogInfo.error})`
                 : catalogInfo.at
-                  ? `Live model catalog loaded ${new Date(catalogInfo.at).toLocaleString()} · ${Object.values(modelCatalog).reduce((n, list) => n + list.length, 0)} models`
-                  : 'Loading live model catalog…'}
+                  ? ` · models.dev catalog: ${Object.values(modelCatalog).reduce((n, list) => n + list.length, 0)} suggestions`
+                  : ''}
             </span>
-            <button
-              onClick={loadModelCatalog}
-              disabled={catalogInfo.busy}
-              className="font-bold text-[#0f8b8d] hover:underline disabled:opacity-40"
-            >
-              {catalogInfo.busy ? 'Refreshing…' : 'Refresh catalog'}
-            </button>
+            <span className="flex items-center gap-3">
+              <button
+                onClick={() => loadAccountModels(true)}
+                disabled={accountBusy}
+                className="font-bold text-[#0f8b8d] hover:underline disabled:opacity-40 flex items-center gap-1"
+              >
+                <Search className="w-3 h-3" />
+                {accountBusy ? 'Searching…' : 'Find all models'}
+              </button>
+              <button
+                onClick={loadModelCatalog}
+                disabled={catalogInfo.busy}
+                className="font-bold text-[#0f8b8d] hover:underline disabled:opacity-40"
+              >
+                {catalogInfo.busy ? 'Refreshing…' : 'Refresh catalog'}
+              </button>
+            </span>
           </div>
+
+          {/* If the active engine is connected but its plan exposes no models, say so honestly
+              and offer the working alternative instead of leaving the user with failed sends. */}
+          {(() => {
+            const active = providers.find((p) => p.id === activeProviderId);
+            if (!active?.hasTokenConfigured) return null;
+            const activeCount = accountModels[activeProviderId]?.length;
+            if (activeCount !== 0) return null;
+            const alternate = providers.find((p) => p.id !== activeProviderId && p.hasTokenConfigured && (accountModels[p.id]?.length ?? 0) > 0);
+            if (!alternate) return null;
+            return (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+                <span>
+                  <strong>{active.name}</strong> is connected but its subscription lists <strong>0 usable models</strong> here. AI features will fail until you switch engines.
+                </span>
+                <button
+                  onClick={() => handleSetActive(alternate)}
+                  className="font-bold px-2.5 py-1 rounded-lg bg-amber-600 text-white hover:bg-amber-700"
+                >
+                  Use {alternate.name.split(' ')[0]} ({accountModels[alternate.id].length} models)
+                </button>
+              </div>
+            );
+          })()}
 
           {/* Providers List */}
           <div className="space-y-3.5">
@@ -738,25 +790,80 @@ export const SettingsAIView: React.FC = () => {
                           )}
                         </div>
 
-                        {/* Per-provider model selector (persisted, user-selectable) */}
+                        {/* Per-provider model library. The account's real list is fetched from
+                            the provider with its own token; any id can still be typed manually. */}
                         <div className="flex flex-wrap items-center gap-2 mt-2">
                           <label className="text-[11px] text-slate-500 font-semibold">Model</label>
-                          <input
-                            type="text"
-                            value={models[p.id] ?? p.model}
-                            onChange={(e) => handleModelChange(p.id, e.target.value)}
-                            className="w-52 text-[11px] font-mono px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
-                            list={`models-${p.id}`}
-                            placeholder={p.model}
-                          />
+                          {liveAccountModels.length > 0 && !customModelEdit[p.id] ? (
+                            <select
+                              value={selectedModelId}
+                              onChange={(e) => {
+                                if (e.target.value === '__custom__') {
+                                  setCustomModelEdit((prev) => ({ ...prev, [p.id]: true }));
+                                } else {
+                                  handleModelChange(p.id, e.target.value);
+                                }
+                              }}
+                              title={`${liveAccountModels.length} model${liveAccountModels.length === 1 ? '' : 's'} found on this account`}
+                              className="max-w-[340px] text-[11px] font-mono px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                            >
+                              {!liveAccountModels.some((m) => m.id === selectedModelId) && (
+                                <option value={selectedModelId}>{selectedModelId} (current)</option>
+                              )}
+                              {liveAccountModels.map((m) => (
+                                <option key={m.id} value={m.id}>
+                                  {m.name && m.name !== m.id ? `${m.name} — ${m.id}` : m.id}
+                                </option>
+                              ))}
+                              <option value="__custom__">Custom model id…</option>
+                            </select>
+                          ) : (
+                            <input
+                              type="text"
+                              value={models[p.id] ?? p.model}
+                              onChange={(e) => handleModelChange(p.id, e.target.value)}
+                              className="w-52 text-[11px] font-mono px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                              list={`models-${p.id}`}
+                              placeholder={p.model}
+                            />
+                          )}
                           <datalist id={`models-${p.id}`}>
                             {suggestions.map((m) => (
                               <option key={m.id} value={m.id}>{m.label}</option>
                             ))}
                           </datalist>
-                          {accountError && (
+                          {liveAccountModels.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => setCustomModelEdit((prev) => ({ ...prev, [p.id]: !prev[p.id] }))}
+                              className="text-[10px] font-semibold text-slate-500 hover:text-[#0f8b8d] underline decoration-dotted"
+                              title={customModelEdit[p.id] ? 'Back to the models found on this account' : 'Type a model id that is not in the list'}
+                            >
+                              {customModelEdit[p.id] ? 'Use library' : 'Custom id'}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => loadAccountModels(true, p.id)}
+                            disabled={accountBusy || !isConnected}
+                            title="Ask this provider which models your subscription can use"
+                            className="text-[10px] font-bold px-2 py-1 rounded-md border bg-white border-slate-200 text-slate-600 hover:border-[#0f8b8d]/40 hover:text-[#0f8b8d] disabled:opacity-40 flex items-center gap-1"
+                          >
+                            <RefreshCw className={`w-3 h-3 ${accountBusy ? 'animate-spin' : ''}`} />
+                            Find models
+                          </button>
+                          <span className="text-[9px] font-mono text-slate-400">
+                            {!isConnected
+                              ? 'not signed in'
+                              : liveAccountModels.length > 0
+                                ? `${liveAccountModels.length} model${liveAccountModels.length === 1 ? '' : 's'} in library`
+                                : accountBusy
+                                  ? 'searching library…'
+                                  : 'no models listed'}
+                          </span>
+                          {isConnected && accountError && (
                             <span className="basis-full text-[10px] leading-snug text-amber-600" title={accountError}>
-                              {accountError.length > 170 ? accountError.slice(0, 167) + '…' : accountError}
+                              {accountError.length > 220 ? accountError.slice(0, 217) + '…' : accountError}
                             </span>
                           )}
                           <span className="text-[9px] font-mono text-slate-400 max-w-[130px] truncate" title={selectedMeta?.released ? `Released ${selectedMeta.released}` : undefined}>
@@ -775,6 +882,16 @@ export const SettingsAIView: React.FC = () => {
                             </span>
                           )}
                         </div>
+
+                        {/* The Test verdict, including the provider's exact refusal, stays
+                            visible briefly so a plan limitation is never a silent failure. */}
+                        {testState?.id === p.id && testState.status !== 'busy' && (
+                          <p className={`text-[10px] leading-snug mt-1.5 ${testState.status === 'ok' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                            {testState.status === 'ok'
+                              ? 'Test passed — the model answered OK.'
+                              : `Test failed: ${testState.detail ?? 'unknown error'}`}
+                          </p>
+                        )}
 
                         <div className="flex flex-wrap items-center gap-2 mt-2">
                           {p.features.map((feat, idx) => (
@@ -939,6 +1056,16 @@ export const SettingsAIView: React.FC = () => {
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {/* This is the real local flow, not a web demo: the code comes from the
+                provider right now and the token is stored on this computer only. */}
+            {selectedProvider.id !== 'gemini' && (
+              <p className="text-[11px] leading-relaxed text-slate-600 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+                {selectedProvider.id === 'claude'
+                  ? 'Open the Claude approval page, sign in, then paste the code Claude shows you. The token stays on this computer.'
+                  : `A one-time code is requested from ${selectedProvider.name.split(' ')[0]} now. Approve it on their page; this window polls until your subscription is connected. Your password is never entered here.`}
+              </p>
+            )}
 
             {/* Error Message */}
             {authError && (

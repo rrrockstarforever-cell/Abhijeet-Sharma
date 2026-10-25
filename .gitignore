@@ -7,12 +7,16 @@ build/
 release/
 
 # generated server bundle (produced by `npm run bundle:server`)
-server.mjs
-server.cjs
+# Anchored to the repo root: tools/debug-center/server.mjs is real source.
+/server.mjs
+/server.cjs
 
 # logs / coverage
 *.log
 coverage/
+
+# debug control center local data (token, logs, screenshots, checkpoints)
+debug-center-data/
 
 # local secrets — never commit
 .env
