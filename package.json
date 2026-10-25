@@ -1,7 +1,7 @@
 {
   "name": "pulse-med",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.2",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -10,12 +10,13 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "app": "npm run build && npm run bundle:server && electron .",
-    "appdist": "npm run build && npm run bundle:server && electron-builder --win nsis --x64",
+    "app": "npm run build && npm run bundle:server && npm run check:secrets && electron .",
+    "appdist": "npm run build && npm run bundle:server && npm run check:secrets && electron-builder --win nsis --x64",
     "bundle:server": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=server.mjs --external:vite",
     "debug:center": "node tools/debug-center/server.mjs",
     "debug:center:launch": "node tools/debug-center/launch.mjs",
-    "verify:debug-center": "node tools/debug-center/verify.mjs"
+    "verify:debug-center": "node tools/debug-center/verify.mjs",
+    "check:secrets": "node tools/check-secrets.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -60,7 +61,16 @@
       "electron/**",
       "package.json",
       "!dist/assets/aistudio",
-      "!dist/assets/aistudio/**"
+      "!dist/assets/aistudio/**",
+      "!**/*.env",
+      "!**/.env*",
+      "!**/oauth*.json",
+      "!**/*token*.json",
+      "!**/.pulse-med/**",
+      "!**/.neet-pg-prep/**",
+      "!debug-center-data/**",
+      "!**/*.pem",
+      "!**/*.key"
     ],
     "asar": true,
     "win": {

@@ -5,7 +5,11 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'n
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-const DIR = join(homedir(), '.neet-pg-prep');
+// Where subscription tokens are stored. Electron sets PULSE_DATA_DIR to the app's own
+// user-data folder (%APPDATA%\Pulse Med), so tokens live with the install's data and are
+// NEVER inside the installer or the asar. The home-dir path is a dev-only fallback for
+// `npm run dev`; it must never be __dirname or the app folder.
+const DIR = process.env.PULSE_DATA_DIR ? join(process.env.PULSE_DATA_DIR, 'oauth') : join(homedir(), '.neet-pg-prep');
 const FILE = join(DIR, 'oauth.json');
 
 const CODEX = {
