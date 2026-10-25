@@ -1,53 +1,47 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
-import { 
-  Sliders, 
-  Layers, 
-  Play, 
-  Clock, 
-  CheckCircle2, 
-  Target, 
-  Brain, 
-  BookOpen, 
+import {
+  Play,
+  Clock,
+  Check,
+  Target,
+  Brain,
+  BookOpen,
   Sparkles,
-  ArrowRight,
-  Flame,
-  Award,
-  ToggleLeft,
-  ToggleRight,
   ShieldAlert,
   Square,
   MessageSquarePlus,
-  ChevronDown,
-  ChevronUp
+  ChevronsUpDown,
 } from 'lucide-react';
-import ExamPatternDisplay from './ExamPatternDisplay';
 import { ExamType, AppView, DifficultyTier, DifficultySubLevel, INISyllabusMode, ClinicalQuestion } from '../types.ts';
-import { 
-  NEET_PG_SUBJECTS, 
-  INI_CET_DOMAINS_6, 
-  AMC_CAT_DOMAINS_6 
+import {
+  NEET_PG_SUBJECTS,
+  INI_CET_DOMAINS_6,
+  AMC_CAT_DOMAINS_6
 } from '../data/mockClinicalData.ts';
 import { SUBTOPICS } from '../data/subtopics.ts';
 import { generateExamQuestions, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel } from '../lib/ai.ts';
 import { summarizeAttempts, attemptsToday, listAttempts } from '../utils/attemptStore.ts';
 import { listUserHighlights } from '../utils/userHighlightsStore.ts';
+import { TopicPickerModal } from './TopicPickerModal.tsx';
 
 interface PracticeModuleBuilderViewProps {
   currentExam: ExamType;
   onLaunchModule: (
-    exam: ExamType, 
-    count: number, 
-    mode: 'EXAM' | 'TUTOR', 
-    subjects: string[], 
+    exam: ExamType,
+    count: number,
+    mode: 'EXAM' | 'TUTOR',
+    subjects: string[],
     difficultyTier: DifficultyTier,
     difficultySubLevel?: DifficultySubLevel,
     chosenSubtopics?: string[],
     generatedQuestions?: ClinicalQuestion[]
   ) => void;
   onNavigate: (view: AppView) => void;
+  /** Keeps the app-wide exam chip in step with the builder (they used to drift apart). */
+  onExamChange?: (exam: ExamType) => void;
 }
 
-// ---- Section-14 AI writing options (chips passed into the AI prompt) ----
+// ---- writing options offered as Tags ----
 const QUESTION_TYPE_CHIPS = [
   'Clinical vignette',
   'One-liner recall',
@@ -85,45 +79,112 @@ const PRESENTING_PROBLEM_CHIPS = [
   'Anaemia', 'Jaundice', 'Confusion', 'Syncope', 'Dysuria', 'Rash', 'Sleep problems', 'Low mood',
 ];
 
+const EXAM_SCORING: Record<ExamType, string> = {
+  NEET_PG: '+4 / -1',
+  INI_CET: '+1 / -0.33',
+  AMC_CAT: 'Adaptive 0-500',
+};
+
+const EXAM_LABEL: Record<ExamType, string> = {
+  NEET_PG: 'NEET-PG',
+  INI_CET: 'INI-CET',
+  AMC_CAT: 'AMC CAT',
+};
+
+const QUESTION_COUNTS = [10, 20, 25, 30, 40, 50, 75, 100];
+
+// ---------------------------------------------------------------- small pieces
+
+const Row: React.FC<{ label: string; hint?: string; children: React.ReactNode; last?: boolean }> = ({
+  label, hint, children, last,
+}) => (
+  <div className={`py-5 ${last ? '' : 'border-b border-slate-100'}`}>
+    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 mb-3">
+      <h3 className="text-sm font-bold text-slate-900">{label}</h3>
+      {hint && <span className="text-[11px] text-slate-500">{hint}</span>}
+    </div>
+    {children}
+  </div>
+);
+
+const Radio: React.FC<{
+  checked: boolean;
+  onClick: () => void;
+  label: string;
+  hint?: string;
+}> = ({ checked, onClick, label, hint }) => (
+  <button type="button" onClick={onClick} className="flex items-start gap-2 text-left cursor-pointer">
+    <span
+      className={`mt-0.5 h-4 w-4 shrink-0 rounded-full border-2 flex items-center justify-center transition-colors ${
+        checked ? 'border-[#0f8b8d]' : 'border-slate-300'
+      }`}
+    >
+      {checked && <span className="h-2 w-2 rounded-full bg-[#0f8b8d]" />}
+    </span>
+    <span>
+      <span className={`block text-xs font-semibold ${checked ? 'text-slate-900' : 'text-slate-700'}`}>{label}</span>
+      {hint && <span className="block text-[10px] text-slate-500 leading-snug mt-0.5 max-w-[230px]">{hint}</span>}
+    </span>
+  </button>
+);
+
+const Chip: React.FC<{ active: boolean; onClick: () => void; children: React.ReactNode; title?: string }> = ({
+  active, onClick, children, title,
+}) => (
+  <button
+    type="button"
+    onClick={onClick}
+    title={title}
+    className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors ${
+      active
+        ? 'bg-[#0f8b8d] border-[#0f8b8d] text-white'
+        : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+    }`}
+  >
+    {children}
+  </button>
+);
+
+const SubjectTick: React.FC<{ checked: boolean }> = ({ checked }) => (
+  <span
+    className={`h-4 w-4 shrink-0 rounded border flex items-center justify-center ${
+      checked ? 'bg-[#0f8b8d] border-[#0f8b8d]' : 'bg-white border-slate-300'
+    }`}
+  >
+    {checked && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
+  </span>
+);
+
+// ---------------------------------------------------------------- main view
+
 export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps> = ({
   currentExam,
   onLaunchModule,
-  onNavigate
+  onNavigate,
+  onExamChange,
 }) => {
   const [selectedExam, setSelectedExam] = useState<ExamType>(currentExam);
+  // The builder used to keep its own exam forever: switching the exam chip in the top bar
+  // left this screen on the old exam, so an INI-CET run could be built from AMC domains.
+  useEffect(() => { setSelectedExam(currentExam); }, [currentExam]);
+
   const [iniSyllabusMode, setIniSyllabusMode] = useState<INISyllabusMode>('19_SUBJECTS');
   const [questionCount, setQuestionCount] = useState<number>(25);
   const [mode, setMode] = useState<'EXAM' | 'TUTOR'>('TUTOR');
-  
-  // Granular Difficulty State
+
   const [difficultyTier, setDifficultyTier] = useState<DifficultyTier>('ALL');
   const [difficultySubLevel, setDifficultySubLevel] = useState<DifficultySubLevel | undefined>(undefined);
 
-  // Subject checklist states
-  const [selectedNeetSubjects, setSelectedNeetSubjects] = useState<string[]>([
-    'Pathology', 'Pharmacology', 'General Medicine', 'Obstetrics & Gynaecology'
-  ]);
-  const [selectedIniSubjects, setSelectedIniSubjects] = useState<string[]>([
-    'Pathology', 'Pharmacology', 'General Medicine'
-  ]);
-  const [selectedIniDomains, setSelectedIniDomains] = useState<string[]>([
-    'AIIMS_BASIC', 'AIIMS_MED', 'AIIMS_SURG'
-  ]);
-  const [selectedAmcDomains, setSelectedAmcDomains] = useState<string[]>([
-    'AMC_MED', 'AMC_SURG', 'AMC_CHILD'
-  ]);
+  // NOTHING is pre-selected: the learner picks specialities (or chooses "All").
+  const [specialtyAll, setSpecialtyAll] = useState(false);
+  const [selectedNeetSubjects, setSelectedNeetSubjects] = useState<string[]>([]);
+  const [selectedIniSubjects, setSelectedIniSubjects] = useState<string[]>([]);
+  const [selectedIniDomains, setSelectedIniDomains] = useState<string[]>([]);
+  const [selectedAmcDomains, setSelectedAmcDomains] = useState<string[]>([]);
 
-  // Subtopics state: Record<subjectName, selectedSubtopicNames[]>
-  const [selectedSubtopics, setSelectedSubtopics] = useState<Record<string, string[]>>(() => {
-    const initial: Record<string, string[]> = {};
-    Object.keys(SUBTOPICS).forEach(key => {
-      initial[key] = [...SUBTOPICS[key]];
-    });
-    return initial;
-  });
-
-  // Collapsed / Expanded state per subject
-  const [expandedSubjects, setExpandedSubjects] = useState<Record<string, boolean>>({});
+  // Absent entry = every topic of that subject; only an explicit subset is stored.
+  const [selectedSubtopics, setSelectedSubtopics] = useState<Record<string, string[]>>({});
+  const [topicModal, setTopicModal] = useState<{ key: string; label: string } | null>(null);
 
   // AI question generation state (real AI provider; progressive batches of <=10)
   const [genState, setGenState] = useState<{
@@ -136,169 +197,152 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     error: string | null;
   }>({ busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0, error: null });
   const stopEarlyRef = useRef(false);
-  // Real cancellation: the Stop button aborts the in-flight batch request (and, with the
-  // server-side abort, the upstream provider call) instead of waiting for the batch.
   const abortRef = useRef<AbortController | null>(null);
   const [stopping, setStopping] = useState(false);
-  // Questions kept when the user stopped early: validated, never padded, launchable as-is.
   const [partial, setPartial] = useState<ClinicalQuestion[] | null>(null);
 
-  // Suggestion box: a TEMPORARY generation profile. Held in component state only — never
-  // localStorage, never written to settings — so a reload or restart drops it.
+  // Suggestion box: a TEMPORARY generation profile. Component state only — never persisted.
   const [profileDraft, setProfileDraft] = useState('');
   const [appliedProfile, setAppliedProfile] = useState<string | null>(null);
 
-  // Leaving the screen mid-generation must not keep spending quota.
-  useEffect(() => () => { abortRef.current?.abort(); }, []);
-
-  // Section-14 AI writing options
   const [questionTypes, setQuestionTypes] = useState<string[]>([]);
   const [stemPatterns, setStemPatterns] = useState<string[]>([]);
   const [evidenceSources, setEvidenceSources] = useState<string[]>([]);
   const [patientGroup, setPatientGroup] = useState<string>('');
   const [presentingProblems, setPresentingProblems] = useState<string[]>([]);
+  const [showAmcOptions, setShowAmcOptions] = useState(false);
 
-  // Question source (PARITY section 2): new AI items, or MCQs derived from the
-  // learner's real saved notes. The bank sources open the Question Bank screen.
   const [sourceMode, setSourceMode] = useState<'AI' | 'MY_NOTES'>('AI');
+
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
 
   const toggleFromList = (list: string[], setList: (v: string[]) => void, value: string) => {
     setList(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
   };
 
-  const chip = (selected: boolean) =>
-    `px-2.5 py-1 rounded-full text-[10px] font-semibold border transition-colors ${
-      selected
-        ? 'bg-[#0f8b8d]/10 border-[#0f8b8d]/40 text-[#00696b]'
-        : 'bg-slate-50 border-slate-200 text-slate-600 hover:border-slate-300'
-    }`;
+  // ------------------------------------------------------------ subject model
 
-  const toggleSubjectExpanded = (key: string, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
-    setExpandedSubjects(prev => ({
-      ...prev,
-      [key]: !prev[key]
+  type SubjectRow = { key: string; label: string; meta: string; topics: string[]; desc?: string; highYield?: boolean };
+
+  const subjectList: SubjectRow[] = useMemo(() => {
+    const topical = (key: string, label: string) => SUBTOPICS[key] ?? SUBTOPICS[label] ?? [];
+    if (selectedExam === 'NEET_PG') {
+      return NEET_PG_SUBJECTS.map((s) => ({
+        key: s.name, label: s.name, meta: s.weightage, topics: topical(s.name, s.name), highYield: s.highYield,
+      }));
+    }
+    if (selectedExam === 'INI_CET') {
+      if (iniSyllabusMode === '19_SUBJECTS') {
+        return NEET_PG_SUBJECTS.map((s) => ({
+          key: s.name, label: s.name, meta: s.weightage, topics: topical(s.name, s.name), highYield: s.highYield,
+        }));
+      }
+      return INI_CET_DOMAINS_6.map((d) => ({
+        key: d.id, label: d.name, meta: d.weightage, topics: topical(d.id, d.name), desc: d.desc,
+      }));
+    }
+    return AMC_CAT_DOMAINS_6.map((d) => ({
+      key: d.id,
+      label: d.name,
+      meta: `${d.officialWeight} · ${d.questionRatio}`,
+      topics: topical(d.id, d.name),
+      desc: d.desc,
+      highYield: d.highYield,
     }));
+  }, [selectedExam, iniSyllabusMode]);
+
+  const chosenKeys: string[] = selectedExam === 'NEET_PG'
+    ? selectedNeetSubjects
+    : selectedExam === 'INI_CET'
+      ? (iniSyllabusMode === '19_SUBJECTS' ? selectedIniSubjects : selectedIniDomains)
+      : selectedAmcDomains;
+
+  const setChosenKeys = (updater: (prev: string[]) => string[]) => {
+    if (selectedExam === 'NEET_PG') setSelectedNeetSubjects(updater);
+    else if (selectedExam === 'INI_CET') {
+      if (iniSyllabusMode === '19_SUBJECTS') setSelectedIniSubjects(updater);
+      else setSelectedIniDomains(updater);
+    } else setSelectedAmcDomains(updater);
   };
 
-  const toggleSubtopic = (subjectKey: string, subtopic: string) => {
-    setSelectedSubtopics(prev => {
-      const current = prev[subjectKey] ?? SUBTOPICS[subjectKey] ?? [];
-      const updated = current.includes(subtopic)
-        ? current.filter(s => s !== subtopic)
-        : [...current, subtopic];
-      return { ...prev, [subjectKey]: updated };
+  const effectiveKeys = specialtyAll ? subjectList.map((s) => s.key) : chosenKeys;
+  const isSubjectOn = (key: string) => effectiveKeys.includes(key);
+
+  const toggleSubject = (key: string) => {
+    setGenState((st) => ({ ...st, error: null }));
+    // Ticking one subject while "All" is on turns the blanket choice into a real list.
+    if (specialtyAll) {
+      setSpecialtyAll(false);
+      setChosenKeys(() => [key]);
+      return;
+    }
+    setChosenKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+    setSelectedSubtopics((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
     });
   };
 
-  const selectAllSubtopics = (subjectKey: string, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
-    const all = SUBTOPICS[subjectKey] || [];
-    setSelectedSubtopics(prev => ({
-      ...prev,
-      [subjectKey]: [...all]
-    }));
-  };
+  const chosenTopicsFor = (row: SubjectRow) => selectedSubtopics[row.key] ?? row.topics;
 
-  const clearAllSubtopics = (subjectKey: string, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
-    setSelectedSubtopics(prev => ({
-      ...prev,
-      [subjectKey]: []
-    }));
-  };
+  const totalChosenSubtopicsCount = subjectList
+    .filter((row) => isSubjectOn(row.key))
+    .reduce((sum, row) => sum + chosenTopicsFor(row).length, 0);
 
-  const toggleNeetSubject = (name: string) => {
-    setSelectedNeetSubjects(prev => {
-      const isSelected = prev.includes(name);
-      if (isSelected) {
-        return prev.length > 1 ? prev.filter(s => s !== name) : prev;
-      } else {
-        if (!selectedSubtopics[name] && SUBTOPICS[name]) {
-          setSelectedSubtopics(s => ({ ...s, [name]: [...SUBTOPICS[name]] }));
-        }
-        return [...prev, name];
-      }
+  const applyTopics = (topics: string[], kind: 'ALL' | 'CHOOSE') => {
+    if (!topicModal) return;
+    const key = topicModal.key;
+    setSelectedSubtopics((prev) => {
+      const next = { ...prev };
+      if (kind === 'ALL') delete next[key];
+      else next[key] = topics;
+      return next;
     });
+    if (kind === 'CHOOSE' && topics.length === 0) {
+      if (!specialtyAll) setChosenKeys((prev) => prev.filter((k) => k !== key));
+    } else if (specialtyAll) {
+      setSpecialtyAll(false);
+      setChosenKeys(() => [key]);
+    } else {
+      setChosenKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
+    }
+    setTopicModal(null);
+    setGenState((st) => ({ ...st, error: null }));
   };
 
-  const toggleIniSubject = (name: string) => {
-    setSelectedIniSubjects(prev => {
-      const isSelected = prev.includes(name);
-      if (isSelected) {
-        return prev.length > 1 ? prev.filter(s => s !== name) : prev;
-      } else {
-        if (!selectedSubtopics[name] && SUBTOPICS[name]) {
-          setSelectedSubtopics(s => ({ ...s, [name]: [...SUBTOPICS[name]] }));
-        }
-        return [...prev, name];
-      }
+  // ------------------------------------------------------------ generation
+
+  /** Labels (not ids) go to the AI and into the module record, so prompts read "Adult Health - Medicine". */
+  const labelsFor = (keys: string[]) =>
+    keys.map((k) => subjectList.find((r) => r.key === k)?.label ?? k);
+
+  const resolveSubjects = () => effectiveKeys;
+
+  const topicsForKeys = (keys: string[]): string[] => {
+    const chosen: string[] = [];
+    keys.forEach((key) => {
+      const row = subjectList.find((r) => r.key === key);
+      const list = selectedSubtopics[key] ?? (row ? row.topics : SUBTOPICS[key] ?? []);
+      chosen.push(...list);
     });
-  };
-
-  const toggleIniDomain = (id: string) => {
-    setSelectedIniDomains(prev => {
-      const isSelected = prev.includes(id);
-      if (isSelected) {
-        return prev.length > 1 ? prev.filter(d => d !== id) : prev;
-      } else {
-        if (!selectedSubtopics[id] && SUBTOPICS[id]) {
-          setSelectedSubtopics(s => ({ ...s, [id]: [...SUBTOPICS[id]] }));
-        }
-        return [...prev, id];
-      }
-    });
-  };
-
-  const toggleAmcDomain = (id: string) => {
-    setSelectedAmcDomains(prev => {
-      const isSelected = prev.includes(id);
-      if (isSelected) {
-        return prev.length > 1 ? prev.filter(d => d !== id) : prev;
-      } else {
-        if (!selectedSubtopics[id] && SUBTOPICS[id]) {
-          setSelectedSubtopics(s => ({ ...s, [id]: [...SUBTOPICS[id]] }));
-        }
-        return [...prev, id];
-      }
-    });
-  };
-
-  const examDetails = {
-    NEET_PG: {
-      name: 'NEET-PG Pattern',
-      scoring: '+4 / -1 Marking Rule',
-      desc: 'National Board of Examinations (NBE) blueprint across 19 NMC subjects with clinical vignettes.',
-    },
-    INI_CET: {
-      name: 'INI-CET AIIMS Pattern',
-      scoring: '+1 / -0.33 Marking Rule',
-      desc: 'AIIMS clinical matrix matching, assertion-reasoning, and multiple statement completion.',
-    },
-    AMC_CAT: {
-      name: 'AMC CAT Examination',
-      scoring: 'Computer Adaptive Scoring (0-500 scale, 250 pass mark)',
-      desc: 'Australian Medical Council 6 core domains with dynamic item difficulty calibration.',
-    },
-  };
-
-  // Launch: generate the questions with the ACTIVE AI provider (batches <=10), validate,
-  // then hand the generated list to the Test Runner launch path. No canned question fallback.
-  const resolveSubjects = () => {
-    if (selectedExam === 'NEET_PG') return selectedNeetSubjects;
-    if (selectedExam === 'INI_CET') return iniSyllabusMode === '19_SUBJECTS' ? selectedIniSubjects : selectedIniDomains;
-    return selectedAmcDomains;
+    return chosen;
   };
 
   const handleLaunch = async () => {
     if (genState.busy) return;
 
-    const subjects = resolveSubjects();
-    const chosenSubtopics: string[] = [];
-    subjects.forEach(subj => {
-      const list = selectedSubtopics[subj] ?? SUBTOPICS[subj] ?? [];
-      chosenSubtopics.push(...list);
-    });
+    const keys = resolveSubjects();
+    if (keys.length === 0) {
+      setGenState({
+        busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0,
+        error: 'Pick at least one speciality (or choose All) before building a module.',
+      });
+      return;
+    }
+    const labels = labelsFor(keys);
+    const chosenSubtopics = topicsForKeys(keys);
 
     if (!getActiveProvider()) {
       setGenState({ busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0, error: `No AI provider is active. ${NOT_CONNECTED_MESSAGE}` });
@@ -334,7 +378,10 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       const { questions, dropped, stopped } = await generateExamQuestions({
         exam: selectedExam,
         count: questionCount,
-        subjectSubtopics: subjects.map(s => ({ subject: s, subtopics: selectedSubtopics[s] ?? SUBTOPICS[s] ?? [] })),
+        subjectSubtopics: keys.map((key, i) => ({
+          subject: labels[i],
+          subtopics: selectedSubtopics[key] ?? (subjectList.find((r) => r.key === key)?.topics ?? SUBTOPICS[key] ?? []),
+        })),
         difficultyTier,
         difficultySubLevel,
         onProgress: (generated, total, batch, totalBatches) =>
@@ -351,7 +398,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       });
 
       if (questions.length === 0) {
-        const stopped = stopEarlyRef.current;
+        const wasStopped = stopEarlyRef.current;
         setGenState({
           busy: false,
           generated: 0,
@@ -359,7 +406,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
           batch: 0,
           totalBatches: 0,
           dropped,
-          error: stopped
+          error: wasStopped
             ? 'Generation stopped before the first batch returned a valid question. Try again or reduce the count.'
             : `The AI provider returned 0 valid questions (${dropped} dropped by validation). Try again, reduce the count, or change the active provider in Settings.`,
         });
@@ -376,11 +423,10 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         error: null,
       });
       if (stopped) {
-        // Stopped by the user: keep every validated question and let them launch it.
         setPartial(questions);
         return;
       }
-      launchWith(questions, subjects, chosenSubtopics);
+      launchWith(questions, labels, chosenSubtopics);
     } catch (err: any) {
       const aborted = controller.signal.aborted || (err instanceof AiError && err.kind === 'aborted');
       const message = aborted
@@ -393,7 +439,6 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     }
   };
 
-  /** Hand a question set to the Test Runner launch path. */
   const launchWith = (questions: ClinicalQuestion[], subjects: string[], chosenSubtopics: string[]) => {
     onLaunchModule(
       selectedExam,
@@ -407,7 +452,6 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     );
   };
 
-  /** Stop button: cancel the in-flight batch now, keep everything already validated. */
   const handleStop = () => {
     if (!genState.busy || stopping) return;
     stopEarlyRef.current = true;
@@ -416,35 +460,17 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     abortRef.current?.abort();
   };
 
-  /** Launch the questions kept from a stopped run. */
   const handleLaunchPartial = () => {
     if (!partial || partial.length === 0) return;
-    const subjects = resolveSubjects();
-    const chosenSubtopics: string[] = [];
-    subjects.forEach(subj => {
-      const list = selectedSubtopics[subj] ?? SUBTOPICS[subj] ?? [];
-      chosenSubtopics.push(...list);
-    });
+    const keys = resolveSubjects();
+    const labels = labelsFor(keys);
+    const chosenSubtopics = topicsForKeys(keys);
     setPartial(null);
-    launchWith(partial, subjects, chosenSubtopics);
+    launchWith(partial, labels, chosenSubtopics);
   };
 
-  const totalChosenSubtopicsCount = (() => {
-    let activeKeys: string[] = [];
-    if (selectedExam === 'NEET_PG') {
-      activeKeys = selectedNeetSubjects;
-    } else if (selectedExam === 'INI_CET') {
-      activeKeys = iniSyllabusMode === '19_SUBJECTS' ? selectedIniSubjects : selectedIniDomains;
-    } else {
-      activeKeys = selectedAmcDomains;
-    }
-    return activeKeys.reduce((sum, key) => {
-      const count = (selectedSubtopics[key] ?? SUBTOPICS[key] ?? []).length;
-      return sum + count;
-    }, 0);
-  })();
+  // ------------------------------------------------------------ history
 
-  // Real progress (PARITY section 2): computed only from stored attempts.
   const progressStats = useMemo(() => {
     const summary = summarizeAttempts();
     const today = attemptsToday();
@@ -452,10 +478,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     return { summary, todayCount: today.length, last };
   }, []);
 
-  // Targeted drill (PARITY section 2): only subjects the learner has actually answered,
-  // lowest accuracy first. Subject names come from real attempt records.
   const subjectNames = useMemo(() => NEET_PG_SUBJECTS.map((s) => s.name), []);
-  const canDrillBySubject = selectedExam === 'NEET_PG' || (selectedExam === 'INI_CET' && iniSyllabusMode === '19_SUBJECTS');
   const weakForDrill = useMemo(
     () => progressStats.summary.weakSubjects.filter((w) => subjectNames.includes(w.subject)),
     [progressStats.summary.weakSubjects, subjectNames],
@@ -465,1111 +488,526 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     const targets = weakForDrill.map((w) => w.subject);
     if (!targets.length) return;
     if (selectedExam === 'NEET_PG') setSelectedNeetSubjects(targets);
-    else setSelectedIniSubjects(targets);
+    else if (selectedExam === 'INI_CET' && iniSyllabusMode === '19_SUBJECTS') setSelectedIniSubjects(targets);
+    else return;
+    setSpecialtyAll(false);
     setSelectedSubtopics((prev) => {
       const next = { ...prev };
-      for (const subject of targets) next[subject] = [...(SUBTOPICS[subject] ?? [])];
+      for (const subject of targets) delete next[subject];
       return next;
     });
     setGenState((st) => ({ ...st, error: null }));
   };
 
+  const subjectsChosen = effectiveKeys.length;
+  const canLaunch = subjectsChosen > 0;
+  const activeModalRow = topicModal ? subjectList.find((r) => r.key === topicModal.key) ?? null : null;
+  const durationMin = Math.max(1, Math.round(questionCount * 1.1));
+
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
-      {/* Header Banner */}
-      <div className="bg-[#001432] rounded-2xl p-6 text-white border border-[#13294b] shadow-md relative overflow-hidden">
-        <div className="absolute right-0 top-0 bottom-0 w-96 bg-gradient-to-l from-[#0f8b8d]/20 to-transparent pointer-events-none" />
-        
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
-          <div>
-            <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-[#0f8b8d]/20 text-[#8ff3f4] text-xs font-semibold uppercase tracking-wider mb-2 border border-[#0f8b8d]/30">
-              <Sliders className="w-3.5 h-3.5" />
-              Dynamic Test Engine & Blueprint Calibrator
-            </div>
-            <h1 className="text-2xl font-bold tracking-tight text-white">
-              Adaptive Practice Module Generator & Exam Builder
-            </h1>
-            <p className="text-slate-300 text-sm mt-1 max-w-2xl">
-              Configure question sets calibrated to target board marking rules, authentic syllabi (NEET-PG, INI-CET, AMC CAT), and granular difficulty tiers.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-mono px-3 py-1.5 rounded-xl bg-slate-800 text-amber-400 border border-slate-700 flex items-center gap-1.5">
-              <Flame className="w-4 h-4 text-amber-400" /> Blueprint Calibrated
-            </span>
-          </div>
+    <div className="max-w-6xl mx-auto">
+      {/* Page header */}
+      <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-800">Create a custom module</h1>
+          <p className="text-sm text-slate-500 mt-1">Customise an MCQ set by adding your own parameters</p>
+        </div>
+        <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 border border-slate-200">
+          {(['NEET_PG', 'INI_CET', 'AMC_CAT'] as ExamType[]).map((examKey) => (
+            <button
+              key={examKey}
+              onClick={() => { setSelectedExam(examKey); onExamChange?.(examKey); setSpecialtyAll(false); }}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all ${
+                selectedExam === examKey ? 'bg-white text-[#00696b] shadow-sm' : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              {EXAM_LABEL[examKey]}
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* Real progress strip — modules today / overall accuracy / last module */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3.5">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Modules today</div>
-          <div className="text-2xl font-mono font-bold text-slate-900 mt-0.5">{progressStats.todayCount}</div>
-          <div className="text-[10px] text-slate-400">{progressStats.summary.modules} submitted in total</div>
-        </div>
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3.5">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Overall accuracy</div>
-          <div className="text-2xl font-mono font-bold text-[#0f8b8d] mt-0.5">
-            {progressStats.summary.accuracyPercent === null ? '—' : `${progressStats.summary.accuracyPercent}%`}
-          </div>
-          <div className="text-[10px] text-slate-400">
-            {progressStats.summary.questionsAnswered > 0
-              ? `${progressStats.summary.correct} correct of ${progressStats.summary.questionsAnswered} answered`
-              : 'No questions answered yet'}
-          </div>
-        </div>
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3.5">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Last module</div>
-          <div className="text-sm font-bold text-slate-900 mt-1 truncate">
-            {progressStats.last
-              ? `${progressStats.last.correct}/${progressStats.last.attempted} correct · ${progressStats.last.exam.replace('_', '-')}`
-              : 'No module submitted yet'}
-          </div>
-          <div className="text-[10px] text-slate-400">
-            {progressStats.last
-              ? `${progressStats.last.mode === 'EXAM' ? 'Strict exam' : 'Tutor'} mode · ${new Date(progressStats.last.at).toLocaleString()}`
-              : 'Finish a module to see your summary here'}
-          </div>
-        </div>
-      </div>
-
-      {/* Targeted drill from real weak topics (only when analysed attempts exist) */}
-      {progressStats.summary.modules > 0 && (
-        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-              <Target className="w-4 h-4 text-rose-500" /> Targeted drill — weakest real topics
-            </h3>
-            <span className="text-[10px] text-slate-500">
-              Built only from your submitted modules ({progressStats.summary.questionsAnswered} answers)
-            </span>
-          </div>
-          {weakForDrill.length === 0 ? (
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              {canDrillBySubject
-                ? 'Not enough answers per subject yet (at least 3 per subject) to rank weak topics. Submit another module.'
-                : 'Weak-topic ranking uses NEET-PG / INI-CET subject names. Switch the target exam (or INI syllabus mode) to drill by subject.'}
-            </p>
-          ) : (
-            <>
-              <div className="flex flex-wrap gap-1.5">
-                {weakForDrill.map((w) => (
-                  <span
-                    key={w.subject}
-                    className="px-2.5 py-1 rounded-full text-[10px] font-semibold border bg-rose-50 border-rose-200 text-rose-800"
-                    title={`${w.correct} correct of ${w.total} answered`}
-                  >
-                    {w.subject} · {w.accuracy}% ({w.correct}/{w.total})
-                  </span>
-                ))}
-              </div>
-              <button
-                onClick={applyWeakDrill}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#001432] hover:bg-[#13294b] text-white text-[11px] font-bold"
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* ------------------------------------------------ form */}
+        <div className="lg:col-span-8 bg-white rounded-2xl border border-slate-200 shadow-sm px-6">
+          <Row label="Number of questions" hint={`${EXAM_SCORING[selectedExam]} marking · ~${durationMin} min`}>
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={questionCount}
+                onChange={(e) => setQuestionCount(Number(e.target.value))}
+                className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-bold text-slate-800 focus:outline-none focus:border-[#0f8b8d]"
               >
-                <Target className="w-3.5 h-3.5 text-[#8ff3f4]" />
-                Select these {weakForDrill.length} subject{weakForDrill.length === 1 ? '' : 's'} + all their subtopics
-              </button>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* Question source (PARITY section 2) — AI items, own notes, or an existing bank */}
-      <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm space-y-2">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-            <BookOpen className="w-4 h-4 text-[#0f8b8d]" /> Question source
-          </h3>
-          <span className="text-[10px] text-slate-500">
-            {sourceMode === 'MY_NOTES'
-              ? `${listUserHighlights().length} saved note${listUserHighlights().length === 1 ? '' : 's'} will ground the questions`
-              : 'Fresh questions written by your active AI provider'}
-          </span>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <button onClick={() => setSourceMode('AI')} className={chip(sourceMode === 'AI')}>
-            New AI questions
-          </button>
-          <button onClick={() => setSourceMode('MY_NOTES')} className={chip(sourceMode === 'MY_NOTES')}>
-            My notes → MCQs
-          </button>
-          <span className="w-px h-5 bg-slate-200 mx-1" />
-          <button onClick={() => onNavigate('mistakes')} className={chip(false)} title="Open the Mistake Notebook and its real SRS sprint">
-            My mistakes ↗
-          </button>
-          <button onClick={() => onNavigate('question-bank')} className={chip(false)} title="Open the Question Bank (load your own bank files there)">
-            Recall bank ↗
-          </button>
-          <button onClick={() => onNavigate('question-bank')} className={chip(false)} title="Open the Question Bank (load your own bank files there)">
-            eMedici ↗
-          </button>
-          <button onClick={() => onNavigate('question-bank')} className={chip(false)} title="Open the Question Bank (load your own bank files there)">
-            AMC SUCCESS ↗
-          </button>
-        </div>
-        {sourceMode === 'MY_NOTES' && (
-          <p className="text-[10px] text-slate-500 leading-relaxed">
-            Questions are written only from the highlights and AI notes you have saved. Nothing else is invented; the
-            note's citation is carried into the generated question.
-          </p>
-        )}
-      </div>
-
-      {/* Main Grid Setup */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Configuration Controls */}
-        <div className="lg:col-span-8 space-y-6">
-          {/* 1. Target Board Examination Selection (USMLE Removed) */}
-          <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                <Target className="w-4 h-4 text-[#0f8b8d]" /> 1. Target Board Blueprint
-              </h3>
-              <span className="text-xs font-semibold text-slate-500">Selects marking rules & exam styling</span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {(['NEET_PG', 'INI_CET', 'AMC_CAT'] as ExamType[]).map((examKey) => {
-                const isSelected = selectedExam === examKey;
-                const info = examDetails[examKey];
-
-                return (
-                  <div
-                    key={examKey}
-                    onClick={() => setSelectedExam(examKey)}
-                    className={`p-4 rounded-xl border cursor-pointer transition-all ${
-                      isSelected
-                        ? 'border-[#0f8b8d] bg-teal-50/20 ring-2 ring-[#0f8b8d]/20 shadow-xs'
-                        : 'border-slate-200 hover:border-slate-300 bg-white'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs font-bold text-slate-900">{info.name}</span>
-                      {isSelected && <CheckCircle2 className="w-3.5 h-3.5 text-[#0f8b8d]" />}
-                    </div>
-                    <div className="text-[10px] font-mono font-bold text-[#0f8b8d] mb-1">
-                      {info.scoring}
-                    </div>
-                    <p className="text-[11px] text-slate-500 leading-relaxed">
-                      {info.desc}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* 2. Granular Question Difficulty Selector with Sub-levels */}
-          <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <Brain className="w-4 h-4 text-[#0f8b8d]" /> 2. Granular Question Difficulty & Sub-Tiers
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Select baseline complexity or target specific cognitive challenges
-                </p>
-              </div>
-              <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-700">
-                Tier: {difficultyTier} {difficultySubLevel ? `(${difficultySubLevel})` : ''}
+                {QUESTION_COUNTS.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+              <span className="text-[11px] text-slate-500">
+                questions · written in batches of 10, up to 100
               </span>
             </div>
+          </Row>
 
-            {/* 4 Main Tier Buttons */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-              {[
-                { id: 'ALL', label: 'All Levels (Adaptive Mix)', desc: 'Dynamic mix from basic to ranker' },
-                { id: 'LOW', label: 'Low Difficulty', desc: 'Direct recall & buzzword cues' },
-                { id: 'MEDIUM', label: 'Medium Difficulty', desc: '2-step reasoning & mimickers' },
-                { id: 'HIGH', label: 'High Difficulty', desc: 'Multi-step traps & complex cases' },
-              ].map(tier => {
-                const isSelected = difficultyTier === tier.id;
-                return (
-                  <button
-                    key={tier.id}
-                    onClick={() => {
-                      setDifficultyTier(tier.id as DifficultyTier);
-                      setDifficultySubLevel(undefined);
-                    }}
-                    className={`p-3 rounded-xl border text-left transition-all ${
-                      isSelected
-                        ? 'bg-[#001432] text-white border-[#001432] shadow-sm ring-1 ring-[#001432]'
-                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
-                    }`}
-                  >
-                    <div className="text-xs font-bold">{tier.label}</div>
-                    <div className={`text-[10px] mt-1 leading-snug ${isSelected ? 'text-slate-300' : 'text-slate-500'}`}>
-                      {tier.desc}
-                    </div>
-                  </button>
-                );
-              })}
+          <Row label="Difficulty Level">
+            <div className="flex flex-wrap items-start gap-6">
+              <Radio
+                checked={difficultyTier === 'ALL'}
+                onClick={() => { setDifficultyTier('ALL'); setDifficultySubLevel(undefined); }}
+                label="All"
+                hint="Realistic exam mix (~20% easy, 45% medium, 35% hard)"
+              />
+              <Radio
+                checked={difficultyTier !== 'ALL'}
+                onClick={() => setDifficultyTier(difficultyTier === 'ALL' ? 'MEDIUM' : difficultyTier)}
+                label="Choose level"
+                hint="Every item at one level"
+              />
             </div>
 
-            {/* Granular Sub-level Pills */}
             {difficultyTier !== 'ALL' && (
-              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
-                <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider block">
-                  Fine-Tune {difficultyTier} Sub-Level (Optional):
-                </span>
+              <div className="mt-3.5 space-y-2.5 pl-6">
                 <div className="flex flex-wrap gap-2">
-                  {difficultyTier === 'LOW' && (
-                    <>
-                      <button
-                        onClick={() => setDifficultySubLevel(difficultySubLevel === 'L1' ? undefined : 'L1')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                          difficultySubLevel === 'L1' ? 'bg-[#0f8b8d] text-white' : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        Sub-level L1: 1-Step Direct Fact Retrieval (Enzymes, normal ranges)
-                      </button>
-                      <button
-                        onClick={() => setDifficultySubLevel(difficultySubLevel === 'L2' ? undefined : 'L2')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                          difficultySubLevel === 'L2' ? 'bg-[#0f8b8d] text-white' : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        Sub-level L2: Characteristic Sign & Buzzwords (Pathognomonic cues)
-                      </button>
-                    </>
-                  )}
-
-                  {difficultyTier === 'MEDIUM' && (
-                    <>
-                      <button
-                        onClick={() => setDifficultySubLevel(difficultySubLevel === 'M1' ? undefined : 'M1')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                          difficultySubLevel === 'M1' ? 'bg-[#0f8b8d] text-white' : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        Sub-level M1: Clinical 2-Step Reasoning (Vignette + Labs $\rightarrow$ Diagnosis)
-                      </button>
-                      <button
-                        onClick={() => setDifficultySubLevel(difficultySubLevel === 'M2' ? undefined : 'M2')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                          difficultySubLevel === 'M2' ? 'bg-[#0f8b8d] text-white' : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        Sub-level M2: Plausible Distractor Discrimination (Eliminate paired traps)
-                      </button>
-                    </>
-                  )}
-
-                  {difficultyTier === 'HIGH' && (
-                    <>
-                      <button
-                        onClick={() => setDifficultySubLevel(difficultySubLevel === 'H1' ? undefined : 'H1')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                          difficultySubLevel === 'H1' ? 'bg-[#0f8b8d] text-white' : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        Sub-level H1: Multi-Step Management & Complications (Condition $\rightarrow$ Failure $\rightarrow$ Emergency)
-                      </button>
-                      <button
-                        onClick={() => setDifficultySubLevel(difficultySubLevel === 'H2' ? undefined : 'H2')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                          difficultySubLevel === 'H2' ? 'bg-[#0f8b8d] text-white' : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        Sub-level H2: High-Yield Board Traps & Atypical IBQs (Subtle normal lab distractors)
-                      </button>
-                    </>
-                  )}
+                  {([
+                    { id: 'LOW', label: 'Low' },
+                    { id: 'MEDIUM', label: 'Medium' },
+                    { id: 'HIGH', label: 'High' },
+                  ] as const).map((tier) => (
+                    <Chip
+                      key={tier.id}
+                      active={difficultyTier === tier.id}
+                      onClick={() => { setDifficultyTier(tier.id); setDifficultySubLevel(undefined); }}
+                    >
+                      {tier.label}
+                    </Chip>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {(difficultyTier === 'LOW'
+                    ? [{ id: 'L1', label: 'L1 · 1-step fact retrieval' }, { id: 'L2', label: 'L2 · pathognomonic cues' }]
+                    : difficultyTier === 'MEDIUM'
+                      ? [{ id: 'M1', label: 'M1 · vignette + labs → diagnosis' }, { id: 'M2', label: 'M2 · eliminate paired traps' }]
+                      : [{ id: 'H1', label: 'H1 · multi-step management' }, { id: 'H2', label: 'H2 · atypical board traps' }]
+                  ).map((sub) => (
+                    <Chip
+                      key={sub.id}
+                      active={difficultySubLevel === sub.id}
+                      onClick={() => setDifficultySubLevel(difficultySubLevel === sub.id ? undefined : (sub.id as DifficultySubLevel))}
+                      title="Optional sub-level"
+                    >
+                      {sub.label}
+                    </Chip>
+                  ))}
                 </div>
               </div>
             )}
-          </div>
+          </Row>
 
-          {/* 3. Authentic Syllabus & Discipline Tree */}
-          <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div>
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <BookOpen className="w-4 h-4 text-[#0f8b8d]" /> 3. Official Syllabus & Subject Coverage
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  {selectedExam === 'NEET_PG' && '19 Standard NMC/NBE Medical Disciplines'}
-                  {selectedExam === 'INI_CET' && 'AIIMS Integrated Clinical Disciplines'}
-                  {selectedExam === 'AMC_CAT' && 'Australian Medical Council 6 Core Patient Domains'}
-                </p>
-              </div>
+          <Row label="Questions from" hint="written by your active AI provider">
+            <div className="flex flex-wrap items-start gap-6">
+              <Radio checked={sourceMode === 'AI'} onClick={() => setSourceMode('AI')} label="New AI questions" />
+              <Radio
+                checked={sourceMode === 'MY_NOTES'}
+                onClick={() => setSourceMode('MY_NOTES')}
+                label="My notes"
+                hint={`${listUserHighlights().length} saved note${listUserHighlights().length === 1 ? '' : 's'}`}
+              />
+            </div>
+            <div className="flex flex-wrap gap-2 mt-3">
+              <Chip active={false} onClick={() => onNavigate('mistakes')} title="Open the Mistake Notebook">My mistakes ↗</Chip>
+              <Chip active={false} onClick={() => onNavigate('question-bank')} title="Open the Question Bank">Recall bank ↗</Chip>
+              <Chip active={false} onClick={() => onNavigate('question-bank')} title="Open the Question Bank">eMedici ↗</Chip>
+              <Chip active={false} onClick={() => onNavigate('question-bank')} title="Open the Question Bank">AMC SUCCESS ↗</Chip>
+            </div>
+            {sourceMode === 'MY_NOTES' && (
+              <p className="text-[11px] text-slate-500 leading-relaxed mt-2">
+                Questions are written only from the highlights and AI notes you have saved. Nothing else is invented;
+                the note's citation is carried into the generated question.
+              </p>
+            )}
+          </Row>
 
-              {/* INI-CET Dual Syllabus View Toggle */}
+          <Row label="Speciality" hint={`${subjectsChosen} of ${subjectList.length} selected`}>
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-3 mb-3">
+              <Radio
+                checked={specialtyAll}
+                onClick={() => setSpecialtyAll(true)}
+                label="All"
+                hint={`Every ${selectedExam === 'AMC_CAT' ? 'domain' : 'subject'} (${subjectList.length})`}
+              />
+              <Radio checked={!specialtyAll} onClick={() => setSpecialtyAll(false)} label="Choose" hint="Pick the subjects yourself" />
               {selectedExam === 'INI_CET' && (
-                <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
+                <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-slate-100 ml-auto">
                   <button
                     onClick={() => setIniSyllabusMode('19_SUBJECTS')}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all ${
-                      iniSyllabusMode === '19_SUBJECTS'
-                        ? 'bg-[#001432] text-white shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
+                    className={`px-2 py-1 rounded-md text-[10px] font-bold ${iniSyllabusMode === '19_SUBJECTS' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}
                   >
-                    19 NMC Subjects View
+                    19 subjects
                   </button>
                   <button
                     onClick={() => setIniSyllabusMode('6_INTEGRATED_DOMAINS')}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all ${
-                      iniSyllabusMode === '6_INTEGRATED_DOMAINS'
-                        ? 'bg-[#001432] text-white shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
+                    className={`px-2 py-1 rounded-md text-[10px] font-bold ${iniSyllabusMode === '6_INTEGRATED_DOMAINS' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}
+                  >
+                    6 AIIMS domains
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-xl border border-slate-200 max-h-[320px] overflow-y-auto">
+              {subjectList.map((row) => {
+                const on = isSubjectOn(row.key);
+                const chosenTopics = chosenTopicsFor(row);
+                const allTopics = chosenTopics.length === row.topics.length;
+                return (
+                  <div
+                    key={row.key}
+                    title={row.desc || row.label}
+                    className={`flex items-start gap-2.5 px-3 py-2.5 border-b border-slate-100 last:border-b-0 transition-colors ${
+                      on ? 'bg-teal-50/40' : 'hover:bg-slate-50'
                     }`}
                   >
-                    6 AIIMS Organ Domains View
-                  </button>
+                    <button onClick={() => toggleSubject(row.key)} className="flex items-start gap-2.5 flex-1 min-w-0 text-left">
+                      <span className="mt-0.5"><SubjectTick checked={on} /></span>
+                      <span className="min-w-0">
+                        <span className="block text-xs font-semibold text-slate-800 truncate">
+                          {row.label}
+                          {row.highYield && <span className="ml-1 text-[9px] text-amber-500 align-top">★</span>}
+                        </span>
+                        <span className="block text-[10px] text-slate-500 mt-0.5">
+                          {on
+                            ? allTopics
+                              ? `All topics (${row.topics.length})`
+                              : `${chosenTopics.length} of ${row.topics.length} topics`
+                            : row.meta}
+                        </span>
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => setTopicModal({ key: row.key, label: row.label })}
+                      className="shrink-0 mt-0.5 px-2 py-1 rounded-md text-[10px] font-bold text-[#0f8b8d] hover:bg-teal-50 flex items-center gap-1"
+                      title="Choose topics"
+                    >
+                      Topics <ChevronsUpDown className="w-3 h-3" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </Row>
+
+          <Row label="Tags" hint="style hints sent to the AI writer">
+            <div className="space-y-3">
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Question style</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {QUESTION_TYPE_CHIPS.map((q) => (
+                    <Chip key={q} active={questionTypes.includes(q)} onClick={() => toggleFromList(questionTypes, setQuestionTypes, q)}>
+                      {q}
+                    </Chip>
+                  ))}
                 </div>
+              </div>
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Stem focus</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {STEM_PATTERN_CHIPS.map((p) => (
+                    <Chip key={p} active={stemPatterns.includes(p)} onClick={() => toggleFromList(stemPatterns, setStemPatterns, p)}>
+                      {p}
+                    </Chip>
+                  ))}
+                </div>
+              </div>
+
+              {selectedExam === 'AMC_CAT' && (
+                <>
+                  <button onClick={() => setShowAmcOptions((v) => !v)} className="text-[11px] font-bold text-[#0f8b8d] hover:underline">
+                    {showAmcOptions ? 'Hide' : 'Show'} AMC blueprint tags (evidence, patient group, presenting problem)
+                  </button>
+                  {showAmcOptions && (
+                    <div className="space-y-3 pt-1">
+                      <div>
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Evidence sources</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {EVIDENCE_SOURCE_CHIPS.map((src) => (
+                            <Chip key={src} active={evidenceSources.includes(src)} onClick={() => toggleFromList(evidenceSources, setEvidenceSources, src)}>
+                              {src}
+                            </Chip>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Patient group</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {PATIENT_GROUP_CHIPS.map((g) => (
+                            <Chip key={g} active={patientGroup === g} onClick={() => setPatientGroup(patientGroup === g ? '' : g)}>
+                              {g}
+                            </Chip>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Presenting problems</div>
+                        <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+                          {PRESENTING_PROBLEM_CHIPS.map((pp) => (
+                            <Chip key={pp} active={presentingProblems.includes(pp)} onClick={() => toggleFromList(presentingProblems, setPresentingProblems, pp)}>
+                              {pp}
+                            </Chip>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
             </div>
+          </Row>
 
-            {/* Disciplines Content */}
-            {selectedExam === 'NEET_PG' && (
-              <div className="space-y-4">
-                <div className="flex items-center justify-between text-xs text-slate-500 font-medium">
-                  <span>{selectedNeetSubjects.length} of 19 Subjects Selected</span>
-                  <span className="text-[11px] text-slate-400">Expand subtopics under any selected subject</span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 items-start">
-                  {NEET_PG_SUBJECTS.map(subj => {
-                    const isSelected = selectedNeetSubjects.includes(subj.name);
-                    const subtopicsTotal = SUBTOPICS[subj.name] || [];
-                    const subtopicsSelected = selectedSubtopics[subj.name] ?? subtopicsTotal;
-                    const isExpanded = !!expandedSubjects[subj.name];
-
-                    return (
-                      <div
-                        key={subj.id}
-                        className={`rounded-xl border transition-all ${
-                          isSelected
-                            ? 'border-[#001432] bg-white shadow-xs'
-                            : 'bg-slate-50 border-slate-200 hover:bg-slate-100'
-                        }`}
-                      >
-                        <div
-                          onClick={() => toggleNeetSubject(subj.name)}
-                          className={`p-2.5 rounded-xl cursor-pointer flex items-center justify-between text-xs font-semibold select-none ${
-                            isSelected ? 'bg-[#001432] text-white' : 'text-slate-700'
-                          }`}
-                        >
-                          <div className="flex items-center gap-1.5 min-w-0 pr-1">
-                            {isSelected && <CheckCircle2 className="w-3.5 h-3.5 text-[#8ff3f4] shrink-0" />}
-                            <span className="truncate">{subj.name}</span>
-                          </div>
-                          <span className={`text-[9px] font-mono px-1 rounded shrink-0 ${
-                            isSelected ? 'bg-slate-700 text-[#8ff3f4]' : 'bg-slate-200 text-slate-600'
-                          }`}>
-                            {subj.weightage}
-                          </span>
-                        </div>
-
-                        {/* Collapsible Subtopics Checklist under selected subject */}
-                        {isSelected && (
-                          <div className="p-2.5 border-t border-slate-100 bg-slate-50/70 rounded-b-xl space-y-2">
-                            <div className="flex items-center justify-between text-[11px]">
-                              <button
-                                type="button"
-                                onClick={(e) => toggleSubjectExpanded(subj.name, e)}
-                                className="flex items-center gap-1 font-semibold text-slate-700 hover:text-[#0f8b8d] transition-colors"
-                              >
-                                <span>Subtopics ({subtopicsSelected.length}/{subtopicsTotal.length})</span>
-                                {isExpanded ? (
-                                  <ChevronUp className="w-3.5 h-3.5 text-slate-500" />
-                                ) : (
-                                  <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
-                                )}
-                              </button>
-
-                              <div className="flex items-center gap-1 text-[10px] font-bold">
-                                <button
-                                  type="button"
-                                  onClick={(e) => selectAllSubtopics(subj.name, e)}
-                                  className="text-[#0f8b8d] hover:underline px-1 py-0.5 rounded hover:bg-teal-50"
-                                >
-                                  Select All
-                                </button>
-                                <span className="text-slate-300">·</span>
-                                <button
-                                  type="button"
-                                  onClick={(e) => clearAllSubtopics(subj.name, e)}
-                                  className="text-slate-500 hover:text-rose-600 px-1 py-0.5 rounded hover:bg-rose-50"
-                                >
-                                  Clear
-                                </button>
-                              </div>
-                            </div>
-
-                            {isExpanded && (
-                              <div className="max-h-52 overflow-y-auto pr-1 space-y-1 pt-1.5 border-t border-slate-200">
-                                {subtopicsTotal.map((subtopic) => {
-                                  const isChecked = subtopicsSelected.includes(subtopic);
-                                  return (
-                                    <label
-                                      key={subtopic}
-                                      onClick={(e) => e.stopPropagation()}
-                                      className={`flex items-start gap-2 p-1.5 rounded-lg text-[11px] leading-snug cursor-pointer transition-colors ${
-                                        isChecked ? 'bg-teal-50/80 text-slate-900 font-medium' : 'text-slate-600 hover:bg-slate-100'
-                                      }`}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={isChecked}
-                                        onChange={() => toggleSubtopic(subj.name, subtopic)}
-                                        className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-[#0f8b8d] focus:ring-[#0f8b8d] accent-[#0f8b8d]"
-                                      />
-                                      <span className="select-none">{subtopic}</span>
-                                    </label>
-                                  );
-                                })}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {selectedExam === 'INI_CET' && iniSyllabusMode === '19_SUBJECTS' && (
-              <div className="space-y-4">
-                <div className="flex items-center justify-between text-xs text-slate-500 font-medium">
-                  <span>{selectedIniSubjects.length} of 19 Subjects Selected</span>
-                  <span className="text-[11px] text-slate-400">Expand subtopics under any selected subject</span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 items-start">
-                  {NEET_PG_SUBJECTS.map(subj => {
-                    const isSelected = selectedIniSubjects.includes(subj.name);
-                    const subtopicsTotal = SUBTOPICS[subj.name] || [];
-                    const subtopicsSelected = selectedSubtopics[subj.name] ?? subtopicsTotal;
-                    const isExpanded = !!expandedSubjects[subj.name];
-
-                    return (
-                      <div
-                        key={subj.id}
-                        className={`rounded-xl border transition-all ${
-                          isSelected
-                            ? 'border-[#001432] bg-white shadow-xs'
-                            : 'bg-slate-50 border-slate-200 hover:bg-slate-100'
-                        }`}
-                      >
-                        <div
-                          onClick={() => toggleIniSubject(subj.name)}
-                          className={`p-2.5 rounded-xl cursor-pointer flex items-center justify-between text-xs font-semibold select-none ${
-                            isSelected ? 'bg-[#001432] text-white' : 'text-slate-700'
-                          }`}
-                        >
-                          <div className="flex items-center gap-1.5 min-w-0 pr-1">
-                            {isSelected && <CheckCircle2 className="w-3.5 h-3.5 text-[#8ff3f4] shrink-0" />}
-                            <span className="truncate">{subj.name}</span>
-                          </div>
-                          <div className="flex items-center gap-1 shrink-0">
-                            {subj.highYield && (
-                              <span className="text-[9px] font-bold text-amber-500">★ AIIMS</span>
-                            )}
-                            <span className={`text-[9px] font-mono px-1 rounded ${
-                              isSelected ? 'bg-slate-700 text-[#8ff3f4]' : 'bg-slate-200 text-slate-600'
-                            }`}>
-                              {subj.weightage}
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Collapsible Subtopics Checklist under selected subject */}
-                        {isSelected && (
-                          <div className="p-2.5 border-t border-slate-100 bg-slate-50/70 rounded-b-xl space-y-2">
-                            <div className="flex items-center justify-between text-[11px]">
-                              <button
-                                type="button"
-                                onClick={(e) => toggleSubjectExpanded(subj.name, e)}
-                                className="flex items-center gap-1 font-semibold text-slate-700 hover:text-[#0f8b8d] transition-colors"
-                              >
-                                <span>Subtopics ({subtopicsSelected.length}/{subtopicsTotal.length})</span>
-                                {isExpanded ? (
-                                  <ChevronUp className="w-3.5 h-3.5 text-slate-500" />
-                                ) : (
-                                  <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
-                                )}
-                              </button>
-
-                              <div className="flex items-center gap-1 text-[10px] font-bold">
-                                <button
-                                  type="button"
-                                  onClick={(e) => selectAllSubtopics(subj.name, e)}
-                                  className="text-[#0f8b8d] hover:underline px-1 py-0.5 rounded hover:bg-teal-50"
-                                >
-                                  Select All
-                                </button>
-                                <span className="text-slate-300">·</span>
-                                <button
-                                  type="button"
-                                  onClick={(e) => clearAllSubtopics(subj.name, e)}
-                                  className="text-slate-500 hover:text-rose-600 px-1 py-0.5 rounded hover:bg-rose-50"
-                                >
-                                  Clear
-                                </button>
-                              </div>
-                            </div>
-
-                            {isExpanded && (
-                              <div className="max-h-52 overflow-y-auto pr-1 space-y-1 pt-1.5 border-t border-slate-200">
-                                {subtopicsTotal.map((subtopic) => {
-                                  const isChecked = subtopicsSelected.includes(subtopic);
-                                  return (
-                                    <label
-                                      key={subtopic}
-                                      onClick={(e) => e.stopPropagation()}
-                                      className={`flex items-start gap-2 p-1.5 rounded-lg text-[11px] leading-snug cursor-pointer transition-colors ${
-                                        isChecked ? 'bg-teal-50/80 text-slate-900 font-medium' : 'text-slate-600 hover:bg-slate-100'
-                                      }`}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={isChecked}
-                                        onChange={() => toggleSubtopic(subj.name, subtopic)}
-                                        className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-[#0f8b8d] focus:ring-[#0f8b8d] accent-[#0f8b8d]"
-                                      />
-                                      <span className="select-none">{subtopic}</span>
-                                    </label>
-                                  );
-                                })}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {selectedExam === 'INI_CET' && iniSyllabusMode === '6_INTEGRATED_DOMAINS' && (
-              <div className="space-y-3">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
-                  {INI_CET_DOMAINS_6.map(domain => {
-                    const isSelected = selectedIniDomains.includes(domain.id);
-                    const subtopicsTotal = SUBTOPICS[domain.name] || SUBTOPICS[domain.id] || [];
-                    const subtopicsSelected = selectedSubtopics[domain.id] ?? selectedSubtopics[domain.name] ?? subtopicsTotal;
-                    const isExpanded = !!expandedSubjects[domain.id];
-
-                    return (
-                      <div
-                        key={domain.id}
-                        className={`rounded-xl border transition-all ${
-                          isSelected
-                            ? 'border-[#0f8b8d] bg-white ring-1 ring-[#0f8b8d] shadow-xs'
-                            : 'border-slate-200 hover:border-slate-300 bg-white'
-                        }`}
-                      >
-                        <div
-                          onClick={() => toggleIniDomain(domain.id)}
-                          className="p-3.5 cursor-pointer"
-                        >
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="text-xs font-bold text-slate-900">{domain.name}</span>
-                            <span className="text-[10px] font-mono font-bold text-[#0f8b8d] bg-teal-50 px-1.5 py-0.5 rounded">
-                              {domain.weightage}
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-500 leading-relaxed">
-                            {domain.desc}
-                          </p>
-                        </div>
-
-                        {/* Collapsible Subtopics Checklist under selected domain */}
-                        {isSelected && (
-                          <div className="p-3 border-t border-slate-100 bg-slate-50/70 rounded-b-xl space-y-2">
-                            <div className="flex items-center justify-between text-[11px]">
-                              <button
-                                type="button"
-                                onClick={(e) => toggleSubjectExpanded(domain.id, e)}
-                                className="flex items-center gap-1 font-semibold text-slate-700 hover:text-[#0f8b8d] transition-colors"
-                              >
-                                <span>Subtopics ({subtopicsSelected.length}/{subtopicsTotal.length})</span>
-                                {isExpanded ? (
-                                  <ChevronUp className="w-3.5 h-3.5 text-slate-500" />
-                                ) : (
-                                  <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
-                                )}
-                              </button>
-
-                              <div className="flex items-center gap-1.5 text-[10px] font-bold">
-                                <button
-                                  type="button"
-                                  onClick={(e) => selectAllSubtopics(domain.id, e)}
-                                  className="text-[#0f8b8d] hover:underline px-1 py-0.5 rounded hover:bg-teal-50"
-                                >
-                                  Select All
-                                </button>
-                                <span className="text-slate-300">·</span>
-                                <button
-                                  type="button"
-                                  onClick={(e) => clearAllSubtopics(domain.id, e)}
-                                  className="text-slate-500 hover:text-rose-600 px-1 py-0.5 rounded hover:bg-rose-50"
-                                >
-                                  Clear
-                                </button>
-                              </div>
-                            </div>
-
-                            {isExpanded && (
-                              <div className="max-h-52 overflow-y-auto pr-1 space-y-1 pt-1.5 border-t border-slate-200">
-                                {subtopicsTotal.map((subtopic) => {
-                                  const isChecked = subtopicsSelected.includes(subtopic);
-                                  return (
-                                    <label
-                                      key={subtopic}
-                                      onClick={(e) => e.stopPropagation()}
-                                      className={`flex items-start gap-2 p-1.5 rounded-lg text-[11px] leading-snug cursor-pointer transition-colors ${
-                                        isChecked ? 'bg-teal-50/80 text-slate-900 font-medium' : 'text-slate-600 hover:bg-slate-100'
-                                      }`}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={isChecked}
-                                        onChange={() => toggleSubtopic(domain.id, subtopic)}
-                                        className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-[#0f8b8d] focus:ring-[#0f8b8d] accent-[#0f8b8d]"
-                                      />
-                                      <span className="select-none">{subtopic}</span>
-                                    </label>
-                                  );
-                                })}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {selectedExam === 'AMC_CAT' && (
-              <div className="space-y-3">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
-                  {AMC_CAT_DOMAINS_6.map(domain => {
-                    const isSelected = selectedAmcDomains.includes(domain.id);
-                    const subtopicsTotal = SUBTOPICS[domain.name] || SUBTOPICS[domain.id] || [];
-                    const subtopicsSelected = selectedSubtopics[domain.id] ?? selectedSubtopics[domain.name] ?? subtopicsTotal;
-                    const isExpanded = !!expandedSubjects[domain.id];
-
-                    return (
-                      <div
-                        key={domain.id}
-                        className={`rounded-xl border transition-all ${
-                          isSelected
-                            ? 'border-[#0f8b8d] bg-white ring-1 ring-[#0f8b8d] shadow-xs'
-                            : 'border-slate-200 hover:border-slate-300 bg-white'
-                        }`}
-                      >
-                        <div
-                          onClick={() => toggleAmcDomain(domain.id)}
-                          className="p-3.5 cursor-pointer"
-                        >
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="text-xs font-bold text-slate-900">{domain.name}</span>
-                            <span className="text-[10px] font-mono font-bold text-[#0f8b8d] bg-teal-50 px-1.5 py-0.5 rounded">
-                              {domain.officialWeight} ({domain.questionRatio})
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-500 leading-relaxed">
-                            {domain.desc}
-                          </p>
-                        </div>
-
-                        {/* Collapsible Subtopics Checklist under selected domain */}
-                        {isSelected && (
-                          <div className="p-3 border-t border-slate-100 bg-slate-50/70 rounded-b-xl space-y-2">
-                            <div className="flex items-center justify-between text-[11px]">
-                              <button
-                                type="button"
-                                onClick={(e) => toggleSubjectExpanded(domain.id, e)}
-                                className="flex items-center gap-1 font-semibold text-slate-700 hover:text-[#0f8b8d] transition-colors"
-                              >
-                                <span>Subtopics ({subtopicsSelected.length}/{subtopicsTotal.length})</span>
-                                {isExpanded ? (
-                                  <ChevronUp className="w-3.5 h-3.5 text-slate-500" />
-                                ) : (
-                                  <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
-                                )}
-                              </button>
-
-                              <div className="flex items-center gap-1.5 text-[10px] font-bold">
-                                <button
-                                  type="button"
-                                  onClick={(e) => selectAllSubtopics(domain.id, e)}
-                                  className="text-[#0f8b8d] hover:underline px-1 py-0.5 rounded hover:bg-teal-50"
-                                >
-                                  Select All
-                                </button>
-                                <span className="text-slate-300">·</span>
-                                <button
-                                  type="button"
-                                  onClick={(e) => clearAllSubtopics(domain.id, e)}
-                                  className="text-slate-500 hover:text-rose-600 px-1 py-0.5 rounded hover:bg-rose-50"
-                                >
-                                  Clear
-                                </button>
-                              </div>
-                            </div>
-
-                            {isExpanded && (
-                              <div className="max-h-52 overflow-y-auto pr-1 space-y-1 pt-1.5 border-t border-slate-200">
-                                {subtopicsTotal.map((subtopic) => {
-                                  const isChecked = subtopicsSelected.includes(subtopic);
-                                  return (
-                                    <label
-                                      key={subtopic}
-                                      onClick={(e) => e.stopPropagation()}
-                                      className={`flex items-start gap-2 p-1.5 rounded-lg text-[11px] leading-snug cursor-pointer transition-colors ${
-                                        isChecked ? 'bg-teal-50/80 text-slate-900 font-medium' : 'text-slate-600 hover:bg-slate-100'
-                                      }`}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={isChecked}
-                                        onChange={() => toggleSubtopic(domain.id, subtopic)}
-                                        className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-[#0f8b8d] focus:ring-[#0f8b8d] accent-[#0f8b8d]"
-                                      />
-                                      <span className="select-none">{subtopic}</span>
-                                    </label>
-                                  );
-                                })}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
+          <Row label="Mode" last>
+            <div className="flex flex-wrap items-start gap-6">
+              <Radio
+                checked={mode === 'TUTOR'}
+                onClick={() => setMode('TUTOR')}
+                label="Regular"
+                hint="See answer and explanations after solving each MCQ"
+              />
+              <Radio
+                checked={mode === 'EXAM'}
+                onClick={() => setMode('EXAM')}
+                label="Exam Mode"
+                hint="Review answers only after completing the module"
+              />
+            </div>
+          </Row>
         </div>
 
-        {/* Right Column: Execution Mode, Volume & Launch CTA */}
-        <div className="lg:col-span-4 space-y-6">
-          {/* Execution Mode Card */}
-          <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-4">
-            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-              <Clock className="w-4 h-4 text-[#0f8b8d]" /> Execution & Feedback Mode
-            </h3>
-
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => setMode('TUTOR')}
-                className={`p-3 rounded-xl border text-center transition-all ${
-                  mode === 'TUTOR'
-                    ? 'border-[#0f8b8d] bg-[#0f8b8d]/10 text-[#0f8b8d] font-bold ring-1 ring-[#0f8b8d]'
-                    : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                }`}
-              >
-                <div className="text-xs">Tutor Mode</div>
-                <div className="text-[10px] text-slate-500 font-normal mt-0.5">Instant explanations & pearls</div>
-              </button>
-
-              <button
-                onClick={() => setMode('EXAM')}
-                className={`p-3 rounded-xl border text-center transition-all ${
-                  mode === 'EXAM'
-                    ? 'border-[#001432] bg-[#001432] text-white font-bold'
-                    : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                }`}
-              >
-                <div className="text-xs">Strict Exam Mode</div>
-                <div className="text-[10px] text-slate-300 font-normal mt-0.5">Countdown & negative scoring</div>
-              </button>
-            </div>
-          </div>
-
-          {/* Question Volume Selector */}
-          <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-4">
+        {/* ------------------------------------------------ right rail */}
+        <div className="lg:col-span-4 space-y-5">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-slate-900">Question Volume</h3>
-              <span className="text-xs font-mono font-bold text-[#0f8b8d]">{questionCount} MCQs</span>
+              <h3 className="text-sm font-bold text-slate-900">Module summary</h3>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-100 text-slate-600">{EXAM_LABEL[selectedExam]}</span>
             </div>
-
-            <div className="grid grid-cols-4 gap-2">
-              {[10, 25, 50, 100].map((count) => (
-                <button
-                  key={count}
-                  onClick={() => setQuestionCount(count)}
-                  className={`py-2 rounded-xl text-xs font-bold transition-all ${
-                    questionCount === count
-                      ? 'bg-[#001432] text-white shadow-xs'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                  }`}
-                >
-                  {count} Qs
-                </button>
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              {EXAM_LABEL[selectedExam]} pattern · {EXAM_SCORING[selectedExam]} · {mode === 'EXAM' ? 'strict exam timing' : 'regular practice'}
+            </p>
+            <div className="rounded-xl bg-slate-50 border border-slate-200 divide-y divide-slate-200 text-[11px]">
+              {[
+                ['Questions', `${questionCount}`],
+                ['Difficulty', difficultyTier === 'ALL' ? 'All levels' : `${difficultyTier}${difficultySubLevel ? ` · ${difficultySubLevel}` : ''}`],
+                ['Specialities', `${subjectsChosen} of ${subjectList.length}`],
+                ['Topics', `${totalChosenSubtopicsCount}`],
+                ['Est. duration', `~${durationMin} min`],
+              ].map(([label, value]) => (
+                <div key={label} className="flex justify-between px-3 py-2">
+                  <span className="text-slate-600">{label}</span>
+                  <span className="font-bold text-slate-800 font-mono">{value}</span>
+                </div>
               ))}
-              <button
-                onClick={() => setQuestionCount(100)}
-                className={`py-2 rounded-xl text-xs font-bold transition-all ${
-                  questionCount === 100
-                    ? 'bg-[#001432] text-white shadow-xs'
-                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                }`}
-              >
-                ALL
-              </button>
             </div>
-
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1.5 font-mono">
-              <div className="flex justify-between text-slate-600">
-                <span>Estimated Duration:</span>
-                <span className="font-bold text-slate-800">~{Math.round(questionCount * 1.1)} min</span>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-lg bg-slate-50 border border-slate-200 px-2.5 py-2">
+                <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500">Modules today</div>
+                <div className="text-sm font-mono font-bold text-slate-900">{progressStats.todayCount}</div>
               </div>
-              <div className="flex justify-between text-slate-600">
-                <span>Target Pace:</span>
-                <span className="font-bold text-emerald-600">1.1 min / Question</span>
+              <div className="rounded-lg bg-slate-50 border border-slate-200 px-2.5 py-2">
+                <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500">Accuracy</div>
+                <div className="text-sm font-mono font-bold text-[#0f8b8d]">
+                  {progressStats.summary.accuracyPercent === null ? '—' : `${progressStats.summary.accuracyPercent}%`}
+                </div>
               </div>
             </div>
-          </div>
-
-          {/* Section-14: AI writing options (types, stem patterns, AMC evidence & patient context) */}
-          <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-slate-900">AI Writing Options</h3>
-              <span className="text-[10px] text-slate-500 font-mono">sent to the AI with every batch</span>
-            </div>
-
-            <div>
-              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Question types</div>
-              <div className="flex flex-wrap gap-1.5">
-                {QUESTION_TYPE_CHIPS.map((q) => (
-                  <button key={q} onClick={() => toggleFromList(questionTypes, setQuestionTypes, q)} className={chip(questionTypes.includes(q))}>
-                    {q}
+            {progressStats.summary.modules > 0 && weakForDrill.length > 0 && (
+              <div className="pt-1 space-y-1.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Weakest real topics</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {weakForDrill.slice(0, 4).map((w) => (
+                    <span key={w.subject} className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-50 border border-rose-200 text-rose-800">
+                      {w.subject} · {w.accuracy}%
+                    </span>
+                  ))}
+                </div>
+                {(selectedExam === 'NEET_PG' || (selectedExam === 'INI_CET' && iniSyllabusMode === '19_SUBJECTS')) && (
+                  <button onClick={applyWeakDrill} className="text-[10px] font-bold text-[#0f8b8d] hover:underline">
+                    Select these {weakForDrill.length} subjects
                   </button>
-                ))}
+                )}
               </div>
-            </div>
-
-            <div>
-              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Stem patterns</div>
-              <div className="flex flex-wrap gap-1.5">
-                {STEM_PATTERN_CHIPS.map((p) => (
-                  <button key={p} onClick={() => toggleFromList(stemPatterns, setStemPatterns, p)} className={chip(stemPatterns.includes(p))}>
-                    {p}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {selectedExam === 'AMC_CAT' && (
-              <>
-                <div>
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
-                    Evidence sources (AMC practice)
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {EVIDENCE_SOURCE_CHIPS.map((src) => (
-                      <button key={src} onClick={() => toggleFromList(evidenceSources, setEvidenceSources, src)} className={chip(evidenceSources.includes(src))}>
-                        {src}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Patient group (AMC blueprint)</div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {PATIENT_GROUP_CHIPS.map((g) => (
-                      <button
-                        key={g}
-                        onClick={() => setPatientGroup(patientGroup === g ? '' : g)}
-                        className={chip(patientGroup === g)}
-                      >
-                        {g}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Presenting problems (Murtagh)</div>
-                  <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
-                    {PRESENTING_PROBLEM_CHIPS.map((pp) => (
-                      <button key={pp} onClick={() => toggleFromList(presentingProblems, setPresentingProblems, pp)} className={chip(presentingProblems.includes(pp))}>
-                        {pp}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </>
             )}
           </div>
 
-          {/* Module Launch Action Card */}
-          <div className="bg-gradient-to-br from-[#001432] to-[#13294b] text-white rounded-2xl p-5 border border-[#13294b] shadow-lg space-y-4">
-            <div>
-              <div className="text-[11px] font-mono uppercase tracking-wider text-[#8ff3f4] font-bold">
-                Ready to Assemble
-              </div>
-              <h4 className="text-base font-bold text-white mt-1">
-                {selectedExam.replace('_', '-')} Practice Module
-              </h4>
-              <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                {questionCount} Questions · {difficultyTier} Tier {difficultySubLevel ? `(${difficultySubLevel})` : ''} · {totalChosenSubtopicsCount} Subtopics Active · {examDetails[selectedExam].scoring}
-              </p>
+          {/* Suggestion box — temporary generation profile */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                <MessageSquarePlus className="w-4 h-4 text-[#0f8b8d]" /> AI instructions
+              </h3>
+              <span className="text-[9px] font-mono text-slate-400">temporary · never saved</span>
+            </div>
+            <p className="text-[10px] leading-relaxed text-slate-500">
+              Tell the AI how to write <span className="italic">this</span> set — style, difficulty, stem length,
+              distractors, focus. Applies to the next generation only; a reload clears it.
+            </p>
+            <textarea
+              value={profileDraft}
+              onChange={(e) => setProfileDraft(e.target.value)}
+              disabled={genState.busy}
+              rows={3}
+              placeholder={'e.g. "closer distractors, shorter stems, more next-best-step items, use Indian guidelines, drop classic one-liners"'}
+              className="w-full resize-y rounded-lg bg-slate-50 border border-slate-200 px-2.5 py-2 text-[11px] text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-[#0f8b8d] disabled:opacity-50"
+            />
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setAppliedProfile(profileDraft.trim() || null)}
+                disabled={genState.busy || !profileDraft.trim() || (appliedProfile ?? '') === profileDraft.trim()}
+                className="flex-1 py-1.5 rounded-lg bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 disabled:cursor-not-allowed text-white text-[10px] font-bold transition-colors"
+              >
+                {appliedProfile && appliedProfile === profileDraft.trim() ? 'Profile applied' : 'Apply temporary profile'}
+              </button>
+              <button
+                onClick={() => { setAppliedProfile(null); setProfileDraft(''); }}
+                disabled={genState.busy || (!appliedProfile && !profileDraft.trim())}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 text-[10px] font-semibold transition-colors"
+              >
+                Clear
+              </button>
+            </div>
+            {appliedProfile && appliedProfile !== profileDraft.trim() && (
+              <p className="text-[10px] text-amber-600">Unapplied changes — press Apply to use the edited text.</p>
+            )}
+            {appliedProfile && appliedProfile === profileDraft.trim() && (
+              <p className="text-[10px] text-[#0f8b8d]">Active for the next generation only · not saved.</p>
+            )}
+          </div>
+
+          {/* Generator + launch */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                <Sparkles className="w-4 h-4 text-[#0f8b8d]" /> AI generator
+              </h3>
+              <span className="text-[10px] font-mono text-slate-500 truncate max-w-[55%]">
+                {getActiveProvider() ? `${getActiveProvider()} · ${getEffectiveModel(getActiveProvider()!)}` : 'no provider'}
+              </span>
             </div>
 
-            {/* Suggestion box — a TEMPORARY generation profile (component state only, never
-                persisted). Only an applied profile is sent with the request. */}
-            <div className="rounded-xl bg-white/5 border border-white/10 p-3 space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-[#8ff3f4]">
-                  <MessageSquarePlus className="w-3.5 h-3.5" /> Suggestion box
+            {genState.busy ? (
+              <div className="space-y-1.5">
+                <div className="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                  <div
+                    className="h-full bg-[#0f8b8d] transition-all"
+                    style={{ width: `${genState.total > 0 ? Math.min(100, Math.round((genState.generated / genState.total) * 100)) : 0}%` }}
+                  />
                 </div>
-                <span className="text-[9px] font-mono text-white/45">temporary &middot; never saved</span>
+                <div className="text-[10px] font-mono text-slate-600">
+                  Batch {genState.batch} of {genState.totalBatches} · {genState.generated} / {genState.total} ready
+                  {genState.dropped > 0 ? ` · ${genState.dropped} dropped` : ''}
+                </div>
               </div>
-              <p className="text-[10px] leading-relaxed text-white/60">
-                Tell the AI how to write <span className="italic">this</span> set — style, difficulty, stem length,
-                distractors, focus. It applies to the next generation only, and a reload clears it.
+            ) : (
+              <p className="text-[10px] text-slate-500 leading-relaxed">
+                {canLaunch
+                  ? `${questionCount} questions across ${subjectsChosen} ${selectedExam === 'AMC_CAT' ? 'domains' : 'specialities'} and ${totalChosenSubtopicsCount} topics.`
+                  : 'Select at least one speciality (or choose All) to build a module.'}
               </p>
-              <textarea
-                value={profileDraft}
-                onChange={(e) => setProfileDraft(e.target.value)}
-                disabled={genState.busy}
-                rows={3}
-                placeholder={'e.g. "closer distractors, shorter stems, more next-best-step items, use Indian guidelines, drop classic one-liners"'}
-                className="w-full resize-y rounded-lg bg-black/30 border border-white/15 px-2.5 py-2 text-[11px] text-white placeholder:text-white/30 focus:outline-none focus:border-[#0f8b8d]/70 disabled:opacity-50"
-              />
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setAppliedProfile(profileDraft.trim() || null)}
-                  disabled={genState.busy || !profileDraft.trim() || (appliedProfile ?? '') === profileDraft.trim()}
-                  className="flex-1 py-1.5 rounded-lg bg-[#0f8b8d]/90 hover:bg-[#00696b] disabled:opacity-40 disabled:cursor-not-allowed text-white text-[10px] font-bold transition-colors"
-                >
-                  {appliedProfile && appliedProfile === profileDraft.trim()
-                    ? 'Temporary profile applied'
-                    : 'Apply temporary profile'}
-                </button>
-                <button
-                  onClick={() => { setAppliedProfile(null); setProfileDraft(''); }}
-                  disabled={genState.busy || (!appliedProfile && !profileDraft.trim())}
-                  className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-40 disabled:cursor-not-allowed text-white/80 text-[10px] font-semibold transition-colors"
-                >
-                  Clear
-                </button>
-              </div>
-              {appliedProfile && appliedProfile !== profileDraft.trim() && (
-                <p className="text-[10px] text-amber-300">Unapplied changes — press Apply to use the edited text.</p>
-              )}
-            </div>
-
-            {/* AI generation status */}
-            <div className="rounded-xl bg-black/20 border border-white/10 p-3 text-[11px] font-mono text-slate-200 space-y-1">
-              <div className="flex justify-between">
-                <span className="text-[#8ff3f4] font-bold uppercase tracking-wider">AI Generator</span>
-                <span>{getActiveProvider() ? `${getActiveProvider()} · ${getEffectiveModel(getActiveProvider()!)}` : 'no active provider'}</span>
-              </div>
-              {appliedProfile && (
-                <div className="text-[10px] text-amber-200/90 truncate" title={appliedProfile}>
-                  Temporary profile active · not saved — {appliedProfile.slice(0, 84)}{appliedProfile.length > 84 ? '…' : ''}
-                </div>
-              )}
-              {genState.busy ? (
-                <>
-                  <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
-                    <div
-                      className="h-full bg-[#0f8b8d] transition-all"
-                      style={{ width: `${genState.total > 0 ? Math.min(100, Math.round((genState.generated / genState.total) * 100)) : 0}%` }}
-                    />
-                  </div>
-                  <div>
-                    Batch {genState.batch} of {genState.totalBatches} · {genState.generated} / {genState.total} ready
-                    {genState.dropped > 0 ? ` · ${genState.dropped} dropped invalid` : ''}
-                  </div>
-                </>
-              ) : (
-                <div>Questions are written live by your active AI provider on launch.</div>
-              )}
-            </div>
+            )}
 
             {genState.error && (
-              <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-200 text-[11px] leading-relaxed flex items-start gap-2">
-                <ShieldAlert className="w-3.5 h-3.5 mt-0.5 shrink-0 text-rose-400" />
+              <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-[10px] leading-relaxed flex items-start gap-2">
+                <ShieldAlert className="w-3.5 h-3.5 mt-0.5 shrink-0 text-rose-500" />
                 <span>{genState.error}</span>
               </div>
             )}
+
+            <button
+              onClick={handleLaunch}
+              disabled={genState.busy || !getActiveProvider() || !canLaunch}
+              className="w-full py-2.5 bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl transition-all shadow-sm flex items-center justify-center gap-2"
+            >
+              {genState.busy ? (
+                <>
+                  <Sparkles className="w-4 h-4 animate-spin" />
+                  <span>Generating… {genState.generated}/{genState.total}</span>
+                </>
+              ) : !getActiveProvider() ? (
+                <>
+                  <ShieldAlert className="w-4 h-4" />
+                  <span>Connect an AI provider in Settings</span>
+                </>
+              ) : !canLaunch ? (
+                <>
+                  <Target className="w-4 h-4" />
+                  <span>Select at least one speciality</span>
+                </>
+              ) : (
+                <>
+                  <Play className="w-4 h-4 fill-current" /> Launch Clinical Module
+                </>
+              )}
+            </button>
+
+            {genState.busy && (
+              <button
+                onClick={handleStop}
+                disabled={stopping}
+                className="w-full py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-60 disabled:cursor-wait text-white text-[11px] font-bold transition-colors flex items-center justify-center gap-2"
+              >
+                <Square className="w-3 h-3 fill-current" />
+                {stopping ? 'Stopping…' : genState.generated > 0 ? `Stop generating · keep ${genState.generated} ready` : 'Stop generating'}
+              </button>
+            )}
+
+            {partial && partial.length > 0 && !genState.busy && (
+              <div className="space-y-2">
+                <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[10px] leading-relaxed">
+                  Stopped at {partial.length} of {genState.total} questions. Every one passed validation — nothing was padded.
+                </div>
+                <button
+                  onClick={handleLaunchPartial}
+                  className="w-full py-2.5 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2"
+                >
+                  <Play className="w-4 h-4 fill-current" /> Launch with {partial.length} ready
+                </button>
+                <button
+                  onClick={() => setPartial(null)}
+                  className="w-full py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-semibold rounded-lg transition-colors"
+                >
+                  Discard these {partial.length}
+                </button>
+              </div>
+            )}
           </div>
 
-          <button
-            onClick={handleLaunch}
-            disabled={genState.busy || !getActiveProvider()}
-            className="w-full py-3 bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl transition-all shadow-md flex items-center justify-center gap-2 transform active:scale-95"
-          >
-            {genState.busy ? (
-              <>
-                <Sparkles className="w-4 h-4 animate-spin" />
-                <span>Generating… {genState.generated}/{genState.total}</span>
-              </>
-            ) : !getActiveProvider() ? (
-              <>
-                <ShieldAlert className="w-4 h-4" />
-                <span>Connect an AI provider in Settings</span>
-              </>
-            ) : (
-              <>
-                <Play className="w-4 h-4 fill-current" /> Launch Clinical Module
-              </>
-            )}
-          </button>
-
-          {/* Stop is ALWAYS reachable while generating — the first batch can run for a
-              minute, and stopping used to be impossible until it returned. */}
-          {genState.busy && (
-            <button
-              onClick={handleStop}
-              disabled={stopping}
-              className="w-full py-2.5 bg-rose-600/90 hover:bg-rose-500 disabled:opacity-60 disabled:cursor-wait border border-rose-400/40 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2"
-            >
-              <Square className="w-3.5 h-3.5 fill-current" />
-              {stopping
-                ? 'Stopping…'
-                : genState.generated > 0
-                  ? `Stop generating · keep ${genState.generated} ready`
-                  : 'Stop generating'}
-            </button>
-          )}
-
-          {partial && partial.length > 0 && !genState.busy && (
-            <>
-              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-400/30 text-amber-100 text-[11px] leading-relaxed">
-                Stopped at {partial.length} of {genState.total} questions. Every one of them passed validation —
-                nothing was padded. Launch them as a module, or discard and generate again.
-              </div>
-              <button
-                onClick={handleLaunchPartial}
-                className="w-full py-3 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-xl transition-all shadow-md flex items-center justify-center gap-2 transform active:scale-95"
-              >
-                <Play className="w-4 h-4 fill-current" />
-                Launch with {partial.length} ready
-              </button>
-              <button
-                onClick={() => setPartial(null)}
-                className="w-full py-2 bg-white/5 hover:bg-white/10 border border-white/15 text-white/75 text-[11px] font-semibold rounded-xl transition-all"
-              >
-                Discard these {partial.length}
-              </button>
-            </>
-          )}
-
-          {genState.total > 0 && genState.dropped > 0 && !genState.busy && !genState.error && (
-            <p className="text-[11px] text-white/70 font-mono">
-              Validation report: {genState.generated} valid questions, {genState.dropped} dropped by the validator.
-            </p>
-          )}
+          <div className="space-y-1.5 px-1">
+            <div className="flex items-start gap-2 text-[10px] text-slate-500">
+              <Brain className="w-3.5 h-3.5 shrink-0" />
+              <span>Questions come from your active AI subscription — nothing is canned.</span>
+            </div>
+            <div className="flex items-start gap-2 text-[10px] text-slate-500">
+              <BookOpen className="w-3.5 h-3.5 shrink-0" />
+              <span>Topic picks shape the blueprint; they never invent facts.</span>
+            </div>
+            <div className="flex items-start gap-2 text-[10px] text-slate-500">
+              <Clock className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                Last module:{' '}
+                {progressStats.last ? `${progressStats.last.correct}/${progressStats.last.attempted} correct` : 'none yet'}
+              </span>
+            </div>
+          </div>
         </div>
       </div>
+
+      {topicModal && activeModalRow && (
+        <TopicPickerModal
+          subject={activeModalRow.label}
+          topics={activeModalRow.topics}
+          selected={selectedSubtopics[activeModalRow.key] ?? []}
+          subjectPicked={isSubjectOn(activeModalRow.key)}
+          onApply={applyTopics}
+          onClose={() => setTopicModal(null)}
+        />
+      )}
     </div>
   );
 };
+
+export default PracticeModuleBuilderView;

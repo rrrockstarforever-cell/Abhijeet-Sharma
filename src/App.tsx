@@ -145,6 +145,7 @@ export default function App() {
             currentExam={currentExam}
             onLaunchModule={handleLaunchModule}
             onNavigate={handleNavigate}
+            onExamChange={setCurrentExam}
           />
         );
       case 'question-bank':
