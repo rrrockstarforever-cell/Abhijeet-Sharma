@@ -63,7 +63,7 @@ import {
   type UserHighlight
 } from '../utils/userHighlightsStore.ts';
 import { aiComplete, getActiveProvider, getEffectiveModel, NOT_CONNECTED_MESSAGE, extractJson } from '../lib/ai.ts';
-import { ocrImage } from '../utils/ocr.ts';
+import { ocrImage, createOcrPool, ocrConcurrency } from '../utils/ocr.ts';
 import { startJob, stopJob, type JobControl } from '../utils/jobRegistry.ts';
 import { RevisionNote, downloadNotesPdf } from './RevisionNote.tsx';
 
@@ -981,52 +981,125 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
 
   const runOcr = async (scope: 'current' | 'missing') => {
     if (!pdfRef.current || !activeDocId || ocrBusy) return;
-    const doc = docs.find((d) => d.id === activeDocId);
+    const pdf = pdfRef.current;
+    const docId = activeDocId;
+    const doc = docs.find((d) => d.id === docId);
     const pages: number[] = scope === 'current'
       ? [currentPageRef.current]
       : Array.from({ length: numPages }, (_, i) => i + 1);
 
     setOcrBusy(true);
     setOcrNote(null);
-    const job = startJob(`OCR · ${doc?.title ?? 'document'}`, scope === 'current' ? `page ${pages[0]}` : 'scanning pages…');
+    const job = startJob(
+      `OCR · ${doc?.title ?? 'document'}`,
+      scope === 'current' ? `page ${pages[0]}` : `${pages.length} pages`,
+    );
     ocrJobRef.current = job;
+
     let processed = 0;
     let skipped = 0;
+    let failed = 0;
+    const failures: string[] = [];
+    let pool: Awaited<ReturnType<typeof createOcrPool>> | null = null;
+
     try {
-      for (let index = 0; index < pages.length; index++) {
-        if (job.isCancelled()) break;
-        const n = pages[index];
-        if (scope === 'missing' && !ocrForce) {
+      // Pass 1 — decide what actually needs OCR. Reading the cached/extracted text is cheap;
+      // rasterising a page is not, so this happens before any worker starts.
+      let queue = pages;
+      if (scope === 'missing' && !ocrForce) {
+        const needed: number[] = [];
+        for (const n of pages) {
+          if (job.isCancelled()) break;
           const existing = await ensurePageText(n).catch(() => '');
-          if (existing.trim()) { skipped += 1; job.update({ progress: Math.round(((index + 1) / pages.length) * 100) }); continue; }
+          if (existing.trim().length >= 40) skipped += 1; else needed.push(n);
+          job.update({ progress: Math.round(((skipped + needed.length + failures.length) / pages.length) * 100), detail: `checking page ${n}` });
         }
-        job.update({ progress: Math.round((index / pages.length) * 100), detail: `rendering page ${n}` });
-        const page = await pdfRef.current.getPage(n);
-        const viewport = page.getViewport({ scale: 2 });
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.floor(viewport.width);
-        canvas.height = Math.floor(viewport.height);
-        await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise;
-        const result = await ocrImage(canvas, (p) => {
-          job.update({ progress: Math.round(((index + p.progress) / pages.length) * 100), detail: `page ${n} · ${p.status}` });
-        });
-        if (result.text.trim()) {
-          await savePageText(activeDocId, n, result.text);
-          pageTextsRef.current.set(n, result.text);
-        }
-        processed += 1;
+        queue = needed;
       }
+
+      const total = queue.length;
+      if (total > 0) {
+        // One pool for the whole run. Workers are expensive to build (language data + WASM
+        // heap), so they are created once and shared; concurrency is bounded because each
+        // worker holds a full WASM heap and a 500-page book would exhaust memory.
+        const concurrency = Math.min(ocrConcurrency(), total);
+        pool = await createOcrPool(concurrency);
+        let next = 0;
+        let active = 0;
+
+        const work = async () => {
+          for (;;) {
+            if (job.isCancelled()) return;
+            const index = next++;
+            if (index >= total) return;
+            const n = queue[index];
+            active += 1;
+            try {
+              job.update({ detail: `page ${n} · rendering (${active} at a time)` });
+              // Render offscreen: never depend on the viewer's lazily rendered/evicted canvases.
+              const page = await pdf.getPage(n);
+              const viewport = page.getViewport({ scale: 2 });
+              const canvas = document.createElement('canvas');
+              canvas.width = Math.floor(viewport.width);
+              canvas.height = Math.floor(viewport.height);
+              const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+              await page.render({ canvasContext: ctx, viewport }).promise;
+              const result = await pool!.recognize(canvas, (p) => {
+                job.update({
+                  progress: Math.round(((processed + p.progress) / total) * 100),
+                  detail: `page ${n} · ${p.status}`,
+                });
+              });
+              if (result.text.trim()) {
+                // Saved the moment it is ready, so Stop keeps every finished page.
+                await savePageText(docId, n, result.text);
+                pageTextsRef.current.set(n, result.text);
+              } else {
+                failed += 1;
+                failures.push(`p.${n}: no text found`);
+              }
+              canvas.width = 0;
+              canvas.height = 0;
+              try { page.cleanup(); } catch { /* already released */ }
+            } catch (err: any) {
+              // One bad page must never end the run.
+              failed += 1;
+              failures.push(`p.${n}: ${err?.message || 'failed'}`);
+            } finally {
+              active -= 1;
+              processed += 1;
+              job.update({
+                progress: Math.min(100, Math.round((processed / total) * 100)),
+                detail: `page ${n} done · ${processed}/${total}`,
+              });
+            }
+          }
+        };
+
+        await Promise.all(Array.from({ length: concurrency }, () => work()));
+      }
+
+      const parts = [
+        `${processed} page${processed === 1 ? '' : 's'} recognised`,
+        skipped ? `${skipped} skipped (already had text)` : '',
+        failed ? `${failed} failed` : '',
+      ].filter(Boolean);
       if (job.isCancelled()) {
-        setOcrNote(`OCR stopped. ${processed} page${processed === 1 ? '' : 's'} saved${skipped ? `, ${skipped} skipped` : ''}.`);
+        job.done(`stopped · ${parts.join(', ')}`);
+        setOcrNote(`OCR stopped. ${parts.join(', ')}.`);
       } else {
-        job.done(`${processed} page${processed === 1 ? '' : 's'} recognised${skipped ? `, ${skipped} skipped` : ''}`);
-        setOcrNote(`OCR finished: ${processed} page${processed === 1 ? '' : 's'} processed${skipped ? `, ${skipped} skipped (already had text)` : ''}.`);
+        job.done(parts.join(', '));
+        setOcrNote(
+          `OCR finished with ${pool?.size ?? 0} worker${(pool?.size ?? 0) === 1 ? '' : 's'}: ${parts.join(', ')}.` +
+          (failures.length ? ` Problems: ${failures.slice(0, 4).join('; ')}${failures.length > 4 ? '…' : ''}` : ''),
+        );
       }
     } catch (err: any) {
       const message = err?.message || 'OCR failed.';
       job.fail(message);
       setOcrNote(`OCR error: ${message}`);
     } finally {
+      try { await pool?.terminate(); } catch { /* already gone */ }
       setOcrBusy(false);
       ocrJobRef.current = null;
     }
