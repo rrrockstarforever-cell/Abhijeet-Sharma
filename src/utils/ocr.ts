@@ -28,6 +28,18 @@ export interface OcrWord {
 
 export type OcrSource = HTMLCanvasElement | HTMLImageElement | Blob | string;
 
+// tesseract.js otherwise fetches the worker, the wasm core and eng.traineddata.gz from
+// jsdelivr. In a packaged app with no internet that hangs at "Loading the OCR engine" until
+// the timeout. tools/copy-tesseract-assets.mjs puts all three under public/tesseract/, which
+// vite copies to dist/ and express serves at the app root.
+const TESS_BASE = new URL('/tesseract/', location.href).href;
+const TESS_PATHS = {
+  workerPath: `${TESS_BASE}worker.min.js`,
+  corePath: `${TESS_BASE}core`,
+  langPath: `${TESS_BASE}lang`,
+  gzip: true,
+};
+
 const withTimeout = <T>(
   p: Promise<T>,
   ms: number,
@@ -86,6 +98,7 @@ export async function ocrImage(
   }
 
   const worker = await createWorker('eng', 1, {
+    ...TESS_PATHS,
     logger: (m: any) => {
       if (!onProgress) return;
       const status = typeof m?.status === 'string' ? m.status : 'recognising';
@@ -141,6 +154,7 @@ export async function createOcrPool(workerCount = ocrConcurrency()): Promise<Ocr
     const slot = { busy: false } as Slot;
     slot.worker = await withTimeout(
       createWorker('eng', 1, {
+        ...TESS_PATHS,
         logger: (m: any) => {
           if (!slot.cb) return;
           slot.cb({
