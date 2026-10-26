@@ -122,7 +122,20 @@ export async function removeLibraryDocument(docId: string): Promise<void> {
 export async function savePageText(docId: string, pageNumber: number, text: string, words?: OcrWord[]): Promise<void> {
   const db = await openDB();
   const tx = db.transaction(PAGES_STORE, 'readwrite');
-  tx.objectStore(PAGES_STORE).put({ docId, pageNumber, text, words });
+  const store = tx.objectStore(PAGES_STORE);
+  // Read-merge inside the same transaction. Callers that only have text (search indexing,
+  // Ask AI, bookPageText) must not wipe the word boxes an OCR run stored, or the text layer
+  // overlay silently disappears for that page.
+  const getReq = store.get([docId, pageNumber]);
+  getReq.onsuccess = () => {
+    const existing = getReq.result;
+    store.put({
+      docId,
+      pageNumber,
+      text: text || existing?.text || '',
+      words: words ?? existing?.words,
+    });
+  };
   await txDone(tx);
   db.close();
 }

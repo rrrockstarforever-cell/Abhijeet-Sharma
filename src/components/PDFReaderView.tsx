@@ -205,6 +205,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
 
   // ----- view mode: rendered page vs extracted text (PARITY section 6) -----
   const [viewMode, setViewMode] = useState<'page' | 'text'>('page');
+  // In-app full screen. Native requestFullscreen() is rejected inside an embedded pane and a
+  // scripted click is not a user activation, so the viewer expands itself instead.
+  const [immersive, setImmersive] = useState<boolean>(false);
   const [textView, setTextView] = useState<{ loading: boolean; text: string; page: number }>({ loading: false, text: '', page: 1 });
 
   // ----- OCR (PARITY section 5 / 14) -----
@@ -245,6 +248,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   const scaleRef = useRef<number>(1.2);
   const pageTextsRef = useRef<Map<number, string>>(new Map());
   const ocrWordsRef = useRef<Map<number, OcrWord[]>>(new Map());
+  // Pages whose pdf.js text layer already has real text: the OCR overlay would duplicate it.
+  const nativeTextPagesRef = useRef<Set<number>>(new Set());
   const searchCancelRef = useRef<boolean>(false);
 
   currentPageRef.current = currentPage;
@@ -298,6 +303,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
     setSearchQuery('');
     pageTextsRef.current = new Map();
     ocrWordsRef.current = new Map();
+    nativeTextPagesRef.current = new Set();
     setWordsVersion((v) => v + 1);
     setNumPages(0);
     setCurrentPage(1);
@@ -577,6 +583,17 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
               end.className = 'endOfContent';
               slot.appendChild(end);
             }
+            // A page with a real text layer already has selectable text; layering OCR words on
+            // top would give duplicate selectable text. Remember which pages are native.
+            const nativeLen = (slot.textContent || '').replace(/\s+/g, '').length;
+            if (nativeLen > 20) {
+              if (!nativeTextPagesRef.current.has(num)) {
+                nativeTextPagesRef.current.add(num);
+                setWordsVersion((v) => v + 1);
+              }
+            } else if (nativeTextPagesRef.current.delete(num)) {
+              setWordsVersion((v) => v + 1);
+            }
           } catch (err) {
             console.warn(`Text layer failed on page ${num}`, err);
           }
@@ -667,7 +684,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
         if (r > bestRatio) { best = n; bestRatio = r; }
       }
       if (best > 0 && best !== currentPageRef.current) setCurrentPage(best);
-    }, { root: scrollRef.current, threshold: [0, 0.1, 0.3, 0.6, 0.9] });
+    }, { root: scrollRef.current, rootMargin: '50% 0px', threshold: [0, 0.1, 0.3, 0.6, 0.9] });
     observerRef.current = io;
     // observe all wrappers
     for (const wrap of pageWrapRefs.current.values()) io.observe(wrap);
@@ -1274,18 +1291,31 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
     }
   };
 
-  // Real full-screen (browser/Electron window). Errors are reported, not swallowed silently.
+  // Full screen: expand the viewer in-app, and ask the window for real fullscreen as a bonus.
   const toggleFullscreen = async () => {
+    const next = !immersive;
+    setImmersive(next);
     try {
-      if (document.fullscreenElement) {
-        await document.exitFullscreen();
-      } else {
-        await document.documentElement.requestFullscreen();
-      }
-    } catch (err: any) {
-      setLibraryError(err?.message || 'Full screen is not available in this window.');
+      if (next && !document.fullscreenElement) await document.documentElement.requestFullscreen();
+      if (!next && document.fullscreenElement) await document.exitFullscreen();
+    } catch {
+      // Embedded pane / no user activation: the in-app mode already covers it.
     }
   };
+
+  // Esc leaves immersive mode; when native fullscreen is active the browser eats Esc, so follow
+  // its own state too.
+  useEffect(() => {
+    if (!immersive) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setImmersive(false); };
+    const onFsChange = () => { if (!document.fullscreenElement) setImmersive(false); };
+    window.addEventListener('keydown', onKey);
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.removeEventListener('fullscreenchange', onFsChange);
+    };
+  }, [immersive]);
 
   // Download the original PDF file from the local library
   const downloadDocument = async () => {
@@ -1735,7 +1765,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
           ref={scrollRef}
           onPointerDown={handlePointerDown}
           onMouseUp={handleMouseUp}
-          className="flex-1 min-w-0 bg-slate-300/70 rounded-2xl border border-slate-300 overflow-y-auto overflow-x-auto relative"
+          className={`flex-1 min-w-0 bg-slate-300/70 overflow-y-auto overflow-x-auto relative ${
+            immersive ? 'fixed inset-0 z-50 rounded-none border-0' : 'rounded-2xl border border-slate-300'
+          }`}
           style={{ scrollbarGutter: 'stable' }}
         >
           {loadingDoc && (
@@ -1812,7 +1844,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
                     <div data-text-slot className="textLayer absolute inset-0 overflow-hidden" />
                     {/* OCR text layer — invisible selectable text over the scan (Acrobat's model).
                         Percentages + cqh keep it aligned at any zoom; scaleX fits each word to its box. */}
-                    {ocrWordsRef.current.has(n) && (
+                    {ocrWordsRef.current.has(n) && !nativeTextPagesRef.current.has(n) && (
                       <div className="ocrTextLayer absolute inset-0 overflow-hidden select-text" style={{ zIndex: 2 }}>
                         {ocrWordsRef.current.get(n)!.map((w, i) => (
                           <span
