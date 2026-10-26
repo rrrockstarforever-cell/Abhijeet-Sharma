@@ -14,9 +14,58 @@ export interface OcrProgress {
 export interface OcrResult {
   text: string;
   confidence: number | null;
+  words?: OcrWord[];
+}
+
+export interface OcrWord {
+  text: string;
+  bbox: { x0: number; y0: number; x1: number; y1: number }; // in source-image pixels
+  confidence: number;
 }
 
 export type OcrSource = HTMLCanvasElement | HTMLImageElement | Blob | string;
+
+const withTimeout = <T>(
+  p: Promise<T>,
+  ms: number,
+  what: string,
+): Promise<T> =>
+  Promise.race([
+    p,
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${what} timed out`)), ms)),
+  ]);
+
+function parseHocrWords(hocr: string): OcrWord[] {
+  // tesseract.js emits single-quoted HOCR attributes (class='ocrx_word'), and some builds put
+  // title before class, so match the tag first and read the attributes out of it.
+  const words: OcrWord[] = [];
+  const tagRe = /<span\b[^>]*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(hocr)) !== null) {
+    const tag = m[0];
+    if (!/ocrx_word/.test(tag)) continue;
+    const bbox = tag.match(/bbox\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/i);
+    if (!bbox) continue;
+    const conf = tag.match(/x_wconf\s+(\d+)/i);
+    const textEnd = hocr.indexOf('</span>', m.index + tag.length);
+    if (textEnd === -1) continue;
+    const raw = hocr.slice(m.index + tag.length, textEnd).replace(/<[^>]*>/g, '');
+    const text = raw
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .trim();
+    if (!text) continue;
+    const [, x0, y0, x1, y1] = bbox;
+    words.push({
+      text,
+      bbox: { x0: +x0, y0: +y0, x1: +x1, y1: +y1 },
+      confidence: conf ? +conf[1] : 0,
+    });
+  }
+  return words;
+}
 
 /**
  * Recognise English text in an image.
@@ -43,11 +92,118 @@ export async function ocrImage(
   });
 
   try {
-    const result = await worker.recognize(source);
+    // Request HOCR output so we get word bounding boxes for the text layer overlay.
+    const result: any = await withTimeout(
+      worker.recognize(source, {}, { hocr: true }),
+      120_000,
+      'Recognising a page',
+    );
     const text = typeof result?.data?.text === 'string' ? result.data.text.trim() : '';
-    const confidence = typeof result?.data?.confidence === 'number' ? result.data.confidence : null;
-    return { text, confidence };
+    const confidence =
+      typeof result?.data?.confidence === 'number' ? result.data.confidence : null;
+    const hocr = typeof result?.data?.hocr === 'string' ? result.data.hocr : undefined;
+    const words = hocr ? parseHocrWords(hocr) : [];
+    return { text, confidence, words };
   } finally {
-    try { await worker.terminate(); } catch { /* worker already gone */ }
+    try {
+      await worker.terminate();
+    } catch {
+      /* worker already gone */
+    }
   }
+}
+
+/** A small pool of tesseract workers created ONCE and reused for every page. */
+export interface OcrPool {
+  size: number;
+  recognize(source: OcrSource, onProgress?: (p: OcrProgress) => void): Promise<OcrResult>;
+  terminate(): Promise<void>;
+}
+
+export async function createOcrPool(workerCount = ocrConcurrency()): Promise<OcrPool> {
+  const mod: any = await import('tesseract.js');
+  const createWorker = mod.createWorker ?? mod.default?.createWorker;
+  if (typeof createWorker !== 'function') {
+    throw new Error('tesseract.js is not available. Run npm install and restart the app.');
+  }
+
+  type Slot = { worker: any; busy: boolean; cb?: (p: OcrProgress) => void };
+  const slots: Slot[] = [];
+  const waiters: (() => void)[] = [];
+  const n = Math.max(1, Math.min(4, workerCount));
+
+  // Build the workers in PARALLEL and with a deadline. Sequentially awaiting three CDN
+  // fetches is what made a whole-book run look frozen with no progress and no error.
+  const makeSlot = async (): Promise<Slot> => {
+    const slot = { busy: false } as Slot;
+    slot.worker = await withTimeout(
+      createWorker('eng', 1, {
+        logger: (m: any) => {
+          if (!slot.cb) return;
+          slot.cb({
+            progress: typeof m?.progress === 'number' ? m.progress : 0,
+            status: typeof m?.status === 'string' ? m.status : 'recognising',
+          });
+        },
+      }),
+      60_000,
+      'Loading the OCR engine',
+    );
+    return slot;
+  };
+  const built = await Promise.all(Array.from({ length: n }, () => makeSlot()));
+  slots.push(...built);
+
+  const acquire = async (): Promise<Slot> => {
+    for (;;) {
+      const free = slots.find((s) => !s.busy);
+      if (free) {
+        free.busy = true;
+        return free;
+      }
+      await new Promise<void>((resolve) => waiters.push(resolve));
+    }
+  };
+  const release = (slot: Slot) => {
+    slot.busy = false;
+    slot.cb = undefined;
+    const next = waiters.shift();
+    if (next) next();
+  };
+
+  return {
+    size: slots.length,
+    async recognize(source, onProgress) {
+      const slot = await acquire();
+      slot.cb = onProgress;
+      try {
+        const result: any = await withTimeout(
+          slot.worker.recognize(source, {}, { hocr: true }),
+          120_000,
+          'Recognising a page',
+        );
+        const text = typeof result?.data?.text === 'string' ? result.data.text.trim() : '';
+        const confidence =
+          typeof result?.data?.confidence === 'number' ? result.data.confidence : null;
+        const hocr = typeof result?.data?.hocr === 'string' ? result.data.hocr : undefined;
+        const words = hocr ? parseHocrWords(hocr) : [];
+        return { text, confidence, words };
+      } finally {
+        release(slot);
+      }
+    },
+    async terminate() {
+      for (const slot of slots) {
+        try {
+          await slot.worker.terminate();
+        } catch {
+          /* already gone */
+        }
+      }
+    },
+  };
+}
+
+export function ocrConcurrency(): number {
+  return Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
 }

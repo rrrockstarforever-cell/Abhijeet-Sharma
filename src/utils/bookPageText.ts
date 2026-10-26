@@ -26,8 +26,8 @@ export async function extractBookPageText(docId: string, pageNumber: number): Pr
   }
 
   const cached = await getPageText(docId, pageNumber).catch(() => null);
-  if (cached && cached.trim()) {
-    return { docId, docTitle: rec.title, pageNumber, text: cached.trim() };
+  if (cached && cached.text.trim()) {
+    return { docId, docTitle: rec.title, pageNumber, text: cached.text.trim() };
   }
 
   if (rec.fileType === 'docx') {

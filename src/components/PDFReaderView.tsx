@@ -63,7 +63,7 @@ import {
   type UserHighlight
 } from '../utils/userHighlightsStore.ts';
 import { aiComplete, getActiveProvider, getEffectiveModel, NOT_CONNECTED_MESSAGE, extractJson } from '../lib/ai.ts';
-import { ocrImage } from '../utils/ocr.ts';
+import { ocrImage, createOcrPool, OcrWord } from '../utils/ocr.ts';
 import { startJob, stopJob, type JobControl } from '../utils/jobRegistry.ts';
 import { RevisionNote, downloadNotesPdf } from './RevisionNote.tsx';
 
@@ -211,6 +211,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   const currentPageRef = useRef<number>(1);
   const scaleRef = useRef<number>(1.2);
   const pageTextsRef = useRef<Map<number, string>>(new Map());
+  const ocrWordsRef = useRef<Map<number, OcrWord[]>>(new Map());
   const searchCancelRef = useRef<boolean>(false);
 
   currentPageRef.current = currentPage;
@@ -696,9 +697,12 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
     const cachedMem = pageTextsRef.current.get(num);
     if (cachedMem !== undefined) return cachedMem;
     const cachedIdb = await getPageText(activeDocId ?? '', num).catch(() => null);
-    if (cachedIdb !== null && cachedIdb !== undefined && cachedIdb !== '') {
-      pageTextsRef.current.set(num, cachedIdb);
-      return cachedIdb;
+    if (cachedIdb && cachedIdb.text) {
+      pageTextsRef.current.set(num, cachedIdb.text);
+      if (cachedIdb.words && cachedIdb.words.length) {
+        ocrWordsRef.current.set(num, cachedIdb.words);
+      }
+      return cachedIdb.text;
     }
     if (!pdfRef.current) return ''; // DOCX / text-only document with no cached page
     const page = await pdfRef.current.getPage(num);
@@ -778,6 +782,30 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
       window.removeEventListener('pointercancel', unmark);
     };
   }, [viewMode]);
+
+  // Re-trigger rendering when switching back to Page view — the IntersectionObserver
+  // needs to re-fire for visible wrappers so canvases paint again.
+  useEffect(() => {
+    if (viewMode !== 'page' || !pdfRef.current) return;
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    // Clear rendered state so pages re-render on the observer callback.
+    renderedRef.current.clear();
+    renderingRef.current.clear();
+    renderTasksRef.current.clear();
+    for (const canvas of canvasRefs.current.values()) {
+      if (canvas.parentElement) canvas.parentElement.replaceChildren();
+    }
+    canvasRefs.current.clear();
+    textLayerRefs.current.clear();
+    visibleRatiosRef.current.clear();
+    // Render the current page immediately so the user isn't left with a blank screen.
+    void renderPage(currentPage);
+    requestAnimationFrame(() => {
+      observerRef.current?.disconnect();
+      for (const wrap of pageWrapRefs.current.values()) observerRef.current?.observe(wrap);
+    });
+  }, [viewMode, currentPage]);
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
@@ -992,7 +1020,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
     ocrJobRef.current = job;
     let processed = 0;
     let skipped = 0;
+    let pool: Awaited<ReturnType<typeof createOcrPool>> | null = null;
     try {
+      pool = await createOcrPool();
       for (let index = 0; index < pages.length; index++) {
         if (job.isCancelled()) break;
         const n = pages[index];
@@ -1002,18 +1032,28 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
         }
         job.update({ progress: Math.round((index / pages.length) * 100), detail: `rendering page ${n}` });
         const page = await pdfRef.current.getPage(n);
-        const viewport = page.getViewport({ scale: 2 });
+        // ~2000 px wide ≈ 300 dpi for a book page: legible for tesseract, a few MB instead of
+        // the ~500 MB a 1:1 raster of a 4961 pt scan would need.
+        const baseVp = page.getViewport({ scale: 1 });
+        const ocrScale = Math.max(0.05, Math.min(2, 2000 / Math.max(1, baseVp.width)));
+        const viewport = page.getViewport({ scale: ocrScale });
         const canvas = document.createElement('canvas');
         canvas.width = Math.floor(viewport.width);
         canvas.height = Math.floor(viewport.height);
         await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise;
-        const result = await ocrImage(canvas, (p) => {
+        const result = await pool.recognize(canvas, (p) => {
           job.update({ progress: Math.round(((index + p.progress) / pages.length) * 100), detail: `page ${n} · ${p.status}` });
         });
         if (result.text.trim()) {
-          await savePageText(activeDocId, n, result.text);
+          // Saved the moment it is ready, so Stop keeps every finished page.
+          await savePageText(activeDocId, n, result.text, result.words);
           pageTextsRef.current.set(n, result.text);
+          if (result.words && result.words.length) {
+            ocrWordsRef.current.set(n, result.words);
+          }
         }
+        canvas.width = 0;
+        canvas.height = 0;
         processed += 1;
       }
       if (job.isCancelled()) {
@@ -1027,6 +1067,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
       job.fail(message);
       setOcrNote(`OCR error: ${message}`);
     } finally {
+      try { await pool?.terminate(); } catch { /* already gone */ }
       setOcrBusy(false);
       ocrJobRef.current = null;
     }
@@ -1696,6 +1737,33 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
                     <div data-canvas-slot className="absolute inset-0 pointer-events-none" />
                     {/* text layer slot (pdf.js TextLayer fills it) */}
                     <div data-text-slot className="textLayer absolute inset-0 overflow-hidden" />
+                    {/* OCR text layer overlay (selectable, scales with zoom) */}
+                    {ocrWordsRef.current.has(n) && (
+                      <div className="ocrTextLayer absolute inset-0 overflow-hidden select-text" style={{ zIndex: 2 }}>
+                        {ocrWordsRef.current.get(n)!.map((w, i) => (
+                          <span
+                            key={i}
+                            className="absolute select-text"
+                            style={{
+                              left: `${w.bbox.x0 * fitScale()}px`,
+                              top: `${w.bbox.y0 * fitScale()}px`,
+                              width: `${(w.bbox.x1 - w.bbox.x0) * fitScale()}px`,
+                              height: `${(w.bbox.y1 - w.bbox.y0) * fitScale()}px`,
+                              fontSize: `${Math.max(8, (w.bbox.y1 - w.bbox.y0) * fitScale() * 0.8)}px`,
+                              lineHeight: `${(w.bbox.y1 - w.bbox.y0) * fitScale()}px`,
+                              transformOrigin: 'top left',
+                              whiteSpace: 'nowrap',
+                              color: '#1a1a2e',
+                              textShadow: '0 0 2px rgba(255,255,255,0.8), 0 0 1px rgba(255,255,255,0.6)',
+                              userSelect: 'text',
+                              cursor: 'text',
+                            }}
+                          >
+                            {w.text}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                     {/* saved highlight overlay (normalised rects, so it scales with zoom) */}
                     {highlights
                       .filter((h) => h.page === n && h.rects && h.rects.length > 0)

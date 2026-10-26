@@ -4,6 +4,8 @@
 //   - 'pages': extracted page text cache (one store entry per page, written lazily
 //              when a page is visited or indexed for search)
 
+import { OcrWord } from './ocr.ts';
+
 export interface PDFLibraryMeta {
   id: string;
   title: string;
@@ -117,15 +119,15 @@ export async function removeLibraryDocument(docId: string): Promise<void> {
 
 // ---------- page-text cache (for whole-document search & Ask-AI context) ----------
 
-export async function savePageText(docId: string, pageNumber: number, text: string): Promise<void> {
+export async function savePageText(docId: string, pageNumber: number, text: string, words?: OcrWord[]): Promise<void> {
   const db = await openDB();
   const tx = db.transaction(PAGES_STORE, 'readwrite');
-  tx.objectStore(PAGES_STORE).put({ docId, pageNumber, text });
+  tx.objectStore(PAGES_STORE).put({ docId, pageNumber, text, words });
   await txDone(tx);
   db.close();
 }
 
-export async function getPageText(docId: string, pageNumber: number): Promise<string | null> {
+export async function getPageText(docId: string, pageNumber: number): Promise<{ text: string; words?: OcrWord[] } | null> {
   const db = await openDB();
   const tx = db.transaction(PAGES_STORE, 'readonly');
   const req = tx.objectStore(PAGES_STORE).get([docId, pageNumber]);
@@ -135,7 +137,8 @@ export async function getPageText(docId: string, pageNumber: number): Promise<st
   });
   await txDone(tx);
   db.close();
-  return result ? (result.text as string) : null;
+  if (!result) return null;
+  return { text: result.text ?? '', words: result.words };
 }
 
 export async function listPageTexts(docId: string): Promise<{ pageNumber: number; text: string }[]> {
