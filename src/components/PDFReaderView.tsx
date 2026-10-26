@@ -1292,14 +1292,25 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   };
 
   // Full screen: expand the viewer in-app, and ask the window for real fullscreen as a bonus.
+  // Tracks whether the WINDOW actually went fullscreen. Without this, a requestFullscreen()
+  // that resolves and then immediately exits fires fullscreenchange and cancels the in-app
+  // mode as well, so the button appears to do nothing.
+  const nativeFsRef = useRef<boolean>(false);
   const toggleFullscreen = async () => {
     const next = !immersive;
     setImmersive(next);
     try {
-      if (next && !document.fullscreenElement) await document.documentElement.requestFullscreen();
-      if (!next && document.fullscreenElement) await document.exitFullscreen();
+      if (next && !document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+        nativeFsRef.current = true;
+      }
+      if (!next && document.fullscreenElement) {
+        await document.exitFullscreen();
+        nativeFsRef.current = false;
+      }
     } catch {
       // Embedded pane / no user activation: the in-app mode already covers it.
+      nativeFsRef.current = false;
     }
   };
 
@@ -1308,7 +1319,12 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   useEffect(() => {
     if (!immersive) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setImmersive(false); };
-    const onFsChange = () => { if (!document.fullscreenElement) setImmersive(false); };
+    const onFsChange = () => {
+      if (nativeFsRef.current && !document.fullscreenElement) {
+        nativeFsRef.current = false;
+        setImmersive(false);
+      }
+    };
     window.addEventListener('keydown', onKey);
     document.addEventListener('fullscreenchange', onFsChange);
     return () => {
@@ -1765,11 +1781,23 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
           ref={scrollRef}
           onPointerDown={handlePointerDown}
           onMouseUp={handleMouseUp}
-          className={`flex-1 min-w-0 bg-slate-300/70 overflow-y-auto overflow-x-auto relative ${
-            immersive ? 'fixed inset-0 z-50 rounded-none border-0' : 'rounded-2xl border border-slate-300'
+          className={`flex-1 min-w-0 bg-slate-300/70 overflow-y-auto overflow-x-auto ${
+            // `relative` must NOT be present while immersive: Tailwind emits .fixed before
+            // .relative, so both classes together resolve to relative and the viewer never
+            // actually goes full screen.
+            immersive ? 'fixed inset-0 z-50 rounded-none border-0' : 'relative rounded-2xl border border-slate-300'
           }`}
           style={{ scrollbarGutter: 'stable' }}
         >
+          {immersive && (
+            <button
+              onClick={() => setImmersive(false)}
+              title="Exit full screen"
+              className="fixed top-3 right-3 z-[60] px-3 py-1.5 rounded-lg bg-slate-900/85 text-white text-xs font-bold flex items-center gap-1.5 hover:bg-slate-900 shadow-lg"
+            >
+              <X className="w-3.5 h-3.5" /> Exit full screen
+            </button>
+          )}
           {loadingDoc && (
             <div className="absolute inset-0 z-10 bg-white/70 flex items-center justify-center">
               <Loader2 className="w-6 h-6 animate-spin text-[#0f8b8d]" />
