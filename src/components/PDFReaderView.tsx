@@ -84,6 +84,37 @@ const HL_COLORS: { id: string; css: string; label: string }[] = [
 
 interface SelectionPopup { x: number; y: number; text: string; }
 
+/**
+ * Normalise OCR word boxes to fractions of the page and precompute the horizontal fit.
+ * Storing fractions means the overlay is positioned with percentages, so it stays aligned
+ * through zoom, fit-width, fullscreen and resize with no scale arithmetic.
+ */
+function normalizeOcrWords(
+  words: OcrWord[] | undefined,
+  srcW: number,
+  srcH: number,
+  measure: CanvasRenderingContext2D,
+): OcrWord[] {
+  if (!words || !words.length || !srcW || !srcH) return [];
+  return words.map((w) => {
+    const bw = Math.max(1, w.bbox.x1 - w.bbox.x0);
+    const bh = Math.max(1, w.bbox.y1 - w.bbox.y0);
+    measure.font = `${bh}px Helvetica, Arial, sans-serif`;
+    const measured = measure.measureText(w.text).width || bw;
+    return {
+      text: w.text,
+      confidence: w.confidence,
+      bbox: {
+        x0: w.bbox.x0 / srcW,
+        y0: w.bbox.y0 / srcH,
+        x1: w.bbox.x1 / srcW,
+        y1: w.bbox.y1 / srcH,
+      },
+      sx: Math.max(0.3, Math.min(3, bw / measured)),
+    };
+  });
+}
+
 /** Cheap subject heuristic used on import (no AI call); editable afterwards. */
 const SUBJECT_RULES: { subject: string; patterns: RegExp }[] = [
   { subject: 'Anatomy', patterns: /anatomy|gray'?s|netter|moore/i },
@@ -181,6 +212,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   const [ocrOpen, setOcrOpen] = useState<boolean>(false);
   const [ocrBusy, setOcrBusy] = useState<boolean>(false);
   const [ocrNote, setOcrNote] = useState<string | null>(null);
+  // Bumped whenever OCR words arrive, so the overlay re-renders (refs alone do not).
+  const [wordsVersion, setWordsVersion] = useState(0);
 
   // ----- "Make notes from pages" (PARITY section 6) -----
   const [notesOpen, setNotesOpen] = useState<boolean>(false);
@@ -264,6 +297,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
     setMatchIndex(-1);
     setSearchQuery('');
     pageTextsRef.current = new Map();
+    ocrWordsRef.current = new Map();
+    setWordsVersion((v) => v + 1);
     setNumPages(0);
     setCurrentPage(1);
     setMcqs([]);
@@ -296,6 +331,13 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
       baseDimsRef.current = { w: vp.width, h: vp.height };
       // user highlights for this doc
       setHighlights(listUserHighlightsForDoc(id));
+      // Words already stored by a previous OCR run: fill the overlay map up front.
+      const storedPages = await listPageTexts(id).catch(() => []);
+      let loadedWords = 0;
+      for (const row of storedPages) {
+        if (row.words && row.words.length) { ocrWordsRef.current.set(row.pageNumber, row.words); loadedWords += 1; }
+      }
+      if (loadedWords) setWordsVersion((v) => v + 1);
     } catch (err: any) {
       setDocOpenError(err?.message || 'Could not open the PDF.');
       pdfRef.current = null;
@@ -483,18 +525,28 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
           canvasParent.replaceChildren(canvas);
         }
         const dpr = window.devicePixelRatio || 1;
-        canvas.width = Math.floor(viewport.width * dpr);
-        canvas.height = Math.floor(viewport.height * dpr);
-        canvas.style.width = `${Math.floor(viewport.width)}px`;
-        canvas.style.height = `${Math.floor(viewport.height)}px`;
+        const cssW = Math.floor(viewport.width);
+        const cssH = Math.floor(viewport.height);
+        // Cap the backing store. Zooming into a 4961 pt scan asks for a 6,000–20,000 px canvas,
+        // which the browser cannot allocate, so the render silently never completes (blank page).
+        let pxW = Math.max(1, Math.floor(cssW * dpr));
+        let pxH = Math.max(1, Math.floor(cssH * dpr));
+        const shrink = Math.min(1, 4096 / Math.max(pxW, pxH), Math.sqrt(16_000_000 / Math.max(1, pxW * pxH)));
+        pxW = Math.max(1, Math.floor(pxW * shrink));
+        pxH = Math.max(1, Math.floor(pxH * shrink));
+        canvas.width = pxW;
+        canvas.height = pxH;
+        canvas.style.width = `${cssW}px`;
+        canvas.style.height = `${cssH}px`;
 
         // cancel an in-flight render for this page
         const prevTask = renderTasksRef.current.get(num);
         if (prevTask) { try { prevTask.cancel(); } catch { /* ignore */ } }
 
+        const renderViewport = shrink < 1 ? page.getViewport({ scale: s * shrink }) : viewport;
         const task = page.render({
           canvasContext: canvas.getContext('2d')!,
-          viewport,
+          viewport: renderViewport,
           ...(dpr !== 1 ? { transform: [dpr, 0, 0, dpr, 0, 0] } : {}),
         });
         renderTasksRef.current.set(num, task);
@@ -580,6 +632,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
     requestAnimationFrame(() => {
       observerRef.current?.disconnect();
       for (const wrap of pageWrapRefs.current.values()) observerRef.current?.observe(wrap);
+      // The observer may report a tiny ratio for a tall page and then never fire again, so
+      // paint the page the user is actually looking at.
+      void renderPage(currentPageRef.current);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scale, clearRenderedPages]);
@@ -598,7 +653,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
         const num = Number((entry.target as HTMLElement).dataset.pageNumber);
         if (!num || Number.isNaN(num)) continue;
         const ratio = entry.intersectionRatio;
-        if (ratio > 0.02) {
+        if (ratio > 0) {
           visibleRatiosRef.current.set(num, ratio);
           if (!renderedRef.current.has(num)) renderPage(num);
         } else {
@@ -628,8 +683,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   const setPageWrapRef = useCallback((num: number, el: HTMLDivElement | null) => {
     if (el) {
       pageWrapRefs.current.set(num, el);
+      // Only the IntersectionObserver decides what to render. Calling renderPage here queued
+      // every page the moment the document opened, starving the single pdf.js worker.
       observerRef.current?.observe(el);
-      if (!renderedRef.current.has(num)) renderPage(num);
     } else {
       const existing = pageWrapRefs.current.get(num);
       if (existing) observerRef.current?.unobserve(existing);
@@ -783,30 +839,6 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
     };
   }, [viewMode]);
 
-  // Re-trigger rendering when switching back to Page view — the IntersectionObserver
-  // needs to re-fire for visible wrappers so canvases paint again.
-  useEffect(() => {
-    if (viewMode !== 'page' || !pdfRef.current) return;
-    const scroller = scrollRef.current;
-    if (!scroller) return;
-    // Clear rendered state so pages re-render on the observer callback.
-    renderedRef.current.clear();
-    renderingRef.current.clear();
-    renderTasksRef.current.clear();
-    for (const canvas of canvasRefs.current.values()) {
-      if (canvas.parentElement) canvas.parentElement.replaceChildren();
-    }
-    canvasRefs.current.clear();
-    textLayerRefs.current.clear();
-    visibleRatiosRef.current.clear();
-    // Render the current page immediately so the user isn't left with a blank screen.
-    void renderPage(currentPage);
-    requestAnimationFrame(() => {
-      observerRef.current?.disconnect();
-      for (const wrap of pageWrapRefs.current.values()) observerRef.current?.observe(wrap);
-    });
-  }, [viewMode, currentPage]);
-
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
   const handlePointerDown = (e: React.PointerEvent) => {
@@ -828,7 +860,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
     }
     // Only a selection made inside a rendered text layer is ours to act on.
     const anchorEl = (sel.anchorNode?.nodeType === 1 ? sel.anchorNode : sel.anchorNode?.parentElement) as HTMLElement | null;
-    if (!anchorEl?.closest('.textLayer')) { setPopup(null); return; }
+    if (!anchorEl?.closest('.textLayer, .ocrTextLayer')) { setPopup(null); return; }
     const range = sel.rangeCount > 0 ? sel.getRangeAt(0).getBoundingClientRect() : null;
     const container = scrollRef.current;
     if (!range || !container) { setPopup(null); return; }
@@ -1021,46 +1053,80 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
     let processed = 0;
     let skipped = 0;
     let pool: Awaited<ReturnType<typeof createOcrPool>> | null = null;
+    const failures: string[] = [];
+    // One worker for a single page; bounded parallelism for a whole book so every worker is
+    // actually busy. Rendering stays per-page, but K pages can be in flight at once.
+    const K = scope === 'current' ? 1 : Math.min(3, Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
+    const measure = document.createElement('canvas').getContext('2d')!;
     try {
-      pool = await createOcrPool();
-      for (let index = 0; index < pages.length; index++) {
-        if (job.isCancelled()) break;
-        const n = pages[index];
-        if (scope === 'missing' && !ocrForce) {
-          const existing = await ensurePageText(n).catch(() => '');
-          if (existing.trim()) { skipped += 1; job.update({ progress: Math.round(((index + 1) / pages.length) * 100) }); continue; }
-        }
-        job.update({ progress: Math.round((index / pages.length) * 100), detail: `rendering page ${n}` });
-        const page = await pdfRef.current.getPage(n);
-        // ~2000 px wide ≈ 300 dpi for a book page: legible for tesseract, a few MB instead of
-        // the ~500 MB a 1:1 raster of a 4961 pt scan would need.
-        const baseVp = page.getViewport({ scale: 1 });
-        const ocrScale = Math.max(0.05, Math.min(2, 2000 / Math.max(1, baseVp.width)));
-        const viewport = page.getViewport({ scale: ocrScale });
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.floor(viewport.width);
-        canvas.height = Math.floor(viewport.height);
-        await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise;
-        const result = await pool.recognize(canvas, (p) => {
-          job.update({ progress: Math.round(((index + p.progress) / pages.length) * 100), detail: `page ${n} · ${p.status}` });
-        });
-        if (result.text.trim()) {
-          // Saved the moment it is ready, so Stop keeps every finished page.
-          await savePageText(activeDocId, n, result.text, result.words);
-          pageTextsRef.current.set(n, result.text);
-          if (result.words && result.words.length) {
-            ocrWordsRef.current.set(n, result.words);
+      pool = await createOcrPool(K);
+      let next = 0;
+      const runOne = async () => {
+        for (;;) {
+          const index = next++;
+          if (index >= pages.length || job.isCancelled()) return;
+          const n = pages[index];
+          try {
+            if (scope === 'missing' && !ocrForce) {
+              const existing = await ensurePageText(n).catch(() => '');
+              if (existing.trim()) { skipped += 1; return; }
+            }
+            job.update({ detail: `page ${n} · rendering` });
+            const page = await pdfRef.current.getPage(n);
+            // ~2000 px wide ≈ 300 dpi for a book page: legible for tesseract, a few MB instead
+            // of the ~500 MB a 1:1 raster of a 4961 pt scan would need.
+            const baseVp = page.getViewport({ scale: 1 });
+            const ocrScale = Math.max(0.05, Math.min(2, 2000 / Math.max(1, baseVp.width)));
+            const viewport = page.getViewport({ scale: ocrScale });
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.floor(viewport.width);
+            canvas.height = Math.floor(viewport.height);
+            await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise;
+            const result = await pool!.recognize(canvas, (p) => {
+              job.update({
+                progress: Math.round(((processed + p.progress) / pages.length) * 100),
+                detail: `page ${n} · ${p.status}`,
+              });
+            });
+            // Fractions of the page, so the overlay needs no scale maths at render time.
+            const words = normalizeOcrWords(result.words, canvas.width, canvas.height, measure);
+            if (result.text.trim()) {
+              // Saved the moment it is ready, so Stop keeps every finished page.
+              await savePageText(activeDocId, n, result.text, words);
+              pageTextsRef.current.set(n, result.text);
+              if (words.length) {
+                ocrWordsRef.current.set(n, words);
+                setWordsVersion((v) => v + 1);
+              }
+            }
+            canvas.width = 0;
+            canvas.height = 0;
+            processed += 1;
+            job.update({
+              progress: Math.min(100, Math.round((processed / pages.length) * 100)),
+              detail: `page ${n} done · ${processed}/${pages.length}`,
+            });
+          } catch (err: any) {
+            // One bad page never ends the run.
+            failures.push(`p.${n}: ${err?.message || 'failed'}`);
           }
         }
-        canvas.width = 0;
-        canvas.height = 0;
-        processed += 1;
-      }
+      };
+      await Promise.all(Array.from({ length: K }, () => runOne()));
+      const parts = [
+        `${processed} page${processed === 1 ? '' : 's'} recognised`,
+        skipped ? `${skipped} skipped (already had text)` : '',
+        failures.length ? `${failures.length} failed` : '',
+      ].filter(Boolean);
       if (job.isCancelled()) {
-        setOcrNote(`OCR stopped. ${processed} page${processed === 1 ? '' : 's'} saved${skipped ? `, ${skipped} skipped` : ''}.`);
+        job.done(`stopped · ${parts.join(', ')}`);
+        setOcrNote(`OCR stopped. ${parts.join(', ')}.`);
       } else {
-        job.done(`${processed} page${processed === 1 ? '' : 's'} recognised${skipped ? `, ${skipped} skipped` : ''}`);
-        setOcrNote(`OCR finished: ${processed} page${processed === 1 ? '' : 's'} processed${skipped ? `, ${skipped} skipped (already had text)` : ''}.`);
+        job.done(parts.join(', '));
+        setOcrNote(
+          `OCR finished: ${parts.join(', ')}.` +
+          (failures.length ? ` Problems: ${failures.slice(0, 4).join('; ')}${failures.length > 4 ? '…' : ''}` : ''),
+        );
       }
     } catch (err: any) {
       const message = err?.message || 'OCR failed.';
@@ -1372,7 +1438,14 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
             <button
               onClick={() => {
                 if (activeDoc?.fileType === 'docx') return;
-                setViewMode(viewMode === 'page' ? 'text' : 'page');
+                if (viewMode === 'text') {
+                  // Returning to page view: the wrappers remount and setPageWrapRef re-renders
+                  // them, but only if the bookkeeping no longer claims they are rendered.
+                  clearRenderedPages();
+                  setViewMode('page');
+                } else {
+                  setViewMode('text');
+                }
                 setPopup(null);
               }}
               disabled={activeDoc?.fileType === 'docx'}
@@ -1731,13 +1804,14 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
                     data-page-number={n}
                     ref={(el) => setPageWrapRef(n, el)}
                     className="relative bg-white shadow-md border border-slate-300 rounded-sm overflow-hidden"
-                    style={{ width: w, height: h }}
+                    style={{ width: w, height: h, containerType: 'size' }}
                   >
                     {/* canvas slot */}
                     <div data-canvas-slot className="absolute inset-0 pointer-events-none" />
                     {/* text layer slot (pdf.js TextLayer fills it) */}
                     <div data-text-slot className="textLayer absolute inset-0 overflow-hidden" />
-                    {/* OCR text layer overlay (selectable, scales with zoom) */}
+                    {/* OCR text layer — invisible selectable text over the scan (Acrobat's model).
+                        Percentages + cqh keep it aligned at any zoom; scaleX fits each word to its box. */}
                     {ocrWordsRef.current.has(n) && (
                       <div className="ocrTextLayer absolute inset-0 overflow-hidden select-text" style={{ zIndex: 2 }}>
                         {ocrWordsRef.current.get(n)!.map((w, i) => (
@@ -1745,21 +1819,21 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
                             key={i}
                             className="absolute select-text"
                             style={{
-                              left: `${w.bbox.x0 * fitScale()}px`,
-                              top: `${w.bbox.y0 * fitScale()}px`,
-                              width: `${(w.bbox.x1 - w.bbox.x0) * fitScale()}px`,
-                              height: `${(w.bbox.y1 - w.bbox.y0) * fitScale()}px`,
-                              fontSize: `${Math.max(8, (w.bbox.y1 - w.bbox.y0) * fitScale() * 0.8)}px`,
-                              lineHeight: `${(w.bbox.y1 - w.bbox.y0) * fitScale()}px`,
-                              transformOrigin: 'top left',
-                              whiteSpace: 'nowrap',
-                              color: '#1a1a2e',
-                              textShadow: '0 0 2px rgba(255,255,255,0.8), 0 0 1px rgba(255,255,255,0.6)',
+                              left: `${w.bbox.x0 * 100}%`,
+                              top: `${w.bbox.y0 * 100}%`,
+                              width: `${(w.bbox.x1 - w.bbox.x0) * 100}%`,
+                              height: `${(w.bbox.y1 - w.bbox.y0) * 100}%`,
+                              fontSize: `${(w.bbox.y1 - w.bbox.y0) * 100}cqh`,
+                              lineHeight: `${(w.bbox.y1 - w.bbox.y0) * 100}cqh`,
+                              transform: `scaleX(${w.sx ?? 1})`,
+                              transformOrigin: 'left top',
+                              whiteSpace: 'pre',
+                              color: 'transparent',
                               userSelect: 'text',
                               cursor: 'text',
                             }}
                           >
-                            {w.text}
+                            {w.text + ' '}
                           </span>
                         ))}
                       </div>

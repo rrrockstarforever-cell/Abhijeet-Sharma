@@ -141,7 +141,7 @@ export async function getPageText(docId: string, pageNumber: number): Promise<{ 
   return { text: result.text ?? '', words: result.words };
 }
 
-export async function listPageTexts(docId: string): Promise<{ pageNumber: number; text: string }[]> {
+export async function listPageTexts(docId: string): Promise<{ pageNumber: number; text: string; words?: OcrWord[] }[]> {
   const db = await openDB();
   const tx = db.transaction(PAGES_STORE, 'readonly');
   const req = tx.objectStore(PAGES_STORE).index('docId').getAll(IDBKeyRange.only(docId));
@@ -152,6 +152,10 @@ export async function listPageTexts(docId: string): Promise<{ pageNumber: number
   await txDone(tx);
   db.close();
   return results
-    .map((r) => ({ pageNumber: r.pageNumber as number, text: r.text as string }))
+    .map((r) => ({
+      pageNumber: r.pageNumber as number,
+      text: r.text as string,
+      words: r.words as OcrWord[] | undefined,
+    }))
     .sort((a, b) => a.pageNumber - b.pageNumber);
 }

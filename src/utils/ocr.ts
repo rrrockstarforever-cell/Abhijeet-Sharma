@@ -19,8 +19,11 @@ export interface OcrResult {
 
 export interface OcrWord {
   text: string;
-  bbox: { x0: number; y0: number; x1: number; y1: number }; // in source-image pixels
+  /** Fractions of the page (0–1) once normalised, so the overlay needs no scale maths. */
+  bbox: { x0: number; y0: number; x1: number; y1: number };
   confidence: number;
+  /** Horizontal fit: box width ÷ measured text width, applied as scaleX. */
+  sx?: number;
 }
 
 export type OcrSource = HTMLCanvasElement | HTMLImageElement | Blob | string;
