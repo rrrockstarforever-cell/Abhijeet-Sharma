@@ -508,6 +508,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
         const tl = (pdfjsLib as any).TextLayer;
         if (tl) {
           slot.style.setProperty('--scale-factor', String(s));
+          slot.style.setProperty('--total-scale-factor', String(s));
+          slot.style.setProperty('--user-unit', '1');
           try {
             const textLayer = new tl({
               textContentSource: page.streamTextContent({ includeMarkedContent: false }),
@@ -515,6 +517,13 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
               viewport,
             });
             await textLayer.render();
+            // pdf.js's own viewer appends this; without it a drag that leaves a line selects
+            // everything to the end of the page instead of stopping at the pointer.
+            if (!slot.querySelector('.endOfContent')) {
+              const end = document.createElement('div');
+              end.className = 'endOfContent';
+              slot.appendChild(end);
+            }
           } catch (err) {
             console.warn(`Text layer failed on page ${num}`, err);
           }
@@ -754,13 +763,44 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
 
   // ============================ selection popup ============================
 
+  // pdf_viewer.css pins .endOfContent to the top of the page while the layer has .selecting.
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller || viewMode !== 'page') return;
+    const mark = () => scroller.querySelectorAll<HTMLElement>('.textLayer').forEach((el) => el.classList.add('selecting'));
+    const unmark = () => scroller.querySelectorAll<HTMLElement>('.textLayer').forEach((el) => el.classList.remove('selecting'));
+    scroller.addEventListener('pointerdown', mark);
+    window.addEventListener('pointerup', unmark);
+    window.addEventListener('pointercancel', unmark);
+    return () => {
+      scroller.removeEventListener('pointerdown', mark);
+      window.removeEventListener('pointerup', unmark);
+      window.removeEventListener('pointercancel', unmark);
+    };
+  }, [viewMode]);
+
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+    setPopup(null); // a new gesture dismisses the previous popup
+  };
+
   const handleMouseUp = (e: React.MouseEvent) => {
+    const start = dragStartRef.current;
+    dragStartRef.current = null;
+    // A click is not a selection gesture — only a real drag may open the popup.
+    if (!start || Math.hypot(e.clientX - start.x, e.clientY - start.y) < 6) return;
+
     const sel = window.getSelection();
     const text = sel?.toString().trim() ?? '';
-    if (!sel || text.length < 3 || !pdfRef.current) {
+    if (!sel || sel.isCollapsed || text.length < 3 || !pdfRef.current) {
       setPopup(null);
       return;
     }
+    // Only a selection made inside a rendered text layer is ours to act on.
+    const anchorEl = (sel.anchorNode?.nodeType === 1 ? sel.anchorNode : sel.anchorNode?.parentElement) as HTMLElement | null;
+    if (!anchorEl?.closest('.textLayer')) { setPopup(null); return; }
     const range = sel.rangeCount > 0 ? sel.getRangeAt(0).getBoundingClientRect() : null;
     const container = scrollRef.current;
     if (!range || !container) { setPopup(null); return; }
@@ -768,9 +808,11 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
     const row = container.parentElement;
     if (!row) { setPopup(null); return; }
     const rowRect = row.getBoundingClientRect();
+    const above = range.top - rowRect.top - 44;
     setPopup({
-      x: Math.min(Math.max(range.left - rowRect.left, 260), Math.max(260, row.clientWidth - 180)),
-      y: Math.max(range.top - rowRect.top - 44, 8),
+      x: Math.min(Math.max(range.left - rowRect.left, 12), Math.max(12, row.clientWidth - 190)),
+      // Above the selection when that fits, otherwise below it — never across the words.
+      y: above >= 8 ? above : Math.min(range.bottom - rowRect.top + 8, Math.max(8, row.clientHeight - 60)),
       text: text.slice(0, 4000),
     });
   };
@@ -1577,6 +1619,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
         {/* Center: continuous scroll viewer */}
         <div
           ref={scrollRef}
+          onPointerDown={handlePointerDown}
           onMouseUp={handleMouseUp}
           className="flex-1 min-w-0 bg-slate-300/70 rounded-2xl border border-slate-300 overflow-y-auto overflow-x-auto relative"
           style={{ scrollbarGutter: 'stable' }}
@@ -1625,7 +1668,18 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
               </div>
             </div>
           ) : pdfRef.current && numPages > 0 ? (
-            <div className="py-4 px-2 flex flex-col items-center gap-4" style={{ ['--scale-factor' as any]: String(scale) }}>
+            <div
+              className="py-4 px-2 flex flex-col items-center gap-4"
+              style={{
+                // pdf.js 5.7 sizes text-layer spans with --total-scale-factor, which its CSS only
+                // defines inside `.pdfViewer .page`. Outside that selector the calc() is invalid
+                // and every span falls back to a default size — that is what made selections
+                // balloon past the words. Define both properties for our standalone layer.
+                ['--scale-factor' as any]: String(scale),
+                ['--total-scale-factor' as any]: String(scale),
+                ['--user-unit' as any]: '1',
+              }}
+            >
               {Array.from({ length: numPages }, (_, i) => i + 1).map((n) => {
                 const base = baseDimsRef.current;
                 const w = base ? Math.floor(base.w * scale) : 620;
@@ -1639,7 +1693,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
                     style={{ width: w, height: h }}
                   >
                     {/* canvas slot */}
-                    <div data-canvas-slot className="absolute inset-0" />
+                    <div data-canvas-slot className="absolute inset-0 pointer-events-none" />
                     {/* text layer slot (pdf.js TextLayer fills it) */}
                     <div data-text-slot className="textLayer absolute inset-0 overflow-hidden" />
                     {/* saved highlight overlay (normalised rects, so it scales with zoom) */}
@@ -1650,7 +1704,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
                           <div
                             key={`${h.id}-${ri}`}
                             title={h.quote.slice(0, 160)}
-                            className="absolute rounded-[1px] mix-blend-multiply"
+                            className="absolute rounded-[1px] mix-blend-multiply pointer-events-none"
                             style={{
                               left: `${r.x * 100}%`,
                               top: `${r.y * 100}%`,
