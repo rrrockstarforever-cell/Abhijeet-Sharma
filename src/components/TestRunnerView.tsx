@@ -522,14 +522,24 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                   {/* Embedded Image if available */}
                   {currentQ?.image && (
                     <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-                      <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                        <span>{currentQ.imageCaption || 'Histopathology Specimen'}</span>
-                        <span className="text-slate-400 font-mono">Special Stain</span>
+                      <div className="flex items-start justify-between gap-3 text-xs font-bold text-slate-700">
+                        <span className="leading-snug">{currentQ.imageCaption || 'Clinical image'}</span>
+                        {currentQ.imageSourceUrl && (
+                          <a
+                            href={currentQ.imageSourceUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="shrink-0 font-semibold text-[10px] text-[#0f8b8d] hover:underline"
+                            title="Open the source of this image"
+                          >
+                            Source ↗
+                          </a>
+                        )}
                       </div>
                       <img 
                         src={currentQ.image} 
-                        alt="Clinical Specimen" 
-                        className="w-full max-h-72 object-cover rounded-lg border border-slate-300 shadow-sm"
+                        alt={currentQ.imageCaption || 'Clinical image'} 
+                        className="w-full max-h-80 object-contain bg-white rounded-lg border border-slate-300 shadow-sm"
                       />
                     </div>
                   )}

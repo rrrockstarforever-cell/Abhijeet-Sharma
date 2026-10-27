@@ -35,10 +35,29 @@ caption displayed under the picture includes the attribution.
 
 The Practice Builder has an **Include image-based questions** switch (on by default).
 
+## Live sources (runtime)
+
+When a generated image-based item has no verified local match, the app asks the local server,
+which searches **Wikimedia Commons** (which also carries CDC Public Health Image Library
+material) and **Open-i (NLM)**, returning only figures whose licence allows reuse
+(CC BY, CC BY-SA, CC0, public domain). Results are proxied through
+`/api/images/proxy` and cached in the app data directory, so the page never hotlinks the
+source and the picture still opens offline after the first fetch. Attribution
+(authors / file · licence) and a link to the source page travel with the image.
+
+Switch the live search off in **Settings → Image Sources for Questions**.
+
+These libraries are **not** scraped into the app because their terms are copyright or
+personal-use-only; they are offered as reference links in the same Settings card:
+
+- Radiopaedia, RSNA Case Collection, DermNet, Columbia Ophthalmology Atlas, LIFTL, MedPix.
+
+CDC PHIL material reaches the library through Wikimedia Commons (public domain), which keeps
+the licence auditable.
+
 ## Adding more images
 
 The pipeline is a script, so coverage can grow without touching app code.
-
 ```bash
 # 1. Add a seed (id, query, diagnosis, modality, subject, subtopic, tags)
 #    to tools/medical-image-seeds.json

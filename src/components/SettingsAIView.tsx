@@ -19,7 +19,8 @@ import {
   RefreshCw,
   Search,
   ScanText,
-  Boxes
+  Boxes,
+  Images
 } from 'lucide-react';
 import { AIProvider } from '../types.ts';
 import {
@@ -41,6 +42,7 @@ import {
   getOcrWorkers,
   setOcrWorkers,
 } from '../utils/ocr.ts';
+import { isLiveImageSearchEnabled, setLiveImageSearchEnabled } from '../utils/liveImages.ts';
 
 // Local provider catalog for the 4 REAL providers (no mock latency/verified numbers).
 // Connection state is always fetched live from GET /api/oauth/status.
@@ -178,6 +180,21 @@ export const SettingsAIView: React.FC = () => {
   const updateOcrWorkers = (n: number) => {
     setOcrWorkersState(setOcrWorkers(n));
   };
+
+  // Live image sources: Open-i (licence-filtered) is embedded; several popular atlases are
+  // reference links only because their terms do not allow redistribution.
+  const [liveImages, setLiveImages] = useState<boolean>(() => isLiveImageSearchEnabled());
+  const [imageSources, setImageSources] = useState<{
+    embedded: { name: string; url: string; note: string }[];
+    reference: { name: string; url: string; note: string }[];
+  } | null>(null);
+
+  useEffect(() => {
+    fetch('/api/images/sources')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setImageSources(data); })
+      .catch(() => {});
+  }, []);
 
   // Optional live model catalog (models.dev via the local server) — suggestions only,
   // any model id can still be typed manually.
@@ -747,6 +764,82 @@ export const SettingsAIView: React.FC = () => {
               More workers scan a book faster. Each worker loads its own Tesseract engine (roughly 60–100 MB of RAM),
               so stay near your spare CPU threads. The new pool size applies to the next OCR job.
             </p>
+          </div>
+
+          {/* Live clinical-image sources for image-based questions */}
+          <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <Images className="w-4 h-4 text-[#0f8b8d]" /> Image Sources for Questions
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Where image-based items get their pictures
+                </p>
+              </div>
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                liveImages
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                  : 'bg-slate-100 text-slate-500 border-slate-200'
+              }`}>
+                {liveImages ? 'LIVE SEARCH ON' : 'LOCAL ONLY'}
+              </span>
+            </div>
+
+            <div className="flex items-start justify-between gap-3 p-3 rounded-xl bg-slate-50 border border-slate-200">
+              <div>
+                <div className="text-[11px] font-bold text-slate-800">Live search at generation time</div>
+                <p className="text-[10px] leading-snug text-slate-500">
+                  When no verified picture matches, search Wikimedia Commons (including CDC PHIL material) and
+                  Open-i (NLM / PubMed Central) for the diagnosis. Only CC BY / CC BY-SA / CC0 / public-domain
+                  results are used, proxied and cached locally, with attribution under the image.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !liveImages;
+                  setLiveImages(next);
+                  setLiveImageSearchEnabled(next);
+                }}
+                aria-pressed={liveImages}
+                className={`relative w-9 h-5 rounded-full shrink-0 mt-0.5 transition-colors ${liveImages ? 'bg-[#0f8b8d]' : 'bg-slate-300'}`}
+                title={liveImages ? 'Live search is on' : 'Live search is off'}
+              >
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${liveImages ? 'left-[18px]' : 'left-0.5'}`} />
+              </button>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">Shipped verified library</div>
+              <p className="text-[10px] text-slate-600 leading-snug">
+                20 images from Wikimedia Commons (including CDC PHIL material), checked and captioned.
+              </p>
+            </div>
+
+            {imageSources?.reference?.length ? (
+              <div className="space-y-1.5">
+                <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">Reference atlases (open on their site)</div>
+                <div className="space-y-1">
+                  {imageSources.reference.map((src) => (
+                    <a
+                      key={src.name}
+                      href={src.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={src.note}
+                      className="flex items-center justify-between gap-2 px-2 py-1 rounded-lg border border-slate-200 bg-white hover:border-[#0f8b8d]/40 group"
+                    >
+                      <span className="text-[10px] font-semibold text-slate-700 group-hover:text-[#0f8b8d] truncate">{src.name}</span>
+                      <ExternalLink className="w-3 h-3 text-slate-400 group-hover:text-[#0f8b8d] shrink-0" />
+                    </a>
+                  ))}
+                </div>
+                <p className="text-[9px] leading-relaxed text-slate-400">
+                  These atlases are copyrighted (or personal-use only), so their images are not copied into the app.
+                </p>
+              </div>
+            ) : null}
           </div>
 
           {/* Privacy Guard */}

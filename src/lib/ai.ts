@@ -5,6 +5,7 @@ import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } f
 
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
 import { loadMedicalImages, matchMedicalImage, medicalImageUrl, imageAttribution } from '../utils/medicalImages.ts';
+import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'opencode';
 
 export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok', 'opencode'];
@@ -450,6 +451,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const learnerProfile = typeof customInstructions === 'string' ? customInstructions.trim().slice(0, 1500) : '';
   // Only verified pictures are eligible; loading is cached for the session.
   const imageIndex = includeImages ? await loadMedicalImages() : [];
+  // Live Open-i lookup is on by default and can be switched off in Settings.
+  const liveImages = includeImages && isLiveImageSearchEnabled();
   let attachedImages = 0;
 
   // Round-robin the subject -> subtopic pool so every batch samples across subjects.
@@ -632,6 +635,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       dropped += batchSize; // entire batch unusable
       consecutiveFailed += 1;
     } else {
+      const batchQuestions: ClinicalQuestion[] = [];
       for (const item of batchItems) {
         if (questions.length >= count) break;
         const tierForItem = difficultyTier === 'ALL'
@@ -650,8 +654,24 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
             }
           }
           questions.push(q);
+          batchQuestions.push(q);
         }
       }
+
+      // No verified local match? Ask Open-i (licence-filtered) for the figure the item
+      // asked for. Capped per batch so a slow network cannot stall generation.
+      if (liveImages) {
+        const pending = batchQuestions.filter((q) => !q.image && q.figureQuery).slice(0, 3);
+        await Promise.all(pending.map(async (q) => {
+          const live = await findLiveImage(q.figureQuery as string);
+          if (!live) return;
+          q.image = live.proxyUrl;
+          q.imageSourceUrl = live.articleUrl;
+          q.imageCaption = liveImageCaption(live);
+          attachedImages += 1;
+        }));
+      }
+
       // Everything requested but not delivered (invalid items or missing) counts as dropped.
       dropped += batchSize - (questions.length - before);
       consecutiveFailed = questions.length === before ? consecutiveFailed + 1 : 0;

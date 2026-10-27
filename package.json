@@ -1,7 +1,7 @@
 {
   "name": "pulse-med",
   "private": true,
-  "version": "1.0.6",
+  "version": "1.0.7",
   "type": "module",
   "scripts": {
     "predev": "node tools/copy-tesseract-assets.mjs",
@@ -99,7 +99,7 @@
     },
     "extraResources": []
   },
-  "description": "Pulse Med â€” AI-assisted NEET-PG / INI-CET / AMC CAT exam preparation desktop app",
+  "description": "Pulse Med Ã¢â‚¬â€ AI-assisted NEET-PG / INI-CET / AMC CAT exam preparation desktop app",
   "author": {
     "name": "rrrockstarforever-cell",
     "email": "rrrockstarforever@gmail.com"

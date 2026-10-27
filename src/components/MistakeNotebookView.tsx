@@ -396,21 +396,28 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                       {q.questionText}
                     </p>
 
-                    {/* Embedded Histopathology Image if present */}
+                    {/* Embedded clinical image if present */}
                     {q.image && (
                       <div className="mt-3 p-3 bg-slate-50 rounded-xl border border-slate-200 flex flex-col sm:flex-row items-center gap-4">
                         <img 
                           src={q.image} 
-                          alt="Clinical Histopathology" 
-                          className="w-32 h-24 object-cover rounded-lg border border-slate-300 shadow-sm"
+                          alt={q.imageCaption || 'Clinical image'} 
+                          className="w-32 h-24 object-contain bg-white rounded-lg border border-slate-300 shadow-sm"
                         />
                         <div className="flex-1 text-left">
-                          <span className="text-[11px] font-bold text-slate-800 uppercase tracking-wider block">
-                            {q.imageCaption || 'Histopathology Specimen'}
+                          <span className="text-[11px] font-bold text-slate-800 block leading-snug">
+                            {q.imageCaption || 'Clinical image'}
                           </span>
-                          <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
-                            Cellular crescent compression of capillary tuft &gt;65% with basement membrane rupture on Jones Methenamine Silver stain.
-                          </p>
+                          {q.imageSourceUrl && (
+                            <a
+                              href={q.imageSourceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-block mt-1 text-[10px] font-semibold text-[#0f8b8d] hover:underline"
+                            >
+                              Source ↗
+                            </a>
+                          )}
                         </div>
                       </div>
                     )}

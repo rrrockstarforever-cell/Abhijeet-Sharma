@@ -895,8 +895,9 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 <div>
                   <div className="text-[11px] font-bold text-slate-800">Include image-based questions</div>
                   <p className="text-[10px] text-slate-500 leading-snug">
-                    About 1 in 5 items get a real ECG / X-ray / CT / histology / clinical photo from the verified library.
-                    Text-only items still work if no picture matches.
+                    About 1 in 5 items get a real ECG / X-ray / CT / histology / clinical photo from the verified
+                    library, with an Open-i (NLM) live search for anything it does not cover. Text-only items still
+                    work if no picture matches.
                   </p>
                 </div>
                 <button

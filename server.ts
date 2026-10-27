@@ -17,6 +17,7 @@ import {
 } from './server/oauth.mjs';
 import { aiLog } from './server/oauth.mjs';
 import { research as webResearch } from './server/web.mjs';
+import { searchImages, fetchImage, REFERENCE_SOURCES } from './server/images.mjs';
 
 dotenv.config();
 
@@ -822,8 +823,44 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/web/research {query} -> real internet search (DuckDuckGo + PubMed).
-// Sources carry their URLs; the client may ask the AI to summarise them. Never canned.
+// GET /api/images/search?q=... -> licence-filtered clinical figures from Open-i (NLM).
+// Only CC BY / CC BY-SA / CC0 / public-domain results are returned; NC/ND are dropped.
+app.get('/api/images/search', async (req: Request, res: Response) => {
+  const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  if (!query) return res.status(400).json({ error: 'q is required.' });
+  try {
+    const { results, errors } = await searchImages(query, { limit: 6 });
+    return res.json({ provider: 'Open-i + Wikimedia Commons', query, results, errors });
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'Live image search failed.' });
+  }
+});
+
+// GET /api/images/proxy?u=... -> stream one Open-i figure (cached on disk, no hotlinking).
+app.get('/api/images/proxy', async (req: Request, res: Response) => {
+  const url = typeof req.query.u === 'string' ? req.query.u : '';
+  try {
+    const { buffer, type } = await fetchImage(url);
+    res.setHeader('Content-Type', type);
+    res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+    return res.send(buffer);
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'Could not load that image.' });
+  }
+});
+
+// GET /api/images/sources -> which libraries are embedded vs reference-only.
+app.get('/api/images/sources', (_req: Request, res: Response) => {
+  res.json({
+    embedded: [
+      { name: 'Open-i (NLM / PubMed Central)', url: 'https://openi.nlm.nih.gov/', note: 'Live search; CC BY / BY-SA / CC0 / public domain only.' },
+      { name: 'Wikimedia Commons (CDC PHIL and others)', url: 'https://commons.wikimedia.org/', note: 'Curated verified library shipped with the app.' },
+    ],
+    reference: REFERENCE_SOURCES,
+  });
+});
+
+// POST /api/web/research {query} -> real internet search (DuckDuckGo + PubMed).// Sources carry their URLs; the client may ask the AI to summarise them. Never canned.
 app.post('/api/web/research', async (req: Request, res: Response) => {
   const query = typeof req.body?.query === 'string' ? req.body.query : '';
   try {
