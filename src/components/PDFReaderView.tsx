@@ -41,6 +41,7 @@ import {
   FileDown,
   NotebookPen,
   Square,
+  Send,
   Type as TypeIcon
 } from 'lucide-react';
 import { AppView } from '../types.ts';
@@ -63,11 +64,32 @@ import {
   type UserHighlight
 } from '../utils/userHighlightsStore.ts';
 import { aiComplete, getActiveProvider, getEffectiveModel, NOT_CONNECTED_MESSAGE, extractJson } from '../lib/ai.ts';
-import { ocrImage, createOcrPool, OcrWord } from '../utils/ocr.ts';
+import { ocrImage, createOcrPool, ocrConcurrency, OcrWord } from '../utils/ocr.ts';
 import { startJob, stopJob, type JobControl } from '../utils/jobRegistry.ts';
 import { RevisionNote, downloadNotesPdf } from './RevisionNote.tsx';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+
+// One-tap prompts for the Ask AI rail. Each is answered from the current page/selection,
+// so the learner does not have to invent a question to get value from the panel.
+const ASK_QUICK_PROMPTS: { label: string; question: string }[] = [
+  {
+    label: 'Explain',
+    question: 'Explain this passage clearly and completely, with mechanisms and the clinical reasoning a postgraduate examiner expects.',
+  },
+  {
+    label: 'Key points',
+    question: 'List the high-yield key points in this passage as short bullets, then one line on why each matters clinically.',
+  },
+  {
+    label: 'Exam pearls',
+    question: 'Give the exam pearls a NEET-PG / INI-CET / AMC CAT examiner would test from this passage, including the classic trap.',
+  },
+  {
+    label: 'Define terms',
+    question: 'Define every clinical term and abbreviation in this passage, with a one-line clinical significance for each.',
+  },
+];
 
 interface PDFReaderViewProps {
   onNavigate: (view: AppView, targetId?: string) => void;
@@ -197,6 +219,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   const [askIncludeWeb, setAskIncludeWeb] = useState<boolean>(false);
   const [askBusy, setAskBusy] = useState<boolean>(false);
   const [askReply, setAskReply] = useState<string>('');
+  const [askQuestion, setAskQuestion] = useState<string>('');
+  const [askInput, setAskInput] = useState<string>('');
+  const [askCopied, setAskCopied] = useState<boolean>(false);
   const [askCitations, setAskCitations] = useState<string[]>([]);
   const [askError, setAskError] = useState<string | null>(null);
   const [mcqs, setMcqs] = useState<{ question: string; options: string[]; answerIndex: number; explanation: string }[]>([]);
@@ -970,7 +995,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
     setAskBusy(true);
     setAskError(null);
     setAskCitations([]);
+    setAskReply('');
     const question = customQuestion?.trim() || `Explain the key clinical content clearly and completely, with mechanisms and any exam-relevant points.`;
+    setAskQuestion(question);
     const contextText = askContext.trim();
     try {
       let webBlock = '';
@@ -1072,8 +1099,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
     let pool: Awaited<ReturnType<typeof createOcrPool>> | null = null;
     const failures: string[] = [];
     // One worker for a single page; bounded parallelism for a whole book so every worker is
-    // actually busy. Rendering stays per-page, but K pages can be in flight at once.
-    const K = scope === 'current' ? 1 : Math.min(3, Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
+    // actually busy. The pool size comes from Settings (1–16, default = spare cores).
+    const K = scope === 'current' ? 1 : Math.max(1, ocrConcurrency());
     const measure = document.createElement('canvas').getContext('2d')!;
     try {
       pool = await createOcrPool(K);
@@ -1384,7 +1411,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
 
   // ============================ render ============================
 
-  const providerLabel = getActiveProvider() ? `${getActiveProvider()} · ${getEffectiveModel(getActiveProvider()!)}` : 'no active provider';
+  const activeAskProvider = getActiveProvider();
+  const providerLabel = activeAskProvider ? `${activeAskProvider} · ${getEffectiveModel(activeAskProvider)}` : 'no active provider';
   const activeDoc = docs.find((d) => d.id === activeDocId);
 
   return (
@@ -1978,7 +2006,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
 
         {/* Right: notes/highlights + Ask AI */}
         {showNotes && (
-          <div className="hidden lg:flex flex-col w-72 shrink-0 bg-white rounded-2xl border border-slate-200 shadow-sm">
+          <div className="hidden lg:flex flex-col w-80 shrink-0 bg-white rounded-2xl border border-slate-200 shadow-sm">
             <div className="p-3 border-b border-slate-100 flex items-center justify-between">
               <div className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
                 <StickyNote className="w-3.5 h-3.5 text-amber-500" /> Highlights &amp; notes
@@ -1986,103 +2014,264 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
               <button onClick={() => setShowNotes(false)} className="text-slate-400 hover:text-slate-600"><X className="w-3.5 h-3.5" /></button>
             </div>
 
-            {/* Ask AI mini-panel */}
-            <div className="p-3 border-b border-slate-100 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-[#0f8b8d] flex items-center gap-1">
-                  <Sparkles className="w-3 h-3" /> Ask AI · {askContextLabel}
-                </span>
-                <span className="text-[9px] font-mono text-slate-400">{providerLabel}</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <button
-                  onClick={() => setAskIncludeWeb(!askIncludeWeb)}
-                  className={`text-[10px] font-semibold px-2 py-1 rounded-full border flex items-center gap-1 ${
-                    askIncludeWeb ? 'bg-teal-50 border-[#0f8b8d]/40 text-[#00696b]' : 'bg-slate-50 border-slate-200 text-slate-500'
-                  }`}
-                  title="Include live web + PubMed sources in the answer context"
-                >
-                  <Globe className="w-3 h-3" /> web sources {askIncludeWeb ? 'on' : 'off'}
-                </button>
-                <button onClick={() => setAskPanel(false)} className="text-slate-400 hover:text-slate-600 ml-auto"><X className="w-3.5 h-3.5" /></button>
-              </div>
-              {(askPanel || askReply) && (
-                <div className="space-y-2">
-                  <div className="flex gap-1.5">
-                    <button
-                      onClick={() => askAi()}
-                      disabled={askBusy}
-                      className="flex-1 px-2 py-1.5 rounded-lg bg-[#001432] text-white text-[10px] font-bold disabled:opacity-40 flex items-center justify-center gap-1"
-                    >
-                      {askBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-[#8ff3f4]" />}
-                      Explain {askContextLabel}
-                    </button>
-                    <button
-                      onClick={() => generateMcqs()}
-                      disabled={mcqBusy || !getActiveProvider()}
-                      className="px-2 py-1.5 rounded-lg bg-amber-500/90 hover:bg-amber-500 text-white text-[10px] font-bold disabled:opacity-40 flex items-center gap-1"
-                    >
-                      {mcqBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <GraduationCap className="w-3 h-3" />}
-                      MCQs
-                    </button>
+            {/* Ask AI panel — context-first assistant rail */}
+            <div className="border-b border-slate-100 bg-gradient-to-br from-white to-teal-50/50 p-3 space-y-2.5">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-7 h-7 rounded-lg bg-[#001432] flex items-center justify-center shrink-0 shadow-xs">
+                    <Sparkles className="w-3.5 h-3.5 text-[#8ff3f4]" />
                   </div>
-                  <textarea
-                    placeholder="Type a custom question and press Enter…"
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        askAi((e.target as HTMLTextAreaElement).value);
-                        (e.target as HTMLTextAreaElement).value = '';
-                      }
-                    }}
-                    className="w-full text-[10px] px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50 focus:outline-none focus:ring-1 focus:ring-[#0f8b8d] resize-none"
-                    rows={2}
-                  />
-                  {askError && (
-                    <div className="text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2 py-1.5">{askError}</div>
-                  )}
-                  {askReply && (
-                    <div className="text-[10px] leading-relaxed text-slate-800 max-h-40 overflow-y-auto whitespace-pre-wrap p-2 bg-teal-50/50 border border-[#0f8b8d]/20 rounded-lg">
-                      {askReply}
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-bold text-slate-900 leading-tight">Ask AI</div>
+                    <div className="text-[9px] text-slate-500 truncate">
+                      <span className="capitalize">{askContextLabel}</span> · grounded in this passage
                     </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  {activeAskProvider ? (
+                    <span
+                      className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-white border border-teal-200 text-[#00696b] max-w-[96px] truncate"
+                      title={providerLabel}
+                    >
+                      {activeAskProvider} · {getEffectiveModel(activeAskProvider)}
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => onNavigate('settings')}
+                      className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 border border-amber-200 text-amber-800"
+                    >
+                      Connect AI
+                    </button>
                   )}
-                  {askCitations.length > 0 && (
-                    <div className="text-[9px] font-mono text-slate-500 max-h-14 overflow-y-auto">
-                      {askCitations.map((c, i) => <div key={i} className="truncate">{c}</div>)}
-                    </div>
-                  )}
-                  {mcqs.length > 0 && (
-                    <div className="space-y-2 max-h-64 overflow-y-auto">
-                      {mcqs.map((q, qi) => (
-                        <div key={qi} className="p-2 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5">
-                          <div className="text-[10px] font-semibold text-slate-800">{qi + 1}. {q.question}</div>
-                          {q.options.map((o, oi) => (
-                            <div key={oi} className="text-[10px] text-slate-600 pl-2">
-                              {String.fromCharCode(65 + oi)}. {o}
-                            </div>
-                          ))}
-                          <button
-                            onClick={() => setShowMcqAnswers((prev) => ({ ...prev, [qi]: !prev[qi] }))}
-                            className="text-[9px] font-bold text-[#0f8b8d] underline"
-                          >
-                            {showMcqAnswers[qi] ? 'Hide answer' : 'Reveal answer'}
-                          </button>
-                          {showMcqAnswers[qi] && (
-                            <div className="text-[10px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-1">
-                              {String.fromCharCode(65 + q.answerIndex)}. {q.explanation}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <button
+                    onClick={() => setAskPanel(false)}
+                    title="Hide the answer"
+                    className="text-slate-400 hover:text-slate-600 p-0.5"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {!activeAskProvider && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-[10px] leading-snug text-amber-800">
+                  No AI provider is active.{' '}
+                  <button onClick={() => onNavigate('settings')} className="font-bold underline decoration-dotted">
+                    Connect one in Settings
+                  </button>{' '}
+                  to ask about this page.
                 </div>
               )}
-              {!askPanel && !askReply && (
-                <p className="text-[10px] text-slate-400 leading-relaxed">
-                  Select text in the page and press <strong>Ask AI</strong>, or use the toolbar button to use the whole page.
-                </p>
+
+              {/* One-tap prompts: the fastest path from reading to an answer */}
+              <div className="flex gap-1 overflow-x-auto pb-0.5 -mb-0.5">
+                {ASK_QUICK_PROMPTS.map((preset) => (
+                  <button
+                    key={preset.label}
+                    onClick={() => askAi(preset.question)}
+                    disabled={askBusy}
+                    title={preset.question}
+                    className="shrink-0 text-[9px] font-semibold px-2 py-1 rounded-full bg-white border border-slate-200 text-slate-600 hover:border-[#0f8b8d]/50 hover:text-[#0f8b8d] disabled:opacity-40 transition-colors"
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Web sources switch */}
+              <button
+                onClick={() => setAskIncludeWeb(!askIncludeWeb)}
+                className={`w-full flex items-center justify-between gap-2 rounded-lg border px-2 py-1.5 transition-colors ${
+                  askIncludeWeb
+                    ? 'bg-teal-50 border-[#0f8b8d]/40 text-[#00696b]'
+                    : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300'
+                }`}
+                title="Include live web + PubMed sources in the answer context"
+              >
+                <span className="flex items-center gap-1.5 text-[10px] font-semibold">
+                  <Globe className="w-3 h-3" /> Live web sources
+                </span>
+                <span className={`relative w-7 h-3.5 rounded-full transition-colors ${askIncludeWeb ? 'bg-[#0f8b8d]' : 'bg-slate-300'}`}>
+                  <span className={`absolute top-0.5 w-2.5 h-2.5 rounded-full bg-white transition-all ${askIncludeWeb ? 'left-3.5' : 'left-0.5'}`} />
+                </span>
+              </button>
+
+              {/* Conversation */}
+              <div className="space-y-2">
+                {askQuestion && (askBusy || askReply || askError) && (
+                  <div className="flex justify-end">
+                    <div className="max-w-[92%] rounded-xl rounded-br-sm bg-[#13294b] px-2 py-1.5 text-[10px] leading-snug text-white/90">
+                      {askQuestion}
+                    </div>
+                  </div>
+                )}
+
+                {askBusy ? (
+                  <div className="rounded-xl border border-slate-200 bg-white p-2 space-y-1.5">
+                    <div className="flex items-center gap-1.5 text-[9px] font-semibold text-[#0f8b8d]">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Reading {askContextLabel}…
+                    </div>
+                    <div className="h-1.5 rounded bg-slate-100 animate-pulse" />
+                    <div className="h-1.5 rounded bg-slate-100 animate-pulse w-5/6" />
+                    <div className="h-1.5 rounded bg-slate-100 animate-pulse w-2/3" />
+                  </div>
+                ) : askReply ? (
+                  <div className="rounded-xl border border-teal-200/70 bg-white shadow-xs overflow-hidden">
+                    <div className="flex items-center justify-between px-2 py-1 border-b border-slate-100">
+                      <span className="text-[9px] font-bold uppercase tracking-wider text-[#0f8b8d] flex items-center gap-1">
+                        <Sparkles className="w-2.5 h-2.5" /> Answer
+                      </span>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard?.writeText(askReply).then(() => {
+                            setAskCopied(true);
+                            setTimeout(() => setAskCopied(false), 1500);
+                          }).catch(() => {});
+                        }}
+                        title="Copy the answer"
+                        className="text-slate-400 hover:text-[#0f8b8d] p-0.5"
+                      >
+                        {askCopied ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                      </button>
+                    </div>
+                    <div className="p-2 text-[10px] leading-relaxed text-slate-800 max-h-56 overflow-y-auto whitespace-pre-wrap">
+                      {askReply}
+                    </div>
+                  </div>
+                ) : !askError ? (
+                  <div className="rounded-xl border border-dashed border-slate-200 bg-white/70 px-2.5 py-3 text-center space-y-1">
+                    <Sparkles className="w-4 h-4 text-slate-300 mx-auto" />
+                    <p className="text-[10px] font-semibold text-slate-600">Select text on the page, or ask about the whole page</p>
+                    <p className="text-[9px] leading-snug text-slate-400">
+                      Answers stay inside this passage{askIncludeWeb ? ' plus the live sources' : ''} — nothing is invented.
+                    </p>
+                  </div>
+                ) : null}
+
+                {askError && (
+                  <div className="text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2 py-1.5 flex items-start gap-1.5">
+                    <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
+                    <span>{askError}</span>
+                  </div>
+                )}
+
+                {askCitations.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {askCitations.map((citation, i) => {
+                      const url = citation.match(/https?:\/\/\S+/)?.[0];
+                      const label = citation.replace(/^-?\s*W\d+:\s*/, '').replace(/https?:\/\/\S+/, '').replace(/[()]/g, '').trim();
+                      return url ? (
+                        <a
+                          key={i}
+                          href={url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={url}
+                          className="max-w-full truncate text-[9px] font-mono px-1.5 py-0.5 rounded border border-slate-200 bg-white text-[#00696b] hover:border-[#0f8b8d]/50"
+                        >
+                          {label || `Source ${i + 1}`}
+                        </a>
+                      ) : (
+                        <span key={i} className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-slate-200 bg-white text-slate-500">
+                          {citation}
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Practice questions from the same passage */}
+              {mcqs.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[9px] font-bold uppercase tracking-wider text-amber-600 flex items-center gap-1">
+                      <GraduationCap className="w-3 h-3" /> Practice questions
+                    </span>
+                    <span className="text-[9px] font-mono text-slate-400">{mcqs.length} items</span>
+                  </div>
+                  <div className="space-y-2 max-h-64 overflow-y-auto pr-0.5">
+                    {mcqs.map((q, qi) => (
+                      <div key={qi} className="p-2 bg-white border border-slate-200 rounded-lg space-y-1.5 shadow-xs">
+                        <div className="text-[10px] font-semibold text-slate-800 leading-snug">{qi + 1}. {q.question}</div>
+                        <div className="space-y-0.5">
+                          {q.options.map((o, oi) => (
+                            <div key={oi} className="text-[10px] text-slate-600 pl-2">
+                              <span className="font-mono text-slate-400">{String.fromCharCode(65 + oi)}.</span> {o}
+                            </div>
+                          ))}
+                        </div>
+                        <button
+                          onClick={() => setShowMcqAnswers((prev) => ({ ...prev, [qi]: !prev[qi] }))}
+                          className="text-[9px] font-bold text-[#0f8b8d] hover:underline"
+                        >
+                          {showMcqAnswers[qi] ? 'Hide answer' : 'Reveal answer'}
+                        </button>
+                        {showMcqAnswers[qi] && (
+                          <div className="text-[10px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-1 leading-snug">
+                            <span className="font-bold">{String.fromCharCode(65 + q.answerIndex)}.</span> {q.explanation}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
+
+              {/* Composer */}
+              <div className="rounded-xl border border-slate-200 bg-white focus-within:border-[#0f8b8d] focus-within:ring-2 focus-within:ring-[#0f8b8d]/20 transition-shadow">
+                <textarea
+                  value={askInput}
+                  onChange={(e) => setAskInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      const question = askInput.trim();
+                      if (!question || askBusy) return;
+                      setAskInput('');
+                      askAi(question);
+                    }
+                  }}
+                  placeholder={`Ask about ${askContextLabel}…`}
+                  rows={2}
+                  className="w-full text-[10px] px-2 pt-1.5 pb-1 bg-transparent resize-none focus:outline-none placeholder:text-slate-400"
+                />
+                <div className="flex items-center justify-between px-1.5 pb-1.5">
+                  <span className="text-[8px] text-slate-400">Enter to send · Shift+Enter for a new line</span>
+                  <button
+                    onClick={() => {
+                      const question = askInput.trim();
+                      if (!question || askBusy) return;
+                      setAskInput('');
+                      askAi(question);
+                    }}
+                    disabled={!askInput.trim() || askBusy}
+                    title="Send"
+                    className="w-6 h-6 rounded-lg bg-[#001432] text-white flex items-center justify-center disabled:opacity-30 hover:bg-[#13294b] transition-colors"
+                  >
+                    {askBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={() => generateMcqs()}
+                  disabled={mcqBusy || !activeAskProvider}
+                  className="text-[9px] font-bold px-2 py-1 rounded-lg bg-amber-500/90 hover:bg-amber-500 text-white disabled:opacity-40 flex items-center gap-1"
+                >
+                  {mcqBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <GraduationCap className="w-3 h-3" />}
+                  Generate MCQs
+                </button>
+                <button
+                  onClick={() => askAi()}
+                  disabled={askBusy || !activeAskProvider}
+                  className="text-[9px] font-bold px-2 py-1 rounded-lg border border-slate-200 bg-white text-slate-700 hover:border-[#0f8b8d]/40 hover:text-[#0f8b8d] disabled:opacity-40 flex items-center gap-1"
+                >
+                  <Sparkles className="w-3 h-3" /> Explain {askContextLabel}
+                </button>
+              </div>
             </div>
 
             {/* Saved highlights list */}

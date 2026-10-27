@@ -48,6 +48,10 @@ export interface ClinicalQuestion {
   selectedOption?: 'A' | 'B' | 'C' | 'D' | 'E';
   image?: string;
   imageCaption?: string;
+  imageSourceUrl?: string;
+  /** What the model asked to illustrate, used to pick a verified library picture. */
+  figureQuery?: string;
+  figureModality?: string;
   trapType?: string;
   trapExplanation?: string;
   boardPearl: string;
@@ -116,7 +120,7 @@ export interface AvailableModel {
 export interface AIProvider {
   id: string;
   name: string;
-  brand: 'openai' | 'anthropic' | 'google' | 'xai' | 'deepseek' | 'ollama';
+  brand: 'openai' | 'anthropic' | 'google' | 'xai' | 'deepseek' | 'ollama' | 'opencode';
   model: string;
   availableModels: AvailableModel[];
   status: 'active' | 'connected' | 'ready' | 'offline_ready' | 'standby';

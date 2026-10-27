@@ -11,6 +11,9 @@ import {
   Square,
   MessageSquarePlus,
   ChevronsUpDown,
+  Save,
+  Trash2,
+  Wand2,
 } from 'lucide-react';
 import { ExamType, AppView, DifficultyTier, DifficultySubLevel, INISyllabusMode, ClinicalQuestion } from '../types.ts';
 import {
@@ -19,9 +22,21 @@ import {
   AMC_CAT_DOMAINS_6
 } from '../data/mockClinicalData.ts';
 import { SUBTOPICS } from '../data/subtopics.ts';
-import { generateExamQuestions, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel } from '../lib/ai.ts';
+import { generateExamQuestions, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel, aiComplete } from '../lib/ai.ts';
 import { summarizeAttempts, attemptsToday, listAttempts } from '../utils/attemptStore.ts';
 import { listUserHighlights } from '../utils/userHighlightsStore.ts';
+import {
+  listProfiles,
+  createProfile,
+  updateProfile,
+  deleteProfile,
+  getProfile,
+  getActiveProfileId,
+  setActiveProfileId,
+  getDraft,
+  setDraft as persistDraft,
+  type InstructionProfile,
+} from '../utils/instructionProfiles.ts';
 import { TopicPickerModal } from './TopicPickerModal.tsx';
 
 interface PracticeModuleBuilderViewProps {
@@ -207,12 +222,26 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   // Questions kept from an earlier run that a Continue call appends to.
   const appendBaseRef = useRef<ClinicalQuestion[] | null>(null);
 
-  // Suggestion box: a TEMPORARY generation profile. Component state only — never persisted.
-  const [profileDraft, setProfileDraft] = useState('');
-  const [appliedProfile, setAppliedProfile] = useState<string | null>(null);
+  // Saved AI-instruction profiles. The draft is persisted too, so a reload never loses the
+  // text; an applied profile stays wired to the next generation until it is cleared.
+  const [profiles, setProfiles] = useState<InstructionProfile[]>(() => listProfiles());
+  const [activeProfileId, setActiveProfileIdState] = useState<string | null>(() => getActiveProfileId());
+  const [profileDraft, setProfileDraft] = useState<string>(() => getDraft());
+  const [appliedProfile, setAppliedProfile] = useState<string | null>(() => getProfile(getActiveProfileId())?.text ?? null);
+  const [profileName, setProfileName] = useState<string>(() => getProfile(getActiveProfileId())?.name ?? '');
+  const [showSaveRow, setShowSaveRow] = useState(false);
+  const [generatingProfile, setGeneratingProfile] = useState(false);
+  const [profileNotice, setProfileNotice] = useState<string | null>(null);
+
+  // The draft survives a reload even if it was never saved as a named profile.
+  useEffect(() => {
+    persistDraft(profileDraft);
+  }, [profileDraft]);
 
   const [questionTypes, setQuestionTypes] = useState<string[]>([]);
   const [stemPatterns, setStemPatterns] = useState<string[]>([]);
+  /** Attach verified library pictures to the ~1-in-5 image-based items. */
+  const [includeImages, setIncludeImages] = useState<boolean>(true);
   const [evidenceSources, setEvidenceSources] = useState<string[]>([]);
   const [patientGroup, setPatientGroup] = useState<string>('');
   const [presentingProblems, setPresentingProblems] = useState<string[]>([]);
@@ -401,6 +430,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         onRetry: (attempt, maxAttempts, reason) =>
           setRetrying(`retrying ${attempt}/${maxAttempts} · ${reason}`),
         customInstructions: appliedProfile ?? undefined,
+        includeImages,
         questionTypes,
         stemPatterns,
         evidenceSources: selectedExam === 'AMC_CAT' ? evidenceSources : undefined,
@@ -499,6 +529,118 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     const chosenSubtopics = topicsForKeys(keys);
     setPartial(null);
     launchWith(partial, labels, chosenSubtopics);
+  };
+
+  // ------------------------------------------------------------ AI instruction profiles
+
+  const refreshProfiles = () => setProfiles(listProfiles());
+
+  const loadProfile = (id: string) => {
+    if (!id) {
+      setActiveProfileIdState(null);
+      setActiveProfileId(null);
+      setProfileName('');
+      return;
+    }
+    const profile = getProfile(id);
+    if (!profile) return;
+    setProfileDraft(profile.text);
+    setProfileName(profile.name);
+    setAppliedProfile(profile.text);
+    setActiveProfileIdState(profile.id);
+    setActiveProfileId(profile.id);
+    setShowSaveRow(false);
+    setProfileNotice(`Loaded “${profile.name}” — applied to the next generation.`);
+  };
+
+  const defaultProfileName = () =>
+    `${selectedExam.replace('_', '-')} · ${difficultyTier === 'ALL' ? 'mixed' : difficultyTier.toLowerCase()} · ${new Date().toLocaleDateString()}`;
+
+  const handleSaveProfile = () => {
+    const text = profileDraft.trim();
+    if (!text) {
+      setProfileNotice('Write the instructions before saving a profile.');
+      return;
+    }
+    const name = (profileName.trim() || defaultProfileName()).slice(0, 80);
+    const saved = activeProfileId
+      ? updateProfile(activeProfileId, { name, text })
+      : createProfile({ name, text, exam: selectedExam });
+    if (!saved) {
+      setProfileNotice('That profile no longer exists — saving it as a new one instead.');
+      const created = createProfile({ name, text, exam: selectedExam });
+      setActiveProfileId(created.id);
+      setActiveProfileIdState(created.id);
+      setProfileName(created.name);
+    } else {
+      setActiveProfileId(saved.id);
+      setActiveProfileIdState(saved.id);
+      setProfileName(saved.name);
+    }
+    setAppliedProfile(text);
+    refreshProfiles();
+    setShowSaveRow(false);
+    setProfileNotice(`Saved “${name}”. It stays available after a reload.`);
+  };
+
+  const handleDeleteProfile = () => {
+    if (!activeProfileId) return;
+    deleteProfile(activeProfileId);
+    setActiveProfileIdState(null);
+    setShowSaveRow(false);
+    refreshProfiles();
+    setProfileNotice('Profile deleted. The text stays in the box as a draft.');
+  };
+
+  /** Draft a reusable instruction profile from the current builder settings, then save it. */
+  const handleGenerateProfile = async () => {
+    const provider = getActiveProvider();
+    if (!provider) {
+      setProfileNotice(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`);
+      return;
+    }
+    setGeneratingProfile(true);
+    setProfileNotice(null);
+    try {
+      const keys = resolveSubjects();
+      const subjects = labelsFor(keys);
+      const text = await aiComplete({
+        provider,
+        model: getEffectiveModel(provider),
+        system:
+          'You write compact, reusable instruction profiles for an exam-question generator. ' +
+          'Return ONLY the instruction text — no preamble, no markdown fences, no explanation. ' +
+          'Write second-person instructions to the generator (e.g. "Write …", "Avoid …"). ' +
+          'Cover: stem style and length, option design, distractor strategy, reasoning steps, and exam-specific conventions. ' +
+          'Keep it under 700 characters and make it specific enough to change the output.',
+        messages: [{
+          role: 'user',
+          content:
+            `Exam: ${selectedExam.replace('_', '-')}\n` +
+            `Difficulty: ${difficultyTier}${difficultySubLevel ? ` (${difficultySubLevel})` : ''}\n` +
+            `Subjects: ${subjects.slice(0, 8).join(', ') || 'mixed'}\n` +
+            `Writing options: ${[...questionTypes, ...stemPatterns].join('; ') || 'standard'}\n` +
+            (appliedProfile ? `Build on this existing profile:\n"""\n${appliedProfile.slice(0, 600)}\n"""\n` : '') +
+            'Write the reusable instruction profile now.',
+        }],
+      });
+      const clean = text.trim().replace(/^```[a-z]*\s*/i, '').replace(/```$/, '').trim().slice(0, 1400);
+      if (!clean) throw new Error('The provider returned an empty profile.');
+      const name = `${selectedExam.replace('_', '-')} · ${difficultyTier === 'ALL' ? 'mixed' : difficultyTier.toLowerCase()} · AI profile`;
+      const created = createProfile({ name, text: clean, exam: selectedExam });
+      setProfileDraft(clean);
+      setProfileName(created.name);
+      setAppliedProfile(clean);
+      setActiveProfileId(created.id);
+      setActiveProfileIdState(created.id);
+      setShowSaveRow(false);
+      refreshProfiles();
+      setProfileNotice(`Generated and saved “${created.name}”. Applied to the next generation.`);
+    } catch (err: any) {
+      setProfileNotice(err?.message || 'Could not generate a profile.');
+    } finally {
+      setGeneratingProfile(false);
+    }
   };
 
   // ------------------------------------------------------------ history
@@ -749,6 +891,25 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 </div>
               </div>
 
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-[11px] font-bold text-slate-800">Include image-based questions</div>
+                  <p className="text-[10px] text-slate-500 leading-snug">
+                    About 1 in 5 items get a real ECG / X-ray / CT / histology / clinical photo from the verified library.
+                    Text-only items still work if no picture matches.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIncludeImages((v) => !v)}
+                  className={`relative w-9 h-5 rounded-full shrink-0 mt-0.5 transition-colors ${includeImages ? 'bg-[#0f8b8d]' : 'bg-slate-300'}`}
+                  aria-pressed={includeImages}
+                  title={includeImages ? 'Image-based items are on' : 'Image-based items are off'}
+                >
+                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${includeImages ? 'left-[18px]' : 'left-0.5'}`} />
+                </button>
+              </div>
+
               {selectedExam === 'AMC_CAT' && (
                 <>
                   <button onClick={() => setShowAmcOptions((v) => !v)} className="text-[11px] font-bold text-[#0f8b8d] hover:underline">
@@ -866,18 +1027,48 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             )}
           </div>
 
-          {/* Suggestion box — temporary generation profile */}
+          {/* AI instruction profiles — saved, reusable, and generated on demand */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-2.5">
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
                 <MessageSquarePlus className="w-4 h-4 text-[#0f8b8d]" /> AI instructions
               </h3>
-              <span className="text-[9px] font-mono text-slate-400">temporary · never saved</span>
+              <span className="text-[9px] font-mono text-slate-400">
+                {profiles.length} saved profile{profiles.length === 1 ? '' : 's'}
+              </span>
             </div>
             <p className="text-[10px] leading-relaxed text-slate-500">
               Tell the AI how to write <span className="italic">this</span> set — style, difficulty, stem length,
-              distractors, focus. Applies to the next generation only; a reload clears it.
+              distractors, focus. Save it as a named profile and reuse it on any future run.
             </p>
+
+            {profiles.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={activeProfileId ?? ''}
+                  onChange={(e) => loadProfile(e.target.value)}
+                  disabled={genState.busy}
+                  className="flex-1 min-w-0 text-[11px] px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-700 focus:outline-none focus:border-[#0f8b8d] disabled:opacity-50"
+                >
+                  <option value="">Load a saved profile…</option>
+                  {profiles.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+                {activeProfileId && (
+                  <button
+                    type="button"
+                    onClick={handleDeleteProfile}
+                    disabled={genState.busy}
+                    title="Delete this profile"
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-40"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
+
             <textarea
               value={profileDraft}
               onChange={(e) => setProfileDraft(e.target.value)}
@@ -886,27 +1077,77 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               placeholder={'e.g. "closer distractors, shorter stems, more next-best-step items, use Indian guidelines, drop classic one-liners"'}
               className="w-full resize-y rounded-lg bg-slate-50 border border-slate-200 px-2.5 py-2 text-[11px] text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-[#0f8b8d] disabled:opacity-50"
             />
-            <div className="flex items-center gap-2">
+
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={() => setAppliedProfile(profileDraft.trim() || null)}
                 disabled={genState.busy || !profileDraft.trim() || (appliedProfile ?? '') === profileDraft.trim()}
-                className="flex-1 py-1.5 rounded-lg bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 disabled:cursor-not-allowed text-white text-[10px] font-bold transition-colors"
+                className="flex-1 min-w-[110px] py-1.5 rounded-lg bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 disabled:cursor-not-allowed text-white text-[10px] font-bold transition-colors"
               >
-                {appliedProfile && appliedProfile === profileDraft.trim() ? 'Profile applied' : 'Apply temporary profile'}
+                {appliedProfile && appliedProfile === profileDraft.trim() ? 'Profile applied' : 'Apply to next run'}
               </button>
               <button
-                onClick={() => { setAppliedProfile(null); setProfileDraft(''); }}
-                disabled={genState.busy || (!appliedProfile && !profileDraft.trim())}
+                onClick={() => { setProfileDraft(''); persistDraft(''); }}
+                disabled={genState.busy || !profileDraft.trim()}
                 className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 text-[10px] font-semibold transition-colors"
               >
-                Clear
+                Clear draft
               </button>
             </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={handleGenerateProfile}
+                disabled={genState.busy || generatingProfile}
+                title="Ask the active AI to draft a reusable instruction profile from these settings, then save it"
+                className="px-2.5 py-1.5 rounded-lg border border-[#0f8b8d]/30 bg-teal-50 text-[#00696b] hover:bg-[#0f8b8d]/10 disabled:opacity-40 text-[10px] font-bold flex items-center gap-1.5 transition-colors"
+              >
+                <Wand2 className="w-3.5 h-3.5" />
+                {generatingProfile ? 'Generating…' : 'Generate profile'}
+              </button>
+              <button
+                onClick={() => setShowSaveRow((v) => !v)}
+                disabled={genState.busy || !profileDraft.trim()}
+                className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 hover:border-[#0f8b8d]/40 hover:text-[#0f8b8d] disabled:opacity-40 text-[10px] font-bold flex items-center gap-1.5 transition-colors"
+              >
+                <Save className="w-3.5 h-3.5" />
+                {activeProfileId ? 'Save changes' : 'Save profile'}
+              </button>
+            </div>
+
+            {showSaveRow && (
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={profileName}
+                  onChange={(e) => setProfileName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleSaveProfile(); }}
+                  placeholder={defaultProfileName()}
+                  className="flex-1 min-w-0 text-[11px] px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:border-[#0f8b8d]"
+                />
+                <button
+                  onClick={handleSaveProfile}
+                  className="px-2.5 py-1.5 rounded-lg bg-[#001432] hover:bg-[#13294b] text-white text-[10px] font-bold"
+                >
+                  Save
+                </button>
+                <button
+                  onClick={() => setShowSaveRow(false)}
+                  className="px-2 py-1.5 rounded-lg text-slate-500 hover:bg-slate-100 text-[10px] font-semibold"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+
+            {profileNotice && (
+              <p className="text-[10px] text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5">{profileNotice}</p>
+            )}
             {appliedProfile && appliedProfile !== profileDraft.trim() && (
               <p className="text-[10px] text-amber-600">Unapplied changes — press Apply to use the edited text.</p>
             )}
             {appliedProfile && appliedProfile === profileDraft.trim() && (
-              <p className="text-[10px] text-[#0f8b8d]">Active for the next generation only · not saved.</p>
+              <p className="text-[10px] text-[#0f8b8d]">Active for the next generation{activeProfileId ? ' · saved profile' : ''}.</p>
             )}
           </div>
 

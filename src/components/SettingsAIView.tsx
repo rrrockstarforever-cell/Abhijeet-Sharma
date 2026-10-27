@@ -17,7 +17,9 @@ import {
   LogOut,
   Radio,
   RefreshCw,
-  Search
+  Search,
+  ScanText,
+  Boxes
 } from 'lucide-react';
 import { AIProvider } from '../types.ts';
 import {
@@ -32,6 +34,13 @@ import {
   getEffectiveModel,
 } from '../lib/ai.ts';
 import { DataBackupPanel } from './DataBackupPanel.tsx';
+import {
+  MIN_OCR_WORKERS,
+  MAX_OCR_WORKERS,
+  defaultOcrWorkers,
+  getOcrWorkers,
+  setOcrWorkers,
+} from '../utils/ocr.ts';
 
 // Local provider catalog for the 4 REAL providers (no mock latency/verified numbers).
 // Connection state is always fetched live from GET /api/oauth/status.
@@ -97,6 +106,25 @@ const REAL_PROVIDERS: AIProvider[] = [
       { id: DEFAULT_MODELS.grok, name: 'Grok 4.7 (Default)', description: 'Current default', latencyEstimate: '—', contextWindow: '—' },
     ]
   },
+  {
+    id: 'opencode',
+    name: 'OpenCode (Console / Go)',
+    brand: 'opencode',
+    model: DEFAULT_MODELS.opencode,
+    status: 'ready',
+    type: 'API Key (OpenCode Console)',
+    features: ['Console / Go API key', 'OpenAI-compatible gateway'],
+    isDefault: false,
+    isSignedIn: false,
+    hasTokenConfigured: false,
+    availableModels: [
+      { id: DEFAULT_MODELS.opencode, name: 'DeepSeek V4.1 Flash (Default)', description: 'Default fast model', latencyEstimate: '—', contextWindow: '—' },
+      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', description: 'Anthropic via OpenCode', latencyEstimate: '—', contextWindow: '—' },
+      { id: 'gpt-6.1-sol', name: 'GPT 6.1 Sol', description: 'OpenAI via OpenCode', latencyEstimate: '—', contextWindow: '—' },
+      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', description: 'Google via OpenCode', latencyEstimate: '—', contextWindow: '—' },
+      { id: 'kimi-k3', name: 'Kimi K3', description: 'Moonshot via OpenCode', latencyEstimate: '—', contextWindow: '—' },
+    ]
+  },
 ];
 
 function getClientSessionId(): string {
@@ -138,10 +166,18 @@ export const SettingsAIView: React.FC = () => {
   const [authSuccess, setAuthSuccess] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
 
-  // Gemini API key state (the one provider that uses a key)
-  const [geminiKeyInput, setGeminiKeyInput] = useState<string>('');
+  // Key-based providers (Gemini, OpenCode): the pasted key never leaves the local server.
+  const [keyInput, setKeyInput] = useState<string>('');
   const [isSavingKey, setIsSavingKey] = useState<boolean>(false);
   const [keySavedMsg, setKeySavedMsg] = useState<string | null>(null);
+
+  // OCR worker pool (1–16) — persisted so whole-book OCR keeps the chosen parallelism.
+  const [ocrWorkers, setOcrWorkersState] = useState<number>(() => getOcrWorkers());
+  const cpuThreads = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 0 : 0;
+  const recommendedWorkers = defaultOcrWorkers();
+  const updateOcrWorkers = (n: number) => {
+    setOcrWorkersState(setOcrWorkers(n));
+  };
 
   // Optional live model catalog (models.dev via the local server) — suggestions only,
   // any model id can still be typed manually.
@@ -274,11 +310,12 @@ export const SettingsAIView: React.FC = () => {
     setKeySavedMsg(null);
     setCopied(false);
     setClaudeInputCode('');
+    setKeyInput('');
     setDeviceCodeData(null);
     setPkceData(null);
 
-    if (provider.id === 'gemini') {
-      // Gemini uses a user-pasted API key handled inside the modal.
+    if (provider.id === 'gemini' || provider.id === 'opencode') {
+      // Key-based providers: the pasted key is handled inside the modal.
       setIsLoadingFlow(false);
       return;
     }
@@ -446,14 +483,16 @@ export const SettingsAIView: React.FC = () => {
     }
   };
 
-  // Save the Gemini API key (server stores it in the user's data dir, never in the repo)
-  const handleSaveGeminiKey = async () => {
-    const key = geminiKeyInput.trim();
-    if (!key) return;
+  // Save the pasted key (Gemini or OpenCode); the server stores it in the user's data dir.
+  const handleSaveKey = async () => {
+    const key = keyInput.trim();
+    if (!key || !selectedProvider) return;
+    const endpoint = selectedProvider.id === 'opencode' ? '/api/settings/opencode-key' : '/api/settings/gemini-key';
+    const label = selectedProvider.id === 'opencode' ? 'OpenCode' : 'Gemini';
     setIsSavingKey(true);
     setAuthError(null);
     try {
-      const res = await fetch('/api/settings/gemini-key', {
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -463,9 +502,10 @@ export const SettingsAIView: React.FC = () => {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || 'Could not save the API key.');
-      setKeySavedMsg('API key saved and active. Gemini is now connected.');
-      setGeminiKeyInput('');
+      setKeySavedMsg(`API key saved and active. ${label} is now connected.`);
+      setKeyInput('');
       await fetchOAuthStatus();
+      await loadAccountModels(true, selectedProvider.id);
       setTimeout(() => setSelectedProvider(null), 1200);
     } catch (err: any) {
       setAuthError(err.message || 'Could not save the API key.');
@@ -559,7 +599,7 @@ export const SettingsAIView: React.FC = () => {
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     setIsPolling(false);
     setKeySavedMsg(null);
-    setGeminiKeyInput('');
+    setKeyInput('');
     setSelectedProvider(null);
   };
 
@@ -579,7 +619,7 @@ export const SettingsAIView: React.FC = () => {
               AI Subscriptions, Model Tokens & Local Engine
             </h1>
             <p className="text-slate-300 text-sm mt-1 max-w-2xl">
-              Sign in with your Claude Pro, ChatGPT Plus, or Grok subscription, or add your Gemini API key — then route every AI feature through your active model.
+              Sign in with your Claude Pro, ChatGPT Plus, or Grok subscription, paste a Gemini key, or route through OpenCode (Console / Go) — then route every AI feature through your active model.
             </p>
           </div>
 
@@ -636,6 +676,79 @@ export const SettingsAIView: React.FC = () => {
             </div>
           </div>
 
+          {/* OCR engine pool — whole-book OCR runs this many Tesseract workers in parallel */}
+          <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <ScanText className="w-4 h-4 text-[#0f8b8d]" /> OCR Engine & Worker Pool
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Tesseract workers used for scanned pages and whole-book OCR
+                </p>
+              </div>
+              <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
+                {ocrWorkers} / {MAX_OCR_WORKERS}
+              </span>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-slate-600 font-semibold">Parallel workers</span>
+                <span className="font-mono font-bold text-[#0f8b8d]">{ocrWorkers}</span>
+              </div>
+              <input
+                type="range"
+                min={MIN_OCR_WORKERS}
+                max={MAX_OCR_WORKERS}
+                step={1}
+                value={ocrWorkers}
+                onChange={(e) => updateOcrWorkers(Number(e.target.value))}
+                className="w-full accent-[#0f8b8d] cursor-pointer"
+                aria-label="OCR worker count"
+              />
+              <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                <span>{MIN_OCR_WORKERS}</span>
+                <span>{MAX_OCR_WORKERS} (max)</span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-1.5">
+              {[1, 2, 3, 4, 6, 8, 12, 16].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => updateOcrWorkers(n)}
+                  className={`text-[10px] font-bold px-2 py-1 rounded-md border transition-colors ${
+                    ocrWorkers === n
+                      ? 'bg-[#0f8b8d] text-white border-[#0f8b8d]'
+                      : 'bg-white text-slate-600 border-slate-200 hover:border-[#0f8b8d]/40 hover:text-[#0f8b8d]'
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-between text-[10px]">
+              <span className="text-slate-500">
+                Detected CPU threads: <span className="font-mono font-bold text-slate-700">{cpuThreads || 'unknown'}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => updateOcrWorkers(recommendedWorkers)}
+                className="font-bold text-[#0f8b8d] hover:underline"
+              >
+                Use recommended ({recommendedWorkers})
+              </button>
+            </div>
+
+            <p className="text-[10px] leading-relaxed text-slate-500">
+              More workers scan a book faster. Each worker loads its own Tesseract engine (roughly 60–100 MB of RAM),
+              so stay near your spare CPU threads. The new pool size applies to the next OCR job.
+            </p>
+          </div>
+
           {/* Privacy Guard */}
           <div className="bg-slate-900 rounded-2xl p-5 text-white border border-slate-800 shadow-sm space-y-3">
             <div className="flex items-center gap-2 text-xs font-bold text-emerald-400 uppercase tracking-wider">
@@ -655,7 +768,7 @@ export const SettingsAIView: React.FC = () => {
                 <Sparkles className="w-4 h-4 text-amber-500" /> AI Subscription Hub & Model Routing
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Sign in with your Claude, ChatGPT, or Grok subscription — or paste a Gemini API key
+                Sign in with your Claude, ChatGPT, or Grok subscription, paste a Gemini key, or use an OpenCode key
               </p>
             </div>
             <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700">
@@ -766,7 +879,9 @@ export const SettingsAIView: React.FC = () => {
                             ? 'bg-gradient-to-br from-amber-600 to-orange-700 text-white'
                             : p.id === 'chatgpt'
                               ? 'bg-gradient-to-br from-emerald-600 to-teal-800 text-white'
-                              : 'bg-gradient-to-br from-slate-800 to-black text-white'
+                              : p.id === 'opencode'
+                                ? 'bg-gradient-to-br from-[#0f8b8d] to-[#001432] text-white'
+                                : 'bg-gradient-to-br from-slate-800 to-black text-white'
                       }`}>
                         {p.name.charAt(0)}
                       </div>
@@ -908,7 +1023,7 @@ export const SettingsAIView: React.FC = () => {
 
                     {/* Controls: Sign In Button or Connected State + Set Active */}
                     <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
-                      {p.id === 'gemini' ? (
+                      {(p.id === 'gemini' || p.id === 'opencode') ? (
                         <div className="flex items-center gap-2">
                           <span className={`text-xs font-bold px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
                             isConnected
@@ -1036,16 +1151,20 @@ export const SettingsAIView: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-slate-900">
-                    {selectedProvider.id === 'gemini' 
+                    {selectedProvider.id === 'gemini'
                       ? 'Gemini API Key'
-                      : `Sign in with ${selectedProvider.name}`}
+                      : selectedProvider.id === 'opencode'
+                        ? 'OpenCode API Key'
+                        : `Sign in with ${selectedProvider.name}`}
                   </h3>
                   <p className="text-xs text-slate-500">
                     {selectedProvider.id === 'claude' 
                       ? 'Paste-Code Authorization Flow' 
                       : selectedProvider.id === 'gemini'
                         ? 'Key saved locally — never shown again'
-                        : 'Device Authorization Flow (RFC 8628)'}
+                        : selectedProvider.id === 'opencode'
+                          ? 'Console / Go key saved locally — never shown again'
+                          : 'Device Authorization Flow (RFC 8628)'}
                   </p>
                 </div>
               </div>
@@ -1059,7 +1178,7 @@ export const SettingsAIView: React.FC = () => {
 
             {/* This is the real local flow, not a web demo: the code comes from the
                 provider right now and the token is stored on this computer only. */}
-            {selectedProvider.id !== 'gemini' && (
+            {selectedProvider.id !== 'gemini' && selectedProvider.id !== 'opencode' && (
               <p className="text-[11px] leading-relaxed text-slate-600 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
                 {selectedProvider.id === 'claude'
                   ? 'Open the Claude approval page, sign in, then paste the code Claude shows you. The token stays on this computer.'
@@ -1090,8 +1209,8 @@ export const SettingsAIView: React.FC = () => {
               </div>
             )}
 
-            {/* Gemini API Key View */}
-            {selectedProvider.id === 'gemini' && (
+            {/* Key-based providers: Gemini and OpenCode */}
+            {(selectedProvider.id === 'gemini' || selectedProvider.id === 'opencode') && (
               <div className="space-y-4 py-2">
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
                   <div className="flex items-center gap-2 font-bold text-slate-800">
@@ -1099,19 +1218,21 @@ export const SettingsAIView: React.FC = () => {
                     <span>Server-Side Key Handling</span>
                   </div>
                   <p className="text-slate-600 leading-relaxed">
-                    Create the key in Google AI Studio and paste it here. It is saved by the local server to your user data directory (<code className="font-mono text-[#0f8b8d]">.env</code>, outside the repo) and is never displayed again or sent back to the browser.
+                    {selectedProvider.id === 'opencode'
+                      ? 'Create an API key in the OpenCode Console (console.opencode.ai) and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser. If you already use the OpenCode CLI on this machine, its stored key is used automatically.'
+                      : 'Create the key in Google AI Studio and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser.'}
                   </p>
                 </div>
 
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-slate-700 block">
-                    Gemini API Key
+                    {selectedProvider.id === 'opencode' ? 'OpenCode API Key' : 'Gemini API Key'}
                   </label>
                   <input
                     type="password"
-                    value={geminiKeyInput}
-                    onChange={(e) => setGeminiKeyInput(e.target.value)}
-                    placeholder="AIza… / your Gemini API key"
+                    value={keyInput}
+                    onChange={(e) => setKeyInput(e.target.value)}
+                    placeholder={selectedProvider.id === 'opencode' ? 'sk-… / your OpenCode Console API key' : 'AIza… / your Gemini API key'}
                     className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
                   />
                 </div>
@@ -1124,8 +1245,8 @@ export const SettingsAIView: React.FC = () => {
                     Cancel
                   </button>
                   <button
-                    onClick={handleSaveGeminiKey}
-                    disabled={isSavingKey || !geminiKeyInput.trim()}
+                    onClick={handleSaveKey}
+                    disabled={isSavingKey || !keyInput.trim()}
                     className="px-4 py-2 text-xs font-bold bg-[#001432] hover:bg-[#13294b] disabled:opacity-40 text-white rounded-xl flex items-center gap-1.5 transition-all"
                   >
                     {isSavingKey ? (

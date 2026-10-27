@@ -38,11 +38,15 @@ app.use(express.json());
 // PROVIDER CONFIG (real providers only)
 // ==========================================
 
+// OpenCode's default model id (Console / Go gateway).
+const OPENCODE_DEFAULT_MODEL = 'deepseek-v4.1-flash';
+
 const DEFAULT_MODELS: Record<string, string> = {
   gemini: 'gemini-3.8-flash',
   chatgpt: 'gpt-6.1-sol',
   claude: 'claude-sonnet-5-5',
   grok: 'grok-4.7',
+  opencode: OPENCODE_DEFAULT_MODEL,
 };
 
 // UI provider ids -> old oauth.mjs internal ids
@@ -76,24 +80,80 @@ function getGemini(): GoogleGenAI | null {
   return geminiClient.client;
 }
 
-// Save the key the user pastes in Settings to <PULSE_DATA_DIR>/.env.
+// Save a secret the user pastes in Settings to <PULSE_DATA_DIR>/.env.
 // Never echo the key back, never write it to the repository.
-function saveGeminiKey(key: string): void {
+function writeEnvValue(name: string, value: string): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   let lines: string[] = [];
   if (fs.existsSync(ENV_FILE)) {
-    lines = fs
-      .readFileSync(ENV_FILE, 'utf8')
-      .split(/\r?\n/)
-      .filter((l) => l.trim() !== '' && !/^GEMINI_API_KEY\s*=/.test(l));
+    const existing = fs.readFileSync(ENV_FILE, 'utf8').split(/\r?\n/);
+    const matcher = new RegExp(`^${name}\\s*=`);
+    lines = existing.filter((l) => l.trim() !== '' && !matcher.test(l));
   }
-  lines.push(`GEMINI_API_KEY=${key}`, '');
+  lines.push(`${name}=${value}`, '');
   fs.writeFileSync(ENV_FILE, lines.join('\n'), 'utf8');
-  process.env.GEMINI_API_KEY = key;
+  process.env[name] = value;
 }
+
+function clearEnvValue(name: string): void {
+  if (fs.existsSync(ENV_FILE)) {
+    const matcher = new RegExp(`^${name}\\s*=`);
+    const lines = fs.readFileSync(ENV_FILE, 'utf8').split(/\r?\n/).filter((l) => l.trim() !== '' && !matcher.test(l));
+    fs.writeFileSync(ENV_FILE, lines.length ? lines.join('\n') + '\n' : '', 'utf8');
+  }
+  delete process.env[name];
+}
+
+function saveGeminiKey(key: string): void {
+  writeEnvValue('GEMINI_API_KEY', key);
+}
+
+// ==========================================
+// OPENCODE (Console / Go inference gateway)
+// ==========================================
+// OpenCode exposes an OpenAI-compatible gateway at https://opencode.ai/inference. Two ways
+// to authenticate, checked in this order:
+//   1. OPENCODE_API_KEY saved from Settings (stored in <PULSE_DATA_DIR>/.env).
+//   2. The key already present in the OpenCode CLI's own auth file, so a signed-in
+//      OpenCode install works with no extra paste.
+const OPENCODE_CHAT_URL = 'https://opencode.ai/inference/openai/v1/chat/completions';
+const OPENCODE_MODELS_URL = 'https://opencode.ai/inference/v1/models';
+
+function opencodeAuthFile(): string {
+  return process.env.OPENCODE_AUTH_FILE || path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json');
+}
+
+function opencodeKeyFromCli(): string {
+  try {
+    const raw = JSON.parse(fs.readFileSync(opencodeAuthFile(), 'utf8'));
+    const entry = raw?.opencode ?? raw?.['opencode-go'] ?? raw?.['opencode-zen'];
+    const key = entry?.key ?? entry?.apiKey ?? entry?.access;
+    return typeof key === 'string' ? key.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+function opencodeKey(): string {
+  return (process.env.OPENCODE_API_KEY || opencodeKeyFromCli()).trim();
+}
+
+/** Save/replace the OpenCode Console API key (never echoed back to the browser). */
+function saveOpenCodeKey(key: string): void {
+  writeEnvValue('OPENCODE_API_KEY', key);
+}
+
+function providerErrorText(body: any, status: number): string {
+  const e = body?.error;
+  if (typeof e === 'string' && e.trim()) return e;
+  if (e && typeof e === 'object') return e.message || e.code || `HTTP ${status}`;
+  return body?.message || `HTTP ${status}`;
+}
+
 
 function isProviderConnected(providerId: string): boolean {
   if (providerId === 'gemini') return Boolean(geminiKey());
+  if (providerId === 'opencode') return Boolean(opencodeKey());
   try {
     const s = oauthStatus();
     if (providerId === 'chatgpt') return Boolean(s.codex);
@@ -106,6 +166,9 @@ function isProviderConnected(providerId: string): boolean {
 function notConnectedMessage(providerId: string): string {
   if (providerId === 'gemini') {
     return 'Gemini is not connected. Add your Gemini API key in Settings → AI Subscription Hub.';
+  }
+  if (providerId === 'opencode') {
+    return 'OpenCode is not connected. Paste your OpenCode Console API key in Settings → AI Subscription Hub.';
   }
   return `${providerId.charAt(0).toUpperCase() + providerId.slice(1)} is not signed in. Connect an AI provider in Settings → AI Subscription Hub.`;
 }
@@ -122,6 +185,45 @@ async function runCompletion(opts: {
   signal?: AbortSignal;
 }): Promise<string> {
   const { provider, model, system, messages, json, effort, search, signal } = opts;
+
+  if (provider === 'opencode') {
+    const key = opencodeKey();
+    if (!key) throw new ApiError(notConnectedMessage('opencode'), 401);
+    const model_ = model || DEFAULT_MODELS.opencode;
+    const payloadMessages = [
+      ...(system ? [{ role: 'system', content: system }] : []),
+      ...messages.map((m) => ({ role: m.role, content: m.content })),
+    ];
+    const r = await fetch(OPENCODE_CHAT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: model_,
+        messages: payloadMessages,
+        temperature: 0.7,
+        ...(json ? { response_format: { type: 'json_object' } } : {}),
+      }),
+      ...(signal ? { signal } : {}),
+    });
+    const body: any = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      aiLog({ provider: 'opencode', model: model_, status: r.status, error: true });
+      throw new ApiError(`OpenCode: ${providerErrorText(body, r.status)}`, r.status === 401 || r.status === 403 ? 401 : 502);
+    }
+    const choice = body?.choices?.[0];
+    const content = choice?.message?.content;
+    const text = Array.isArray(content)
+      ? content.map((part: any) => (typeof part === 'string' ? part : part?.text || '')).join('')
+      : typeof content === 'string'
+        ? content
+        : '';
+    aiLog({ provider: 'opencode', model: model_, status: r.status, finish: choice?.finish_reason, text_len: text.length, json: !!json });
+    if (!text.trim()) {
+      throw new ApiError(`OpenCode returned no text (finishReason: ${choice?.finish_reason || 'unknown'}).`, 502);
+    }
+    return text;
+  }
+
   if (provider === 'gemini') {
     const ai = getGemini();
     if (!ai) throw new ApiError(notConnectedMessage('gemini'), 401);
@@ -160,8 +262,7 @@ async function runCompletion(opts: {
   }
 
   const internal = INTERNAL_PROVIDER[provider];
-  if (!internal) throw new ApiError(`Unknown AI provider: ${provider}`, 400);
-  try {
+  if (!internal) throw new ApiError(`Unknown AI provider: ${provider}`, 400);  try {
     return await oauthChat({
       provider: internal as 'codex' | 'xai' | 'claude',
       model: model || DEFAULT_MODELS[provider],
@@ -196,6 +297,7 @@ app.get('/api/oauth/status', (req: Request, res: Response) => {
       chatgpt: { connected: isProviderConnected('chatgpt') },
       claude: { connected: isProviderConnected('claude') },
       grok: { connected: isProviderConnected('grok') },
+      opencode: { connected: isProviderConnected('opencode') },
     },
     defaults: DEFAULT_MODELS,
   });
@@ -291,6 +393,15 @@ app.post('/api/oauth/complete', async (req: Request, res: Response) => {
 // 5. POST /api/oauth/logout: revoke the locally stored subscription tokens
 app.post('/api/oauth/logout', (req: Request, res: Response) => {
   const { provider } = req.body || {};
+  if (provider === 'opencode') {
+    // The OpenCode key is a plain API key in <PULSE_DATA_DIR>/.env, not an OAuth token.
+    try {
+      clearEnvValue('OPENCODE_API_KEY');
+      return res.json({ ok: true, connected: false, provider });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Could not remove the OpenCode key.' });
+    }
+  }
   const internal = INTERNAL_PROVIDER[provider];
   if (!internal) {
     return res.status(400).json({ error: `Unsupported provider: ${provider}` });
@@ -316,6 +427,21 @@ app.post('/api/settings/gemini-key', (req: Request, res: Response) => {
     return res.json({ ok: true, connected: true });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Could not save the API key.' });
+  }
+});
+
+// 6b. POST /api/settings/opencode-key: save the OpenCode Console API key.
+// NEVER echoes the key back.
+app.post('/api/settings/opencode-key', (req: Request, res: Response) => {
+  const key = String(req.body?.apiKey || '').trim();
+  if (!/^[A-Za-z0-9_.\-]{10,}$/.test(key)) {
+    return res.status(400).json({ error: 'That does not look like a valid OpenCode API key.' });
+  }
+  try {
+    saveOpenCodeKey(key);
+    return res.json({ ok: true, connected: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Could not save the OpenCode API key.' });
   }
 });
 
@@ -372,6 +498,28 @@ async function listProviderModels(uiId: 'claude' | 'grok' | 'chatgpt'): Promise<
   }
 }
 
+async function listOpenCodeModels(): Promise<{ models: { id: string; name: string; source: string }[]; error?: string }> {
+  if (!isProviderConnected('opencode')) return { models: [], error: 'No OpenCode API key saved.' };
+  try {
+    const r = await fetch(OPENCODE_MODELS_URL, {
+      headers: { Authorization: `Bearer ${opencodeKey()}` },
+    });
+    const b: any = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(providerErrorText(b, r.status));
+    const rows: any[] = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
+    return {
+      models: rows
+        .map((m: any) => {
+          const id = String(m?.id ?? m?.name ?? '');
+          return { id, name: String(m?.name || id), source: 'account' };
+        })
+        .filter((m) => m.id),
+    };
+  } catch (e: any) {
+    return { models: [], error: e?.message || 'Could not list OpenCode models.' };
+  }
+}
+
 async function listGeminiModels(): Promise<{ models: { id: string; name: string; source: string }[]; error?: string }> {
   if (!isProviderConnected('gemini')) return { models: [], error: 'No Gemini API key saved.' };
   try {
@@ -394,7 +542,7 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
   const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
   const probe = req.query.probe === '1' || req.query.probe === 'true';
   const only = String(req.query.provider || '').trim();
-  if (only && !['gemini', 'chatgpt', 'claude', 'grok'].includes(only)) {
+  if (only && !['gemini', 'chatgpt', 'claude', 'grok', 'opencode'].includes(only)) {
     return res.status(400).json({ error: `Unknown provider: ${only}` });
   }
   // The full, unprobed list is cacheable; targeted or probed requests are not.
@@ -434,6 +582,12 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
     if (gem.error) errors.gemini = gem.error;
   }
 
+  if (!only || only === 'opencode') {
+    const oc = await listOpenCodeModels();
+    providers.opencode = oc.models;
+    if (oc.error) errors.opencode = oc.error;
+  }
+
   const payload = {
     providers,
     errors,
@@ -450,7 +604,7 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
 app.post('/api/models/probe', async (req: Request, res: Response) => {
   const provider = String(req.body?.provider || '').trim();
   const model = String(req.body?.model || '').trim();
-  if (!['gemini', 'chatgpt', 'claude', 'grok'].includes(provider)) {
+  if (!['gemini', 'chatgpt', 'claude', 'grok', 'opencode'].includes(provider)) {
     return res.status(400).json({ error: 'Choose a provider to test.' });
   }
   if (!model || model.length > 200) {
@@ -471,6 +625,7 @@ const CATALOG_PROVIDER_MAP: Record<string, string> = {
   claude: 'anthropic',
   gemini: 'google',
   grok: 'xai',
+  opencode: 'opencode',
 };
 let modelsCatalogCache: { at: number; payload: any } | null = null;
 
@@ -582,7 +737,7 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
   // The client sends its ACTIVE provider/model; if absent, resolve any connected provider.
   let provider: string = typeof body.provider === 'string' ? body.provider : '';
   if (!provider) {
-    const candidates = ['chatgpt', 'claude', 'grok'];
+    const candidates = ['chatgpt', 'claude', 'grok', 'opencode'];
     provider =
       candidates.find((p) => isProviderConnected(p)) || (isProviderConnected('gemini') ? 'gemini' : '');
   }
@@ -682,7 +837,7 @@ app.post('/api/web/research', async (req: Request, res: Response) => {
 // Legacy provider list endpoint, now reporting ONLY real connection state (no latency fakes).
 app.get('/api/providers/status', (req: Request, res: Response) => {
   res.json({
-    providers: (['gemini', 'chatgpt', 'claude', 'grok'] as string[]).map((id) => ({
+    providers: (['gemini', 'chatgpt', 'claude', 'grok', 'opencode'] as string[]).map((id) => ({
       id,
       model: DEFAULT_MODELS[id],
       connected: isProviderConnected(id),

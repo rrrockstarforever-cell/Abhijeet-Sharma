@@ -4,9 +4,10 @@
 import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } from '../types.ts';
 
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
-export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok';
+import { loadMedicalImages, matchMedicalImage, medicalImageUrl, imageAttribution } from '../utils/medicalImages.ts';
+export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'opencode';
 
-export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok'];
+export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok', 'opencode'];
 
 // Server defaults (mirrored in server.ts); models are user-selectable and persisted
 // in localStorage as `ai.model.<provider>` and sent with every request.
@@ -15,6 +16,8 @@ export const DEFAULT_MODELS: Record<AiProviderId, string> = {
   chatgpt: 'gpt-6.1-sol',
   claude: 'claude-sonnet-5-5',
   grok: 'grok-4.7',
+  // OpenCode Console / Go (https://opencode.ai/inference) — any model id the account has.
+  opencode: 'deepseek-v4.1-flash',
 };
 
 export const NOT_CONNECTED_MESSAGE = 'Connect an AI provider in Settings → AI Subscription Hub.';
@@ -280,6 +283,8 @@ interface BatchQuestionSpec {
   trapType?: string;
   trapExplanation?: string;
   targetAccuracy?: number;
+  figureModality?: string;
+  figureQuery?: string;
 }
 
 export interface GenerateQuestionsOptions {
@@ -297,6 +302,11 @@ export interface GenerateQuestionsOptions {
   presentingProblems?: string[];
   /** "My notes" source: real saved highlights/notes the questions must be derived from. */
   sourceMaterial?: string;
+  /**
+   * Ask for image-based items (~1 in 5) and attach a verified picture from the local
+   * medical-image library when one matches the item's diagnosis.
+   */
+  includeImages?: boolean;
   /**
    * Learner's temporary generation profile (suggestion box in Practice Builder).
    * Sent as a user-message instruction for THIS run only; never persisted, never edited
@@ -421,6 +431,8 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
     trapType: typeof raw.trapType === 'string' && raw.trapType.trim() ? raw.trapType.trim() : undefined,
     trapExplanation: typeof raw.trapExplanation === 'string' && raw.trapExplanation.trim() ? raw.trapExplanation.trim() : undefined,
     targetAccuracy,
+    figureModality: typeof raw.figureModality === 'string' && raw.figureModality.trim() ? raw.figureModality.trim() : undefined,
+    figureQuery: typeof raw.figureQuery === 'string' && raw.figureQuery.trim() ? raw.figureQuery.trim() : undefined,
   };
 }
 
@@ -428,14 +440,17 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
  * Generate `count` MCQs with the user's ACTIVE AI provider, in batches of <=10.
  * Returns validated ClinicalQuestion[] tagged sourceType:'ai-generator' plus the number dropped.
  */
-export async function generateExamQuestions(options: GenerateQuestionsOptions): Promise<{ questions: ClinicalQuestion[]; dropped: number; stopped: boolean; failure: string | null }> {
+export async function generateExamQuestions(options: GenerateQuestionsOptions): Promise<{ questions: ClinicalQuestion[]; dropped: number; stopped: boolean; failure: string | null; imagesAttached: number }> {
   const {
     exam, count, subjectSubtopics, difficultyTier, difficultySubLevel, effort,
     onProgress, shouldStop, signal, onRetry,
     questionTypes, stemPatterns, evidenceSources, patientGroup, presentingProblems,
-    sourceMaterial, customInstructions,
+    sourceMaterial, customInstructions, includeImages,
   } = options;
   const learnerProfile = typeof customInstructions === 'string' ? customInstructions.trim().slice(0, 1500) : '';
+  // Only verified pictures are eligible; loading is cached for the session.
+  const imageIndex = includeImages ? await loadMedicalImages() : [];
+  let attachedImages = 0;
 
   // Round-robin the subject -> subtopic pool so every batch samples across subjects.
   const pool: { subject: string; subtopic: string }[] = [];
@@ -504,6 +519,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         : '',
       sourceMaterial
         ? `Base every question on the learner's own saved notes below. Use only facts stated or directly implied there; do not add unrelated content. Cite the note's source in "citations".\n"""\n${sourceMaterial.slice(0, 12000)}\n"""`
+        : '',
+      includeImages
+        ? `IMAGE-BASED ITEMS: make about one item in five an image-based question. For each of those add two extra fields: "figureModality" (one of: ECG, X-ray, CT, MRI, Ultrasound, Histology, Clinical photo, Fundus) and "figureQuery" (a 2–6 word phrase naming the visual finding and the diagnosis, e.g. "anterior STEMI ST elevation", "pneumothorax chest x-ray", "Reed-Sternberg Hodgkin lymphoma"). Write the stem so the question is still answerable from the described findings if no picture is shown. Do NOT add figure fields to text-only items.`
         : '',
       // Nothing already written may come back in a later batch.
       questions.length
@@ -620,7 +638,19 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           ? (['LOW', 'MEDIUM', 'HIGH'] as const)[questions.length % 3]
           : tier;
         const q = buildQuestion(item, exam, batchPool, tierForItem, difficultySubLevel, pattern.opts);
-        if (q) questions.push(q);
+        if (q) {
+          // Attach a real, verified picture only when the item names a matching diagnosis.
+          if (imageIndex.length && q.figureQuery) {
+            const picture = matchMedicalImage(q, imageIndex);
+            if (picture) {
+              q.image = medicalImageUrl(picture);
+              q.imageSourceUrl = picture.sourceUrl;
+              q.imageCaption = `${picture.caption || picture.diagnosis} — ${imageAttribution(picture)}`;
+              attachedImages += 1;
+            }
+          }
+          questions.push(q);
+        }
       }
       // Everything requested but not delivered (invalid items or missing) counts as dropped.
       dropped += batchSize - (questions.length - before);
@@ -631,5 +661,5 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     if (questions.length < count) await sleep(700, signal);
   }
 
-  return { questions, dropped, stopped, failure };
+  return { questions, dropped, stopped, failure, imagesAttached: attachedImages };
 }

@@ -27,6 +27,65 @@ export const TopBar: React.FC<TopBarProps> = ({
 }) => {
   const [searchVal, setSearchVal] = useState('');
   const [showNotificationToast, setShowNotificationToast] = useState(false);
+  const notificationRef = useRef<HTMLDivElement>(null);
+
+  // Clinical alerts: real read-state, persisted, so "Mark all read" actually sticks.
+  const ALERTS = [
+    {
+      id: 'srs-overdue',
+      title: '7 SRS Cards Overdue',
+      body: 'Lambert-Eaton vs Myasthenia antibodies interval expired.',
+      tone: 'amber' as const,
+      view: 'mistakes' as AppView,
+    },
+    {
+      id: 'ini-bank-synced',
+      title: 'New INI-CET Question Bank Synced',
+      body: '24 new AI clinical vignettes added across Antimicrobial Resistance.',
+      tone: 'emerald' as const,
+      view: 'question-bank' as AppView,
+    },
+  ];
+  const [readIds, setReadIds] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem('alerts.read');
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((x: unknown): x is string => typeof x === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
+  const unreadCount = ALERTS.filter((a) => !readIds.includes(a.id)).length;
+
+  const persistRead = (ids: string[]) => {
+    setReadIds(ids);
+    try { localStorage.setItem('alerts.read', JSON.stringify(ids)); } catch { /* ignore */ }
+  };
+  const markAllRead = () => persistRead(ALERTS.map((a) => a.id));
+  const markRead = (id: string) => {
+    if (!readIds.includes(id)) persistRead([...readIds, id]);
+  };
+
+  // Close the alerts popover when clicking anywhere outside it.
+  useEffect(() => {
+    if (!showNotificationToast) return;
+    const onPointerDown = (event: MouseEvent | TouchEvent) => {
+      if (notificationRef.current && !notificationRef.current.contains(event.target as Node)) {
+        setShowNotificationToast(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowNotificationToast(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('touchstart', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('touchstart', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [showNotificationToast]);
   
   // Profile state backed by localStorage 'profile.name'
   const [profileName, setProfileName] = useState<string>(() => {
@@ -120,37 +179,62 @@ export const TopBar: React.FC<TopBarProps> = ({
         </div>
 
         {/* Notifications Bell */}
-        <div className="relative">
+        <div className="relative" ref={notificationRef}>
           <button
             onClick={() => setShowNotificationToast(!showNotificationToast)}
             className="p-1.5 text-slate-500 hover:text-[#13294b] rounded-lg hover:bg-slate-100 relative transition-colors"
-            title="Notifications"
+            title={unreadCount ? `${unreadCount} unread alerts` : 'Notifications'}
           >
             <Bell className="w-4 h-4" />
-            <span className="w-2 h-2 rounded-full bg-[#d64545] absolute top-1 right-1"></span>
+            {unreadCount > 0 && (
+              <span className="w-2 h-2 rounded-full bg-[#d64545] absolute top-1 right-1" />
+            )}
           </button>
 
           {showNotificationToast && (
             <div className="absolute right-0 mt-2 w-72 bg-white rounded-lg shadow-xl border border-[#e3e7ee] p-3 text-xs z-50 animate-in fade-in slide-in-from-top-1">
               <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100 font-semibold text-slate-800">
                 <span>Clinical Alerts</span>
-                <span className="text-[10px] text-teal-600 font-normal">Mark all read</span>
+                <button
+                  type="button"
+                  onClick={markAllRead}
+                  disabled={unreadCount === 0}
+                  className="text-[10px] font-normal text-teal-600 hover:underline disabled:text-slate-400 disabled:no-underline disabled:cursor-default"
+                >
+                  {unreadCount === 0 ? 'All caught up' : 'Mark all read'}
+                </button>
               </div>
               <div className="space-y-2 text-slate-600">
-                <div className="p-2 rounded bg-amber-50/60 border border-amber-100 flex items-start gap-2">
-                  <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
-                  <div>
-                    <span className="font-bold text-slate-800">7 SRS Cards Overdue</span>
-                    <p className="text-[11px] text-slate-500">Lambert-Eaton vs Myasthenia antibodies interval expired.</p>
-                  </div>
-                </div>
-                <div className="p-2 rounded bg-emerald-50/60 border border-emerald-100 flex items-start gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
-                  <div>
-                    <span className="font-bold text-slate-800">New INI-CET Question Bank Synced</span>
-                    <p className="text-[11px] text-slate-500">24 new AI clinical vignettes added across Antimicrobial Resistance.</p>
-                  </div>
-                </div>
+                {ALERTS.map((alert) => {
+                  const isRead = readIds.includes(alert.id);
+                  return (
+                    <button
+                      key={alert.id}
+                      type="button"
+                      onClick={() => {
+                        markRead(alert.id);
+                        onNavigate(alert.view);
+                        setShowNotificationToast(false);
+                      }}
+                      className={`w-full text-left p-2 rounded border flex items-start gap-2 transition-colors ${
+                        alert.tone === 'amber'
+                          ? 'bg-amber-50/60 border-amber-100 hover:bg-amber-50'
+                          : 'bg-emerald-50/60 border-emerald-100 hover:bg-emerald-50'
+                      } ${isRead ? 'opacity-50' : ''}`}
+                    >
+                      {alert.tone === 'amber'
+                        ? <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+                        : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />}
+                      <div className="min-w-0">
+                        <span className="font-bold text-slate-800 flex items-center gap-1.5">
+                          {alert.title}
+                          {!isRead && <span className="w-1.5 h-1.5 rounded-full bg-[#0f8b8d]" />}
+                        </span>
+                        <p className="text-[11px] text-slate-500">{alert.body}</p>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}

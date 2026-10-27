@@ -146,7 +146,7 @@ export async function createOcrPool(workerCount = ocrConcurrency()): Promise<Ocr
   type Slot = { worker: any; busy: boolean; cb?: (p: OcrProgress) => void };
   const slots: Slot[] = [];
   const waiters: (() => void)[] = [];
-  const n = Math.max(1, Math.min(4, workerCount));
+  const n = Math.max(MIN_OCR_WORKERS, Math.min(MAX_OCR_WORKERS, Math.round(workerCount)));
 
   // Build the workers in PARALLEL and with a deadline. Sequentially awaiting three CDN
   // fetches is what made a whole-book run look frozen with no progress and no error.
@@ -222,5 +222,41 @@ export async function createOcrPool(workerCount = ocrConcurrency()): Promise<Ocr
 }
 
 export function ocrConcurrency(): number {
-  return Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+  return getOcrWorkers();
+}
+
+// ---------- OCR worker pool preference ----------
+// The panel in Settings → AI Subscription & OCR lets the learner raise the pool above the
+// old hard cap of 4. Every worker is a separate Tesseract engine (worker + wasm core +
+// English data) and costs roughly 60–100 MB of RAM, so 16 is a hard ceiling and the
+// default stays conservative. Persisted per browser profile; new OCR jobs pick it up.
+
+export const MIN_OCR_WORKERS = 1;
+export const MAX_OCR_WORKERS = 16;
+const OCR_WORKERS_KEY = 'pulse.ocr.workers';
+
+/** Conservative default: one worker per spare CPU thread, never more than four. */
+export function defaultOcrWorkers(): number {
+  return Math.max(MIN_OCR_WORKERS, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+}
+
+export function getOcrWorkers(): number {
+  try {
+    const raw = localStorage.getItem(OCR_WORKERS_KEY);
+    const n = raw === null ? NaN : Number(raw);
+    if (!Number.isFinite(n)) return defaultOcrWorkers();
+    return Math.max(MIN_OCR_WORKERS, Math.min(MAX_OCR_WORKERS, Math.round(n)));
+  } catch {
+    return defaultOcrWorkers();
+  }
+}
+
+export function setOcrWorkers(count: number): number {
+  const clamped = Math.max(MIN_OCR_WORKERS, Math.min(MAX_OCR_WORKERS, Math.round(count)));
+  try {
+    localStorage.setItem(OCR_WORKERS_KEY, String(clamped));
+  } catch {
+    /* private mode: fall back to the in-memory default */
+  }
+  return clamped;
 }

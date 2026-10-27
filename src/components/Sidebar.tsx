@@ -47,6 +47,67 @@ const loadStoredExamDate = (storageKeys: string[]): string => {
   return '';
 };
 
+// ---------- multiple exam dates per exam ----------
+// A single datetime picker cannot hold the real world: NEET-PG/INI-CET/AMC CAT run on
+// several dates and shifts. Each exam keeps a list (exam.dates.<ID>) plus the one the
+// learner is counting down to (exam.date.<ID>, the key the rest of the app already reads).
+
+const loadStoredDateList = (storageKeys: string[], fallback: string): string[] => {
+  for (const key of storageKeys) {
+    const raw = localStorage.getItem(`exam.dates.${key.split('.').pop()}`);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const clean = parsed.filter((v: unknown): v is string => typeof v === 'string' && !Number.isNaN(new Date(v).getTime()));
+          if (clean.length) return clean;
+        }
+      } catch { /* old or corrupt value — fall through to the single date */ }
+    }
+  }
+  return fallback ? [fallback] : [];
+};
+
+const toLocalInputValue = (iso: string): string => {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+
+/** Pull every date out of pasted text (notifications, "14 Jun 2026 / 15 Jun 2026", ISO, D/M/Y). */
+export function parseExamDates(text: string): string[] {
+  const found = new Map<string, string>();
+  const push = (y: number, mo: number, d: number, hh = 9, mi = 0) => {
+    const date = new Date(y, mo - 1, d, hh, mi);
+    if (Number.isNaN(date.getTime()) || mo < 1 || mo > 12 || d < 1 || d > 31) return;
+    if (date.getMonth() !== mo - 1) return; // e.g. 31 Feb
+    const iso = toLocalInputValue(date.toISOString());
+    if (iso) found.set(iso, iso);
+  };
+
+  // 2026-06-14 / 2026/06/14 / 2026-06-14T09:00
+  for (const m of text.matchAll(/\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T\s](\d{1,2}):(\d{2}))?/g)) {
+    push(+m[1], +m[2], +m[3], m[4] ? +m[4] : 9, m[5] ? +m[5] : 0);
+  }
+  // 14/06/2026 or 14-06-2026 (day first, as notices are written here)
+  for (const m of text.matchAll(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b/g)) {
+    const a = +m[1];
+    const b = +m[2];
+    if (a > 31 || b > 12) continue;
+    push(+m[3], b, a);
+  }
+  // 14 June 2026 / 14th Jun 2026
+  for (const m of text.matchAll(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?\s+(20\d{2})\b/g)) {
+    const month = MONTH_NAMES.findIndex((name) => name.startsWith(m[2].toLowerCase().slice(0, 3)));
+    if (month >= 0) push(+m[3], month + 1, +m[1]);
+  }
+
+  return Array.from(found.values()).sort();
+}
+
 export const Sidebar: React.FC<SidebarProps> = ({
   currentView,
   onNavigate,
@@ -62,10 +123,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
     INI_CET: loadStoredExamDate(['exam.date.INI_CET', 'exam.date.INI-CET']),
     AMC_CAT: loadStoredExamDate(['exam.date.AMC_CAT', 'exam.date.AMC-CAT']),
   }));
+  const [examDateLists, setExamDateLists] = useState<Record<ExamType, string[]>>(() => ({
+    NEET_PG: loadStoredDateList(['exam.date.NEET_PG', 'exam.date.NEET-PG'], loadStoredExamDate(['exam.date.NEET_PG', 'exam.date.NEET-PG'])),
+    INI_CET: loadStoredDateList(['exam.date.INI_CET', 'exam.date.INI-CET'], loadStoredExamDate(['exam.date.INI_CET', 'exam.date.INI-CET'])),
+    AMC_CAT: loadStoredDateList(['exam.date.AMC_CAT', 'exam.date.AMC-CAT'], loadStoredExamDate(['exam.date.AMC_CAT', 'exam.date.AMC-CAT'])),
+  }));
 
   const [nowMs, setNowMs] = useState<number>(Date.now());
   const [editingExam, setEditingExam] = useState<ExamType | null>(null);
   const [tempDateInput, setTempDateInput] = useState<string>('');
+  // Multi-date editor: draft list, the date counted down to, and the paste box.
+  const [draftDates, setDraftDates] = useState<string[]>([]);
+  const [draftSelected, setDraftSelected] = useState<string>('');
+  const [pasteInput, setPasteInput] = useState<string>('');
+  const [detectedNote, setDetectedNote] = useState<string | null>(null);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -74,24 +145,78 @@ export const Sidebar: React.FC<SidebarProps> = ({
     return () => clearInterval(timer);
   }, []);
 
+  const openEditor = (exam: (typeof EXAM_CARDS)[number]) => {
+    const list = examDateLists[exam.id]?.length ? examDateLists[exam.id] : examDates[exam.id] ? [toLocalInputValue(examDates[exam.id])] : [];
+    setDraftDates(list);
+    setDraftSelected(examDates[exam.id] || list[0] || '');
+    setTempDateInput('');
+    setPasteInput('');
+    setDetectedNote(null);
+    setEditingExam(exam.id);
+  };
+
+  const addDraftDate = (value: string) => {
+    const local = toLocalInputValue(value) || value;
+    if (!local || Number.isNaN(new Date(local).getTime())) return;
+    setDraftDates((prev) => (prev.includes(local) ? prev : [...prev, local].sort()));
+    setDraftSelected((prev) => prev || local);
+  };
+
+  /** Detect every date in the pasted text and add them to the draft list. */
+  const detectDates = (text: string) => {
+    setPasteInput(text);
+    const found = parseExamDates(text);
+    if (!found.length) {
+      setDetectedNote(text.trim() ? 'No date recognised in that text yet.' : null);
+      return;
+    }
+    setDraftDates((prev) => Array.from(new Set([...prev, ...found])).sort());
+    const future = found.find((d) => new Date(d).getTime() > Date.now());
+    setDraftSelected((prev) => prev || future || found[0]);
+    setDetectedNote(`${found.length} date${found.length === 1 ? '' : 's'} detected — pick the one you are counting down to.`);
+  };
+
   const handleSaveExamDate = (examId: ExamType, storageKeys: string[]) => {
-    const trimmed = tempDateInput.trim();
-    storageKeys.forEach(k => {
-      if (trimmed) {
-        localStorage.setItem(k, trimmed);
-      } else {
-        localStorage.removeItem(k);
-      }
+    const list = Array.from(new Set([...draftDates, ...(tempDateInput ? [tempDateInput] : [])])).sort();
+    const selected = draftSelected && list.includes(draftSelected)
+      ? draftSelected
+      : tempDateInput || list[0] || '';
+    const slug = storageKeys[0].split('.').pop() as string;
+    localStorage.setItem(`exam.dates.${slug}`, JSON.stringify(list));
+    storageKeys.forEach((k) => {
+      if (selected) localStorage.setItem(k, selected);
+      else localStorage.removeItem(k);
     });
-    setExamDates(prev => ({ ...prev, [examId]: trimmed }));
+    setExamDates((prev) => ({ ...prev, [examId]: selected }));
+    setExamDateLists((prev) => ({ ...prev, [examId]: list }));
     setEditingExam(null);
+    setDraftDates([]);
+    setDraftSelected('');
+    setPasteInput('');
+    setTempDateInput('');
+    setDetectedNote(null);
   };
 
   const handleClearExamDate = (examId: ExamType, storageKeys: string[]) => {
-    storageKeys.forEach(k => localStorage.removeItem(k));
-    setExamDates(prev => ({ ...prev, [examId]: '' }));
+    const slug = storageKeys[0].split('.').pop() as string;
+    localStorage.removeItem(`exam.dates.${slug}`);
+    storageKeys.forEach((k) => localStorage.removeItem(k));
+    setExamDates((prev) => ({ ...prev, [examId]: '' }));
+    setExamDateLists((prev) => ({ ...prev, [examId]: [] }));
     setTempDateInput('');
+    setDraftDates([]);
+    setDraftSelected('');
+    setPasteInput('');
     setEditingExam(null);
+  };
+
+  /** Switching which sitting/shift the countdown targets. */
+  const selectExamDate = (examId: ExamType, storageKeys: string[], value: string) => {
+    storageKeys.forEach((k) => {
+      if (value) localStorage.setItem(k, value);
+      else localStorage.removeItem(k);
+    });
+    setExamDates((prev) => ({ ...prev, [examId]: value }));
   };
 
   const getCountdown = (dateString: string) => {
@@ -181,7 +306,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       {/* Navigation List */}
-      <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-1">
+      <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-1">
         {navItems.map((item) => {
           const isActive = currentView === item.id;
           const Icon = item.icon;
@@ -224,8 +349,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </nav>
 
       {/* Real Live Countdown Cards per Exam */}
-      <div className="px-3 pb-2 space-y-1.5 shrink-0">
-        <div className="flex items-center justify-between px-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+      <div className="px-3 pb-2 shrink-0 max-h-[52vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider sticky top-0 bg-[#001432] pb-1 z-10">
           <span className="flex items-center gap-1.5">
             <Timer className="w-3.5 h-3.5 text-[#0f8b8d]" />
             Exam Countdowns
@@ -274,12 +399,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       if (isEditing) {
                         setEditingExam(null);
                       } else {
-                        setTempDateInput(dateVal);
-                        setEditingExam(exam.id);
+                        openEditor(exam);
                       }
                     }}
                     className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-700/60 transition-colors"
-                    title={dateVal ? "Edit exam date" : "Set exam date"}
+                    title={dateVal ? "Edit exam dates" : "Set exam date"}
                   >
                     <Calendar className="w-3 h-3" />
                   </button>
@@ -291,19 +415,84 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     onClick={(e) => e.stopPropagation()} 
                     className="mt-1.5 pt-1.5 border-t border-slate-700/60 space-y-2"
                   >
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="datetime-local"
+                        value={tempDateInput}
+                        onChange={(e) => setTempDateInput(e.target.value)}
+                        className="flex-1 min-w-0 px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[11px] text-white focus:outline-none focus:border-[#0f8b8d]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => { addDraftDate(tempDateInput); setTempDateInput(''); }}
+                        disabled={!tempDateInput}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-[10px] font-bold text-[#8ff3f4]"
+                      >
+                        Add
+                      </button>
+                    </div>
+
+                    {/* Paste a notification / list of dates: every date is detected. */}
                     <input
-                      type="datetime-local"
-                      value={tempDateInput}
-                      onChange={(e) => setTempDateInput(e.target.value)}
-                      className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[11px] text-white focus:outline-none focus:border-[#0f8b8d]"
+                      type="text"
+                      value={pasteInput}
+                      onChange={(e) => detectDates(e.target.value)}
+                      placeholder="Paste dates or exam notice…"
+                      className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-white placeholder:text-slate-500 focus:outline-none focus:border-[#0f8b8d]"
                     />
+
+                    {draftDates.length > 0 && (
+                      <div className="space-y-1">
+                        <select
+                          value={draftSelected}
+                          onChange={(e) => setDraftSelected(e.target.value)}
+                          className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-white focus:outline-none focus:border-[#0f8b8d]"
+                        >
+                          {draftDates.map((d) => (
+                            <option key={d} value={d}>
+                              {new Date(d).toLocaleString(undefined, { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                            </option>
+                          ))}
+                        </select>
+                        <div className="flex flex-wrap gap-1">
+                          {draftDates.map((d) => (
+                            <span
+                              key={d}
+                              className={`inline-flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.5 rounded border ${
+                                draftSelected === d
+                                  ? 'bg-[#0f8b8d]/30 text-[#8ff3f4] border-[#0f8b8d]/50'
+                                  : 'bg-slate-800 text-slate-400 border-slate-700'
+                              }`}
+                            >
+                              {new Date(d).toLocaleDateString(undefined, { day: '2-digit', month: 'short' })}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setDraftDates((prev) => prev.filter((x) => x !== d));
+                                  if (draftSelected === d) setDraftSelected('');
+                                }}
+                                className="hover:text-rose-400"
+                                title="Remove this date"
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {detectedNote && (
+                      <p className="text-[9px] text-[#8ff3f4] leading-snug">{detectedNote}</p>
+                    )}
+
                     <div className="flex items-center justify-between text-[10px]">
                       <button
                         type="button"
                         onClick={() => handleClearExamDate(exam.id, exam.storageKeys)}
                         className="text-slate-400 hover:text-rose-400 px-1 py-0.5"
                       >
-                        Clear
+                        Clear all
                       </button>
                       <div className="flex items-center gap-1">
                         <button
@@ -331,8 +520,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setTempDateInput('');
-                          setEditingExam(exam.id);
+                          openEditor(exam);
                         }}
                         className="mt-0.5 text-[11px] font-semibold text-[#8ff3f4] hover:underline flex items-center gap-1"
                       >
@@ -348,8 +536,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            setTempDateInput(dateVal);
-                            setEditingExam(exam.id);
+                            openEditor(exam);
                           }}
                           className="text-[10px] text-slate-400 hover:text-white underline"
                         >
@@ -359,8 +546,30 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     )}
 
                     {countdown.status === 'ACTIVE' && (
-                      <div className="font-mono font-bold text-xs text-white tracking-wide">
-                        {countdown.text}
+                      <div>
+                        <div className="font-mono font-bold text-xs text-white tracking-wide">
+                          {countdown.text}
+                        </div>
+                        {/* More than one sitting/shift: choose which date to count down to. */}
+                        {(examDateLists[exam.id]?.length ?? 0) > 1 ? (
+                          <select
+                            value={dateVal}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => selectExamDate(exam.id, exam.storageKeys, e.target.value)}
+                            className="mt-1 w-full px-1.5 py-0.5 bg-slate-900/80 border border-slate-700 rounded text-[10px] text-slate-200 focus:outline-none focus:border-[#0f8b8d]"
+                            title="Choose which exam date to count down to"
+                          >
+                            {examDateLists[exam.id].map((d) => (
+                              <option key={d} value={d}>
+                                {new Date(d).toLocaleString(undefined, { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <div className="text-[9px] text-slate-400 font-mono">
+                            {new Date(dateVal).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' })}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
