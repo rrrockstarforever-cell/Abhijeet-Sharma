@@ -813,9 +813,11 @@ export const SettingsAIView: React.FC = () => {
             </div>
 
             <div className="space-y-1.5">
-              <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">Shipped verified library</div>
+              <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">How images are chosen</div>
               <p className="text-[10px] text-slate-600 leading-snug">
-                20 images from Wikimedia Commons (including CDC PHIL material), checked and captioned.
+                No images are bundled. Each image-based question searches Wikimedia Commons (including CDC PHIL
+                material) and Open-i at generation time, keeps the best licence-clean match, and never shows the
+                same picture twice in a module.
               </p>
             </div>
 

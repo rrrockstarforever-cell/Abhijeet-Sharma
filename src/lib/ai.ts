@@ -4,7 +4,6 @@
 import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } from '../types.ts';
 
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
-import { loadMedicalImages, matchMedicalImage, medicalImageUrl, imageAttribution } from '../utils/medicalImages.ts';
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'opencode';
 
@@ -470,9 +469,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     sourceMaterial, customInstructions, includeImages,
   } = options;
   const learnerProfile = typeof customInstructions === 'string' ? customInstructions.trim().slice(0, 1500) : '';
-  // Only verified pictures are eligible; loading is cached for the session.
-  const imageIndex = includeImages ? await loadMedicalImages() : [];
-  // Live Open-i lookup is on by default and can be switched off in Settings.
+  // Every picture comes from the internet at generation time (Wikimedia Commons + Open-i).
+  // The lookup can be switched off in Settings.
   const liveImages = includeImages && isLiveImageSearchEnabled();
   let attachedImages = 0;
   // Every picture may appear at most once in a module: ids of images already attached.
@@ -558,7 +556,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         ? `Base every question on the learner's own saved notes below. Use only facts stated or directly implied there; do not add unrelated content. Cite the note's source in "citations".\n"""\n${sourceMaterial.slice(0, 12000)}\n"""`
         : '',
       includeImages
-        ? `IMAGE-BASED ITEMS: make about one item in five an image-based question. For each of those add two extra fields: "figureModality" (one of: ECG, X-ray, CT, MRI, Ultrasound, Histology, Clinical photo, Fundus) and "figureQuery" (a 2–6 word phrase naming the visual finding and the diagnosis, e.g. "anterior STEMI ST elevation", "pneumothorax chest x-ray", "Reed-Sternberg Hodgkin lymphoma"). Write the stem so the question is still answerable from the described findings if no picture is shown. Do NOT add figure fields to text-only items.`
+        ? `IMAGE-BASED ITEMS: there is NO fixed quota — mark an item as image-based whenever a real figure would genuinely be expected in the exam (ECG trace, radiograph, CT/MRI, ultrasound, histology, clinical photograph, fundus). For each of those add two extra fields: "figureModality" (one of: ECG, X-ray, CT, MRI, Ultrasound, Histology, Clinical photo, Fundus) and "figureQuery" (a 3–8 word phrase naming the exact visual finding plus the diagnosis, e.g. "anterior STEMI ST elevation", "pneumothorax chest x-ray", "Reed-Sternberg Hodgkin lymphoma"). Write the stem so the question is still answerable from the described findings if no picture is found. Do NOT add figure fields to items that are naturally text-only.`
         : '',
       // Nothing already written may come back in a later batch.
       questions.length
@@ -694,25 +692,14 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       const key = stemKey(q.stem);
       if (seenStems.has(key)) continue;
       seenStems.add(key);
-      // Attach a real, verified picture only when the item names a matching diagnosis.
-      if (imageIndex.length && q.figureQuery) {
-        const picture = matchMedicalImage(q, imageIndex, usedImages);
-        if (picture) {
-          usedImages.add(picture.id);
-          q.image = medicalImageUrl(picture);
-          q.imageSourceUrl = picture.sourceUrl;
-          q.imageCaption = `${picture.caption || picture.diagnosis} — ${imageAttribution(picture)}`;
-          attachedImages += 1;
-        }
-      }
       questions.push(q);
       batchQuestions.push(q);
     }
 
-    // No verified local match? Ask Open-i (licence-filtered) for the figure the item
-    // asked for. Capped per batch so a slow network cannot stall generation.
+    // Every picture is fetched from the web at generation time (Commons + Open-i,
+    // licence-filtered). Capped per batch so a slow network cannot stall generation.
     if (liveImages) {
-      const pending = batchQuestions.filter((q) => !q.image && q.figureQuery).slice(0, 3);
+      const pending = batchQuestions.filter((q) => !q.image && q.figureQuery).slice(0, 10);
       // Sequential, so two lookups can never reserve the same picture.
       for (const q of pending) {
         const live = await findLiveImage(q.figureQuery as string, usedImages);
