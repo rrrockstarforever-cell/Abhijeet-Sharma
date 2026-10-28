@@ -20,6 +20,17 @@ export const DEFAULT_MODELS: Record<AiProviderId, string> = {
   opencode: 'deepseek-v4.1-flash',
 };
 
+// Console-only model ids a previous version of the app offered for OpenCode. They are not
+// included in the Go plan and return "Model is unavailable" — drop them on read.
+const NON_GO_OPENCODE_MODELS = new Set([
+  'claude-sonnet-5-5',
+  'gpt-6.1-sol',
+  'gemini-3.8-flash',
+  'kimi-k3',
+  'claude-opus-4-5',
+  'gpt-5.4',
+]);
+
 export const NOT_CONNECTED_MESSAGE = 'Connect an AI provider in Settings → AI Subscription Hub.';
 
 export class AiError extends Error {
@@ -62,7 +73,14 @@ export function setModel(provider: AiProviderId, model: string): void {
 }
 
 export function getEffectiveModel(provider: AiProviderId): string {
-  return getModel(provider) ?? DEFAULT_MODELS[provider];
+  const stored = getModel(provider);
+  if (provider === 'opencode' && stored && NON_GO_OPENCODE_MODELS.has(stored)) {
+    // A previous version of the app listed Console-only model ids as if they were
+    // OpenCode Go models; those return "Model is unavailable" on a Go subscription.
+    try { localStorage.removeItem('ai.model.opencode'); } catch { /* ignore */ }
+    return DEFAULT_MODELS.opencode;
+  }
+  return stored ?? DEFAULT_MODELS[provider];
 }
 
 // ---------- provider status ----------
