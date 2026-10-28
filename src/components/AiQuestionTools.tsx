@@ -2,7 +2,7 @@
 // question", "Notes for the whole topic", with Brief / Standard / Detailed length chips.
 // All calls go to the ACTIVE provider via aiComplete(); errors surface, never faked.
 // Notes are saved to the real user-highlights store.
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Sparkles, Brain, NotebookPen, Loader2, AlertCircle, CheckCircle2, X, Download } from 'lucide-react';
 import type { ClinicalQuestion } from '../types.ts';
 import { aiComplete, getActiveProvider, getEffectiveModel, NOT_CONNECTED_MESSAGE } from '../lib/ai.ts';
@@ -36,12 +36,49 @@ const buildExplanationPrompt = (q: ClinicalQuestion, userChoice: string | undefi
   ].filter(Boolean).join('\n');
 };
 
+// Per-question results are cached (in-memory + localStorage) so an explanation, note or
+// topic summary survives switching questions, leaving the test runner, or a reload. A
+// generation that finishes after the component unmounted still lands in the cache.
+interface AiToolCache {
+  output?: { kind: string; text: string } | null;
+  error?: string | null;
+  savedFlags?: Partial<Record<'note' | 'topic', boolean>>;
+}
+const aiToolCache = new Map<string, AiToolCache>();
+const cacheKey = (id: string) => `pulse.aiTools.${id}`;
+
+function readCache(id: string): AiToolCache {
+  const mem = aiToolCache.get(id);
+  if (mem) return mem;
+  try {
+    const raw = localStorage.getItem(cacheKey(id));
+    if (raw) {
+      const parsed = JSON.parse(raw) as AiToolCache;
+      aiToolCache.set(id, parsed);
+      return parsed;
+    }
+  } catch { /* ignore */ }
+  return {};
+}
+
+function writeCache(id: string, patch: AiToolCache): void {
+  const next = { ...readCache(id), ...patch };
+  aiToolCache.set(id, next);
+  try { localStorage.setItem(cacheKey(id), JSON.stringify(next)); } catch { /* ignore */ }
+}
+
 export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, userChoice, className }) => {
+  const initial = readCache(question.id);
   const [length, setLength] = useState<AiToolLength>('Standard');
   const [busy, setBusy] = useState<null | 'explain' | 'note' | 'topic'>(null);
-  const [output, setOutput] = useState<{ kind: string; text: string } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [savedFlags, setSavedFlags] = useState<Partial<Record<'note' | 'topic', boolean>>>({});
+  const [output, setOutput] = useState<{ kind: string; text: string } | null>(initial.output ?? null);
+  const [error, setError] = useState<string | null>(initial.error ?? null);
+  const [savedFlags, setSavedFlags] = useState<Partial<Record<'note' | 'topic', boolean>>>(initial.savedFlags ?? {});
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const provider = getActiveProvider();
   const providerLabel = provider ? `${provider} · ${getEffectiveModel(provider)}` : 'no active provider';
@@ -71,7 +108,6 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
         provider,
         model: getEffectiveModel(provider),
       });
-      setOutput({ kind, text });
 
       // question notes save immediately to the highlights store
       if (kind === 'note') {
@@ -82,12 +118,20 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
           citation: `AI note · ${question.subtopic}`,
           tags: ['ai-note'],
         }));
-        setSavedFlags((prev) => ({ ...prev, note: true }));
+      }
+
+      const nextFlags: Partial<Record<'note' | 'topic', boolean>> = kind === 'note' ? { note: true } : {};
+      writeCache(question.id, { output: { kind, text }, error: null, savedFlags: { ...savedFlags, ...nextFlags } });
+      if (mountedRef.current) {
+        setOutput({ kind, text });
+        if (kind === 'note') setSavedFlags((prev) => ({ ...prev, note: true }));
       }
     } catch (err: any) {
-      setError(err?.message || 'AI request failed.');
+      const message = err?.message || 'AI request failed.';
+      writeCache(question.id, { error: message });
+      if (mountedRef.current) setError(message);
     } finally {
-      setBusy(null);
+      if (mountedRef.current) setBusy(null);
     }
   };
 
@@ -100,7 +144,9 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
       citation: `AI topic summary · ${question.subtopic}`,
       tags: ['ai-note'],
     }));
-    setSavedFlags((prev) => ({ ...prev, topic: true }));
+    const nextFlags = { ...savedFlags, topic: true };
+    setSavedFlags(nextFlags);
+    writeCache(question.id, { savedFlags: nextFlags });
   };
 
   const lengthChip = (val: AiToolLength) =>
