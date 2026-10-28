@@ -489,6 +489,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const learnerProfile = typeof customInstructions === 'string' ? customInstructions.trim().slice(0, 1500) : '';
   // Every picture comes from the internet at generation time (Wikimedia Commons + Open-i).
   // The lookup can be switched off in Settings.
+  // Batch size depends on the provider: the Grok CLI proxy returns 500 Internal Server
+  // Error for 3+ questions, so keep it to one. Other providers handle 5-10 fine.
+  const activeProvider = getActiveProvider();
+  const maxBatchSize = activeProvider === 'grok' ? 1 : (activeProvider === 'opencode' ? 10 : 5);
   const liveImages = includeImages && isLiveImageSearchEnabled();
   let attachedImages = 0;
   // Every picture may appear at most once in a module: ids of images already attached.
@@ -529,7 +533,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // Batches are independent requests, so run several at once instead of waiting for each
   // ten-question batch to finish. Three in flight keeps a 100-question run to a few minutes
   // without tripping provider rate limits; the pool drains as soon as the target is reached.
-  const CONCURRENCY = Math.max(1, Math.min(2, plannedBatches));
+  const CONCURRENCY = Math.max(1, Math.min(activeProvider === 'grok' ? 1 : 2, plannedBatches));
   const seenStems = new Set<string>();
   let inFlightBatches = 0;
   const stemKey = (stem: string) =>
@@ -539,7 +543,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     if (stopped || signal?.aborted || shouldStop?.()) { stopped = true; return; }
     if (questions.length >= count || batchNumber > maxBatches || consecutiveFailed >= 3) return;
 
-    const batchSize = Math.min(10, count - questions.length);
+    const batchSize = Math.min(maxBatchSize, count - questions.length);
     if (batchSize <= 0) return;
     const before = questions.length;
 
