@@ -75,12 +75,13 @@ export async function findLiveImage(
       const hay = `${row.title} ${row.caption}`.toLowerCase();
       return expanded.some((t) => hay.includes(t));
     };
-    const pick = rows.find((row) =>
+    const unused = rows.filter((row) =>
       typeof row?.proxyUrl === 'string' &&
-      !(exclude?.has(row.id) || exclude?.has(row.imageUrl) || exclude?.has(row.proxyUrl)) &&
-      relevant(row),
+      !(exclude?.has(row.id) || exclude?.has(row.imageUrl) || exclude?.has(row.proxyUrl)),
     );
-    return pick ?? null;
+    // Prefer a figure whose own text names the finding; otherwise trust the search
+    // ranking (the query itself is the relevance signal) rather than showing nothing.
+    return unused.find(relevant) ?? unused[0] ?? null;
   } catch {
     return null;
   } finally {
