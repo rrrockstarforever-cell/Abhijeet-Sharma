@@ -33,6 +33,11 @@ caption displayed under the picture includes the attribution.
 4. A match sets `image`, `imageCaption` and `imageSourceUrl` on the question; the Test
    Runner, Question Bank and Mistake Notebook already render those fields.
 
+**No repeats:** every picture is used at most once per generated module. The generator keeps
+a used-image set (local ids and live Open-i/Commons ids) and skips anything already attached;
+if nothing unused matches, the item stays text-only. Live results must also mention the
+requested finding in their title/caption, so an unrelated hit is never attached.
+
 The Practice Builder has an **Include image-based questions** switch (on by default).
 
 ## Live sources (runtime)

@@ -102,12 +102,16 @@ export interface AiCompleteOptions {
 }
 
 // Stable conversation id for providers that cache/route per session (OpenCode Go).
+// Stored in sessionStorage so each tab/instance keeps its own session — running several
+// instances in parallel then maps to several distinct sessions on the provider gateway.
 function openCodeSessionId(): string {
   try {
-    let id = localStorage.getItem('pulse.opencode.session');
+    let id = sessionStorage.getItem('pulse.opencode.session');
     if (!id) {
-      id = `pulsemed-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
-      localStorage.setItem('pulse.opencode.session', id);
+      id = localStorage.getItem('pulse.opencode.session') ||
+        `pulsemed-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+      sessionStorage.setItem('pulse.opencode.session', id);
+      try { localStorage.setItem('pulse.opencode.session', id); } catch { /* ignore */ }
     }
     return id;
   } catch {
@@ -471,6 +475,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // Live Open-i lookup is on by default and can be switched off in Settings.
   const liveImages = includeImages && isLiveImageSearchEnabled();
   let attachedImages = 0;
+  // Every picture may appear at most once in a module: ids of images already attached.
+  const usedImages = new Set<string>();
 
   // Round-robin the subject -> subtopic pool so every batch samples across subjects.
   const pool: { subject: string; subtopic: string }[] = [];
@@ -507,7 +513,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // Batches are independent requests, so run several at once instead of waiting for each
   // ten-question batch to finish. Three in flight keeps a 100-question run to a few minutes
   // without tripping provider rate limits; the pool drains as soon as the target is reached.
-  const CONCURRENCY = Math.max(1, Math.min(3, plannedBatches));
+  const CONCURRENCY = Math.max(1, Math.min(2, plannedBatches));
   const seenStems = new Set<string>();
   let inFlightBatches = 0;
   const stemKey = (stem: string) =>
@@ -690,8 +696,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       seenStems.add(key);
       // Attach a real, verified picture only when the item names a matching diagnosis.
       if (imageIndex.length && q.figureQuery) {
-        const picture = matchMedicalImage(q, imageIndex);
+        const picture = matchMedicalImage(q, imageIndex, usedImages);
         if (picture) {
+          usedImages.add(picture.id);
           q.image = medicalImageUrl(picture);
           q.imageSourceUrl = picture.sourceUrl;
           q.imageCaption = `${picture.caption || picture.diagnosis} — ${imageAttribution(picture)}`;
@@ -706,14 +713,18 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     // asked for. Capped per batch so a slow network cannot stall generation.
     if (liveImages) {
       const pending = batchQuestions.filter((q) => !q.image && q.figureQuery).slice(0, 3);
-      await Promise.all(pending.map(async (q) => {
-        const live = await findLiveImage(q.figureQuery as string);
-        if (!live) return;
+      // Sequential, so two lookups can never reserve the same picture.
+      for (const q of pending) {
+        const live = await findLiveImage(q.figureQuery as string, usedImages);
+        if (!live) continue;
+        // Another worker may have claimed it while this lookup was in flight.
+        if (usedImages.has(live.id)) continue;
+        usedImages.add(live.id);
         q.image = live.proxyUrl;
         q.imageSourceUrl = live.articleUrl;
         q.imageCaption = liveImageCaption(live);
         attachedImages += 1;
-      }));
+      }
     }
 
     // Everything requested but not delivered (invalid items or missing) counts as dropped.

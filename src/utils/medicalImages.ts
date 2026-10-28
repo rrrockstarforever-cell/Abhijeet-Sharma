@@ -78,7 +78,12 @@ interface MatchableQuestion {
  * Best verified image for a question, or null when nothing matches confidently.
  * Scoring favours the diagnosis by name, then tag overlap, then modality/subject.
  */
-export function matchMedicalImage(question: MatchableQuestion, images: MedicalImage[]): MedicalImage | null {
+export function matchMedicalImage(
+  question: MatchableQuestion,
+  images: MedicalImage[],
+  /** Images already used in this run — a picture is never shown twice in one module. */
+  used?: Set<string>,
+): MedicalImage | null {
   if (!images.length) return null;
   const haystack = norm(
     [
@@ -94,6 +99,7 @@ export function matchMedicalImage(question: MatchableQuestion, images: MedicalIm
   let best: { image: MedicalImage; score: number } | null = null;
 
   for (const image of images) {
+    if (used && (used.has(image.id) || used.has(image.file))) continue;
     let score = 0;
     const diagnosis = norm(image.diagnosis);
     const diagnosisCore = diagnosis.trim();
