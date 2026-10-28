@@ -593,16 +593,18 @@ export const SettingsAIView: React.FC = () => {
         body: JSON.stringify({
           provider: providerId,
           model: models[providerId] || getEffectiveModel(providerId as any),
-          messages: [{ role: 'user', content: 'Reply with exactly: OK' }],
+          // A normal one-line clinical question, not "reply with exactly OK": several
+          // subscription models (Grok 4.7 among them) refuse literal echo instructions.
+          messages: [{ role: 'user', content: 'Name the first-line drug for anaphylaxis in one word.' }],
         }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || `Request failed (HTTP ${res.status}).`);
       const text = typeof data?.text === 'string' ? data.text.trim() : '';
-      if (text === 'OK') {
-        setTestState({ id: providerId, status: 'ok', detail: null });
+      if (text) {
+        setTestState({ id: providerId, status: 'ok', detail: text.slice(0, 80) });
       } else {
-        setTestState({ id: providerId, status: 'fail', detail: `Unexpected reply: ${text.slice(0, 60) || '(empty)'}` });
+        setTestState({ id: providerId, status: 'fail', detail: 'The provider returned an empty reply.' });
       }
     } catch (err: any) {
       setTestState({ id: providerId, status: 'fail', detail: err?.message || 'Test request failed.' });

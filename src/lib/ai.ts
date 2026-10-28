@@ -101,6 +101,20 @@ export interface AiCompleteOptions {
   signal?: AbortSignal;
 }
 
+// Stable conversation id for providers that cache/route per session (OpenCode Go).
+function openCodeSessionId(): string {
+  try {
+    let id = localStorage.getItem('pulse.opencode.session');
+    if (!id) {
+      id = `pulsemed-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+      localStorage.setItem('pulse.opencode.session', id);
+    }
+    return id;
+  } catch {
+    return `pulsemed-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
 /** Calls POST /api/ai/complete with the active (or given) provider. Throws typed AiError on failure. */
 export async function aiComplete(options: AiCompleteOptions): Promise<string> {
   const provider = options.provider ?? getActiveProvider();
@@ -120,7 +134,7 @@ export async function aiComplete(options: AiCompleteOptions): Promise<string> {
   try {
     res = await fetch('/api/ai/complete', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-opencode-session': openCodeSessionId() },
       body: JSON.stringify(body),
       signal: options.signal,
     });

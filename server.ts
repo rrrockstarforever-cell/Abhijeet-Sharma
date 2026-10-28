@@ -118,6 +118,8 @@ function saveGeminiKey(key: string): void {
 //   2. The key already present in the OpenCode CLI's own auth file, so a signed-in
 //      OpenCode install works with no extra paste.
 const OPENCODE_CHAT_URL = 'https://opencode.ai/inference/openai/v1/chat/completions';
+const OPENCODE_GO_CHAT_URL = 'https://opencode.ai/inference/go/openai/v1/chat/completions';
+const OPENCODE_SESSION = `pulsemed-${Math.random().toString(36).slice(2)}`;
 const OPENCODE_MODELS_URL = 'https://opencode.ai/inference/v1/models';
 
 function opencodeAuthFile(): string {
@@ -184,6 +186,8 @@ async function runCompletion(opts: {
   effort?: string;
   search?: boolean;
   signal?: AbortSignal;
+  /** Stable conversation id for providers that route/cache per session (OpenCode Go). */
+  session?: string;
 }): Promise<string> {
   const { provider, model, system, messages, json, effort, search, signal } = opts;
 
@@ -195,21 +199,47 @@ async function runCompletion(opts: {
       ...(system ? [{ role: 'system', content: system }] : []),
       ...messages.map((m) => ({ role: m.role, content: m.content })),
     ];
-    const r = await fetch(OPENCODE_CHAT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: model_,
-        messages: payloadMessages,
-        temperature: 0.7,
-        ...(json ? { response_format: { type: 'json_object' } } : {}),
-      }),
-      ...(signal ? { signal } : {}),
+    const payload = JSON.stringify({
+      model: model_,
+      messages: payloadMessages,
+      temperature: 0.7,
+      ...(json ? { response_format: { type: 'json_object' } } : {}),
     });
-    const body: any = await r.json().catch(() => ({}));
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${key}`,
+      // OpenCode Go asks clients to identify themselves and keep a stable session id,
+      // which also lets their gateway cache the prompt across batches.
+      'User-Agent': 'PulseMed/1.0.7 (desktop study app)',
+      'x-opencode-session': opts.session || OPENCODE_SESSION,
+    };
+    // Go subscriptions are served under /inference/go/..., Console pay-as-you-go keys
+    // under /inference/... . Try Go first and fall back when this key has no Go allowance.
+    const attempt = (url: string) =>
+      fetch(url, { method: 'POST', headers, body: payload, ...(signal ? { signal } : {}) });
+    const readBody = async (response: Response) => {
+      const raw = await response.text();
+      try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
+    };
+
+    let r = await attempt(OPENCODE_GO_CHAT_URL);
+    let body: any = await readBody(r);
+    if (!r.ok) {
+      const reason = providerErrorText(body, r.status);
+      const retryOnConsole = r.status === 402 || r.status === 403 || r.status === 404 ||
+        /credit|balance|quota|no access|not entitled|not available|unknown model|forbidden/i.test(reason);
+      if (retryOnConsole) {
+        r = await attempt(OPENCODE_CHAT_URL);
+        body = await readBody(r);
+      }
+    }
     if (!r.ok) {
       aiLog({ provider: 'opencode', model: model_, status: r.status, error: true });
-      throw new ApiError(`OpenCode: ${providerErrorText(body, r.status)}`, r.status === 401 || r.status === 403 ? 401 : 502);
+      const reason = providerErrorText(body, r.status);
+      const hint = /credit|balance|quota/i.test(reason)
+        ? ' — this key has no Console credits. Use an OpenCode Go subscription with a Go-included model (deepseek-v4.1-flash, grok-4.7, glm-5.3-flash …), or enable Extra Usage in the OpenCode console.'
+        : '';
+      throw new ApiError(`OpenCode: ${reason}${hint}`, r.status === 401 || r.status === 403 ? 401 : 502);
     }
     const choice = body?.choices?.[0];
     const content = choice?.message?.content;
@@ -471,7 +501,7 @@ async function probeModel(uiId: string, modelId: string, force = false): Promise
   let verdict: { ok: boolean; reason?: string } = { ok: true };
   try {
     const text = await Promise.race([
-      runCompletion({ provider: uiId, model: modelId, messages: [{ role: 'user', content: 'Reply with exactly: OK' }] }),
+      runCompletion({ provider: uiId, model: modelId, messages: [{ role: 'user', content: 'Name the first-line drug for anaphylaxis in one word.' }] }),
       new Promise<string>((_, rej) => setTimeout(() => rej(new Error('probe timed out')), 45_000)),
     ]);
     verdict = { ok: Boolean(text && text.trim()) };
@@ -688,7 +718,7 @@ app.post('/api/ai/complete', async (req: Request, res: Response) => {
     if (!res.writableFinished) controller.abort();
   });
   try {
-    const text = await runCompletion({ provider, model, system, messages, json, effort, signal: controller.signal });
+    const text = await runCompletion({ provider, model, system, messages, json, effort, signal: controller.signal, session: req.header('x-opencode-session') || undefined });
     if (controller.signal.aborted) return;
     if (!text || !text.trim()) {
       return res.status(502).json({ error: 'The AI provider returned an empty response. Try again.' });
@@ -783,6 +813,7 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
       messages,
       json: true,
       effort: typeof body.effort === 'string' ? body.effort : undefined,
+      session: req.header('x-opencode-session') || undefined,
     });
 
     const parsed = parseJsonBlock(raw);

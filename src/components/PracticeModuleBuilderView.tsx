@@ -233,6 +233,30 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   const [generatingProfile, setGeneratingProfile] = useState(false);
   const [profileNotice, setProfileNotice] = useState<string | null>(null);
 
+  // Live connection state for the active engine. A stored provider id survives sign-out,
+  // so the builder must not promise to generate with an engine the server cannot reach.
+  const [providerOk, setProviderOk] = useState<Record<string, boolean> | null>(null);
+  const refreshProviderStatus = () => {
+    fetch('/api/oauth/status')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data?.providers) return;
+        const next: Record<string, boolean> = {};
+        for (const [id, value] of Object.entries(data.providers as Record<string, { connected?: boolean }>)) {
+          next[id] = Boolean(value?.connected);
+        }
+        setProviderOk(next);
+      })
+      .catch(() => { /* leave unknown: the server will explain any failure */ });
+  };
+  useEffect(() => {
+    refreshProviderStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const activeProvider = getActiveProvider();
+  const providerKnownDown = Boolean(activeProvider && providerOk && providerOk[activeProvider] === false);
+
   // The draft survives a reload even if it was never saved as a named profile.
   useEffect(() => {
     persistDraft(profileDraft);
@@ -485,6 +509,8 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         ? 'Generation stopped.'
         : err instanceof AiError ? err.message : (err?.message || 'AI question generation failed.');
       setGenState({ busy: false, generated: 0, total: targetCount, batch: 0, totalBatches: 0, dropped: 0, error: aborted ? null : message });
+      // A 401 usually means the engine was signed out: refresh the banner immediately.
+      if (!aborted && err instanceof AiError && err.kind === 'not_connected') refreshProviderStatus();
     } finally {
       abortRef.current = null;
       setStopping(false);
@@ -799,6 +825,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             )}
           </Row>
 
+          <div id="speciality-picker">
           <Row label="Speciality" hint={`${subjectsChosen} of ${subjectList.length} selected`}>
             <div className="flex flex-wrap items-center gap-x-6 gap-y-3 mb-3">
               <Radio
@@ -867,6 +894,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               })}
             </div>
           </Row>
+          </div>
 
           <Row label="Tags" hint="style hints sent to the AI writer">
             <div className="space-y-3">
@@ -1159,9 +1187,43 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 <Sparkles className="w-4 h-4 text-[#0f8b8d]" /> AI generator
               </h3>
               <span className="text-[10px] font-mono text-slate-500 truncate max-w-[55%]">
-                {getActiveProvider() ? `${getActiveProvider()} · ${getEffectiveModel(getActiveProvider()!)}` : 'no provider'}
+                {activeProvider
+                  ? `${activeProvider} · ${providerKnownDown ? 'not connected' : getEffectiveModel(activeProvider)}`
+                  : 'no provider'}
               </span>
             </div>
+
+            {!activeProvider && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10px] leading-relaxed text-amber-900 flex items-start gap-2">
+                <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-600" />
+                <span>
+                  No AI engine is connected, so questions cannot be written. Connect Claude, ChatGPT, Grok, Gemini or
+                  OpenCode in Settings — the questions come from your own subscription.
+                  <button
+                    onClick={() => onNavigate('settings')}
+                    className="ml-1 font-bold underline decoration-dotted hover:text-amber-950"
+                  >
+                    Open Settings
+                  </button>
+                </span>
+              </div>
+            )}
+
+            {providerKnownDown && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10px] leading-relaxed text-amber-900 flex items-start gap-2">
+                <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-600" />
+                <span>
+                  <strong className="capitalize">{activeProvider}</strong> is set as your engine but is not connected
+                  on this machine, so generation would fail. Reconnect it or choose another provider in Settings.
+                  <button
+                    onClick={() => onNavigate('settings')}
+                    className="ml-1 font-bold underline decoration-dotted hover:text-amber-950"
+                  >
+                    Open Settings
+                  </button>
+                </span>
+              </div>
+            )}
 
             {genState.busy ? (
               <div className="space-y-1.5">
@@ -1183,9 +1245,13 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               </div>
             ) : (
               <p className="text-[10px] text-slate-500 leading-relaxed">
-                {canLaunch
-                  ? `${questionCount} questions across ${subjectsChosen} ${selectedExam === 'AMC_CAT' ? 'domains' : 'specialities'} and ${totalChosenSubtopicsCount} topics.`
-                  : 'Select at least one speciality (or choose All) to build a module.'}
+                {!activeProvider
+                  ? 'Connect a provider first — then this button builds the module.'
+                  : providerKnownDown
+                    ? `${activeProvider} is signed out — reconnect it to generate.`
+                    : canLaunch
+                      ? `${questionCount} questions across ${subjectsChosen} ${selectedExam === 'AMC_CAT' ? 'domains' : 'specialities'} and ${totalChosenSubtopicsCount} topics.`
+                      : 'Select at least one speciality (or choose All) to build a module.'}
               </p>
             )}
 
@@ -1197,8 +1263,22 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             )}
 
             <button
-              onClick={() => handleLaunch()}
-              disabled={genState.busy || !getActiveProvider() || !canLaunch}
+              onClick={() => {
+                if (!activeProvider || providerKnownDown) {
+                  onNavigate('settings');
+                  return;
+                }
+                if (!canLaunch) {
+                  setGenState({
+                    busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0,
+                    error: 'Pick at least one speciality (or choose All) before building a module.',
+                  });
+                  document.getElementById('speciality-picker')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  return;
+                }
+                handleLaunch();
+              }}
+              disabled={genState.busy}
               className="w-full py-2.5 bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl transition-all shadow-sm flex items-center justify-center gap-2"
             >
               {genState.busy ? (
@@ -1206,10 +1286,15 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                   <Sparkles className="w-4 h-4 animate-spin" />
                   <span>Generating… {genState.generated}/{genState.total}</span>
                 </>
-              ) : !getActiveProvider() ? (
+              ) : !activeProvider ? (
                 <>
                   <ShieldAlert className="w-4 h-4" />
                   <span>Connect an AI provider in Settings</span>
+                </>
+              ) : providerKnownDown ? (
+                <>
+                  <ShieldAlert className="w-4 h-4" />
+                  <span>Reconnect {activeProvider} in Settings</span>
                 </>
               ) : !canLaunch ? (
                 <>
