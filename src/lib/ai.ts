@@ -692,6 +692,32 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       const key = stemKey(q.stem);
       if (seenStems.has(key)) continue;
       seenStems.add(key);
+      // If the stem plainly describes a visual finding but the writer omitted the figure
+      // fields, derive them from the keyed answer so the item still gets a real picture.
+      if (includeImages && !q.figureQuery) {
+        const stemAndPrompt = `${q.stem} ${q.questionText}`;
+        const modality =
+          /\bECG\b|\belectrocardiogram\b/i.test(stemAndPrompt) ? 'ECG'
+          : /\bX-?ray\b|\bradiograph\b/i.test(stemAndPrompt) ? 'X-ray'
+          : /\bCT\b|\bcomputed tomography\b/i.test(stemAndPrompt) ? 'CT'
+          : /\bMRI\b|\bmagnetic resonance\b/i.test(stemAndPrompt) ? 'MRI'
+          : /\bultrasound\b|\bsonograph/i.test(stemAndPrompt) ? 'Ultrasound'
+          : /\bhistolog|\bbiopsy\b|\bsmear\b/i.test(stemAndPrompt) ? 'Histology'
+          : /\bfundus\b|\bretina\b/i.test(stemAndPrompt) ? 'Fundus'
+          : /\bphotograph|\brash\b|\blesion\b/i.test(stemAndPrompt) ? 'Clinical photo'
+          : null;
+        // Query with the clinical topic, never the keyed answer (that is usually a
+        // management step such as "give aspirin", which finds no figure).
+        const topic = String(q.subtopic || q.subject || '')
+          .replace(/\(.*?\)/g, ' ')
+          .replace(/\s*[-–—:].*$/, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (modality && topic) {
+          q.figureModality = modality;
+          q.figureQuery = `${topic} ${modality}`.slice(0, 60);
+        }
+      }
       questions.push(q);
       batchQuestions.push(q);
     }

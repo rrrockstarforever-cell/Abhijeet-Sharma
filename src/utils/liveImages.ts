@@ -58,10 +58,22 @@ export async function findLiveImage(
     // Only accept a figure whose own title/caption mentions the requested finding, so a
     // loose search result cannot put an unrelated picture on a clinical item.
     const tokens = q.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 3);
+    // Modality words are written differently across sources; expand them before matching.
+    const MODALITY_ALIASES: Record<string, string[]> = {
+      ecg: ['ecg', 'ekg', 'electrocardiogram', 'electrocardiography'],
+      'x-ray': ['x-ray', 'xray', 'radiograph', 'chest film'],
+      xray: ['x-ray', 'xray', 'radiograph'],
+      ct: ['ct', 'computed tomography'],
+      mri: ['mri', 'magnetic resonance'],
+      ultrasound: ['ultrasound', 'sonograph', 'echograph'],
+      histology: ['histology', 'histological', 'biopsy', 'micrograph'],
+      fundus: ['fundus', 'fundal', 'retina'],
+    };
+    const expanded = tokens.flatMap((t) => [t, ...(MODALITY_ALIASES[t] ?? [])]);
     const relevant = (row: LiveImage) => {
-      if (!tokens.length) return true;
+      if (!expanded.length) return true;
       const hay = `${row.title} ${row.caption}`.toLowerCase();
-      return tokens.some((t) => hay.includes(t));
+      return expanded.some((t) => hay.includes(t));
     };
     const pick = rows.find((row) =>
       typeof row?.proxyUrl === 'string' &&
