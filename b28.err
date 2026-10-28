@@ -1,0 +1,28 @@
+[33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - `__dirname` (vite.config.ts:11:27). Use `import.meta.dirname` instead
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+[31m✗[39m Build failed in 44.04s
+[31merror during build:
+[31mBuild failed with 1 error:
+
+[31m[PARSE_ERROR] [0mDuplicated export 'listBatches'
+     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/utils/questionBankStorage.ts:150:23 [38;5;246m][0m
+     [38;5;246m│[0m
+ [38;5;246m150 │[0m [38;5;249me[0m[38;5;249mx[0m[38;5;249mp[0m[38;5;249mo[0m[38;5;249mr[0m[38;5;249mt[0m[38;5;249m [0m[38;5;249ma[0m[38;5;249ms[0m[38;5;249my[0m[38;5;249mn[0m[38;5;249mc[0m[38;5;249m [0m[38;5;249mf[0m[38;5;249mu[0m[38;5;249mn[0m[38;5;249mc[0m[38;5;249mt[0m[38;5;249mi[0m[38;5;249mo[0m[38;5;249mn[0m[38;5;249m [0mlistBatches[38;5;249m([0m[38;5;249m)[0m[38;5;249m [0m[38;5;249m{[0m
+ [38;5;240m    │[0m                       ─────┬─────  
+ [38;5;240m    │[0m                            ╰─────── Export has already been declared here
+ [38;5;240m    │[0m 
+ [38;5;246m293 │[0m [38;5;249me[0m[38;5;249mx[0m[38;5;249mp[0m[38;5;249mo[0m[38;5;249mr[0m[38;5;249mt[0m[38;5;249m [0m[38;5;249ma[0m[38;5;249ms[0m[38;5;249my[0m[38;5;249mn[0m[38;5;249mc[0m[38;5;249m [0m[38;5;249mf[0m[38;5;249mu[0m[38;5;249mn[0m[38;5;249mc[0m[38;5;249mt[0m[38;5;249mi[0m[38;5;249mo[0m[38;5;249mn[0m[38;5;249m [0mlistBatches[38;5;249m([0m[38;5;249m)[0m[38;5;249m [0m[38;5;249m{[0m
+ [38;5;240m    │[0m                       ─────┬─────  
+ [38;5;240m    │[0m                            ╰─────── It cannot be redeclared here
+[38;5;246m─────╯[0m
+[31m
+    at aggregateBindingErrorsIntoJsError (file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/rolldown/dist/shared/error-D0SD8_tL.mjs:49:18)
+    at unwrapBindingResult (file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/rolldown/dist/shared/error-D0SD8_tL.mjs:19:128)
+    at #build (file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/rolldown/dist/shared/rolldown-CMhwwZPA.mjs:145:34)
+    at async buildEnvironment (file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/vite/dist/node/chunks/node.js:34849:66)
+    at async Object.build (file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/vite/dist/node/chunks/node.js:35270:19)
+    at async Object.buildApp (file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/vite/dist/node/chunks/node.js:35267:153)
+    at async CAC.<anonymous> (file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/vite/dist/node/cli.js:790:3) {
+  errors: [Getter/Setter]
+}[39m

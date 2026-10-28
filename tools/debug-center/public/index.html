@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Pulse Med — Debug Control Center</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="authBanner" class="auth-banner" hidden>
+    <strong>Not authorized.</strong>
+    <span>Open this page through the token link printed by <code>Start Debug Center.cmd</code>, or paste the token from <code>debug-center-data\.token</code>.</span>
+    <button type="button" id="btnAuthBanner" class="btn btn-small">Enter token</button>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true">
+        <rect x="1" y="1" width="46" height="46" rx="12" fill="none" stroke="currentColor" stroke-width="2" opacity=".35"/>
+        <path d="M6 25h9l3-8 5 16 4-11 3 3h12" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div>
+        <h1>Pulse Med <span>Debug Control Center</span></h1>
+        <p class="sub">Local-only operations console · <span id="repoPath">—</span></p>
+      </div>
+    </div>
+    <div class="topbar-meta">
+      <span id="centerPill" class="pill pill-idle">connecting…</span>
+      <span id="centerMeta" class="muted small"></span>
+      <button type="button" id="btnRefresh" class="btn btn-ghost" title="Refresh now">Refresh</button>
+      <button type="button" id="btnToken" class="btn btn-ghost" title="Set debug token">Token</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="col-main">
+
+      <div class="stats-grid">
+        <article class="card stat">
+          <div class="stat-head"><h2>Application</h2><span id="appPill" class="pill pill-idle">unknown</span></div>
+          <div class="stat-big" id="appMode">—</div>
+          <dl class="kv" id="appKv"></dl>
+          <div class="stat-foot" id="appFoot"></div>
+        </article>
+
+        <article class="card stat">
+          <div class="stat-head"><h2>AI providers</h2><span id="aiPill" class="pill pill-idle">unknown</span></div>
+          <div id="aiProviders" class="chips"><span class="muted small">Loading…</span></div>
+          <p class="hint" id="aiHint"></p>
+        </article>
+
+        <article class="card stat">
+          <div class="stat-head"><h2>Build &amp; artifacts</h2><span id="buildPill" class="pill pill-idle">none yet</span></div>
+          <dl class="kv" id="buildKv"></dl>
+          <div class="stat-foot" id="installerFoot"></div>
+        </article>
+
+        <article class="card stat">
+          <div class="stat-head"><h2>Agent bridge</h2><span id="agentPill" class="pill pill-idle">checking…</span></div>
+          <dl class="kv" id="agentKv"></dl>
+          <p class="hint" id="agentHint"></p>
+        </article>
+      </div>
+
+      <article class="card" id="modelsCard">
+        <div class="card-head">
+          <h2>Subscription model libraries</h2>
+          <div class="row">
+            <span id="modelsMeta" class="muted small">not loaded</span>
+            <button type="button" id="btnFindModels" class="btn btn-small btn-ghost">Find models</button>
+          </div>
+        </div>
+        <p class="hint">Each connected provider is asked, with its own stored token, which models this subscription exposes. The app keeps the active-model choice in Settings → AI Subscription Hub; click any id here to copy it.</p>
+        <div id="modelProviders" class="model-providers">
+          <p class="muted small">Launch the app, then press “Find models”.</p>
+        </div>
+      </article>
+
+      <article class="card" id="agentCard">
+        <div class="card-head">
+          <h2>Send instruction to agent</h2>
+          <span class="muted small" id="agentTransport"></span>
+        </div>
+
+        <div class="form-grid agent-config">
+          <label class="field">
+            <span>Session ID <em>(blank = start a new one)</em></span>
+            <input id="agentSession" type="text" spellcheck="false" placeholder="ses_…" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Model <em>(blank = session default)</em></span>
+            <input id="agentModel" type="text" spellcheck="false" placeholder="opencode/deepseek-v4.1-flash-free" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>CLI path <em>(blank = auto-detect)</em></span>
+            <input id="agentCli" type="text" spellcheck="false" placeholder="…\opencode-cli.exe" autocomplete="off" />
+          </label>
+          <div class="field field-actions">
+            <label class="check"><input id="agentAuto" type="checkbox" checked /> Auto-approve tools</label>
+            <div class="row">
+              <button type="button" id="btnProbe" class="btn btn-ghost">Probe</button>
+              <button type="button" id="btnSaveAgent" class="btn btn-ghost">Save</button>
+              <button type="button" id="btnSessions" class="btn btn-ghost">List sessions</button>
+            </div>
+          </div>
+        </div>
+        <div id="sessionList" class="session-list" hidden></div>
+
+        <div class="instruction">
+          <label class="field">
+            <span>Instruction <em>(Ctrl+Enter sends)</em></span>
+            <textarea id="instruction" rows="7" placeholder="Describe what the agent should do. Be specific: files, expected behaviour, how to verify. Screenshots and notes can be attached below."></textarea>
+          </label>
+          <div class="attach-row">
+            <label class="btn btn-ghost btn-small file-btn">
+              Attach screenshot
+              <input type="file" id="shotFile" accept="image/png,image/jpeg,image/webp" hidden />
+            </label>
+            <span class="muted small">or paste / drop an image into the box</span>
+            <div id="shotPreview" class="shot-preview" hidden>
+              <img id="shotThumb" alt="Attached screenshot preview" />
+              <div>
+                <div id="shotMeta" class="small"></div>
+                <button type="button" id="btnRemoveShot" class="btn btn-tiny btn-ghost">Remove</button>
+              </div>
+            </div>
+          </div>
+          <div class="send-row">
+            <button type="button" id="btnSend" class="btn btn-primary">Send to Agent</button>
+            <button type="button" id="btnCancelAgent" class="btn btn-danger" disabled>Cancel current</button>
+            <span class="muted small" id="sendHint"></span>
+          </div>
+        </div>
+
+        <div id="agentCurrent" class="agent-current" hidden>
+          <div class="agent-current-head">
+            <span class="pill" id="currentStatus">running</span>
+            <strong id="currentTitle"></strong>
+            <span class="muted small" id="currentMeta"></span>
+          </div>
+          <div id="currentText" class="agent-text"></div>
+          <details class="agent-details">
+            <summary>Raw events / errors</summary>
+            <pre id="currentRaw"></pre>
+          </details>
+        </div>
+
+        <div class="card-subhead">
+          <h3>Recent instructions</h3>
+          <button type="button" id="btnRefreshJobs" class="btn btn-tiny btn-ghost">Refresh</button>
+        </div>
+        <div id="agentJobs" class="job-list"><p class="muted small">No instructions sent yet.</p></div>
+      </article>
+
+      <article class="card logs-card">
+        <div class="card-head">
+          <h2>Live logs</h2>
+          <div class="row">
+            <span id="logCount" class="muted small"></span>
+            <label class="check small"><input id="logFollow" type="checkbox" checked /> Follow</label>
+          </div>
+        </div>
+        <div class="log-toolbar">
+          <input id="logSearch" type="search" placeholder="Search logs…" autocomplete="off" />
+          <select id="logLevel" aria-label="Filter by level">
+            <option value="">All levels</option>
+            <option value="error">Errors</option>
+            <option value="warn">Warnings</option>
+            <option value="info">Info</option>
+            <option value="debug">Debug</option>
+          </select>
+          <select id="logSource" aria-label="Filter by source">
+            <option value="">All sources</option>
+            <option value="app">app</option>
+            <option value="agent">agent</option>
+            <option value="tests">tests</option>
+            <option value="build">build</option>
+            <option value="package">package</option>
+            <option value="checkpoint">checkpoint</option>
+            <option value="center">center</option>
+            <option value="http">http</option>
+            <option value="screenshot">screenshot</option>
+          </select>
+          <button type="button" id="btnClearLogs" class="btn btn-ghost btn-small">Clear</button>
+          <button type="button" id="btnExportLogs" class="btn btn-ghost btn-small">Export .txt</button>
+        </div>
+        <div id="logList" class="log-list" role="log" aria-live="polite"></div>
+      </article>
+    </section>
+
+    <aside class="col-side">
+      <article class="card">
+        <div class="card-head"><h2>Application controls</h2></div>
+        <div class="control-grid">
+          <label class="field">
+            <span>Launch mode</span>
+            <select id="appModeSelect">
+              <option value="dev">dev — Vite + tsx (port 3400)</option>
+              <option value="prod">prod — bundled server (port 3401)</option>
+              <option value="electron">electron — desktop window (port 3217)</option>
+            </select>
+          </label>
+          <div class="control-buttons">
+            <button type="button" id="btnLaunch" class="btn btn-primary">Launch</button>
+            <button type="button" id="btnStop" class="btn btn-danger">Stop</button>
+            <button type="button" id="btnRestart" class="btn btn-ghost">Restart</button>
+            <button type="button" id="btnOpenApp" class="btn btn-ghost">Open app</button>
+            <button type="button" id="btnInspect" class="btn btn-ghost">Inspect errors</button>
+          </div>
+          <div class="divider"></div>
+          <div class="control-buttons">
+            <button type="button" id="btnTests" class="btn btn-ghost">Run tests</button>
+            <button type="button" id="btnBuild" class="btn btn-ghost">Build</button>
+            <button type="button" id="btnPackage" class="btn btn-ghost">Create installer</button>
+          </div>
+          <div id="jobProgress" class="job-progress" hidden>
+            <div class="job-progress-head">
+              <span class="pill pill-run" id="jobKind">job</span>
+              <span class="muted small" id="jobElapsed"></span>
+            </div>
+            <ol id="jobSteps" class="job-steps"></ol>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h2>App preview</h2>
+          <div class="row">
+            <button type="button" id="btnPreviewReload" class="btn btn-tiny btn-ghost">Reload</button>
+            <button type="button" id="btnPreviewOpen" class="btn btn-tiny btn-ghost">Open tab</button>
+          </div>
+        </div>
+        <div class="preview-frame">
+          <iframe id="preview" title="Pulse Med app preview" referrerpolicy="no-referrer"></iframe>
+          <div id="previewEmpty" class="preview-empty">
+            <p>The app is not running.</p>
+            <button type="button" id="btnPreviewLaunch" class="btn btn-primary btn-small">Launch dev</button>
+          </div>
+        </div>
+        <p class="hint" id="previewUrl">—</p>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><h2>Checkpoints</h2></div>
+        <div class="row gap">
+          <button type="button" id="btnCheckpoint" class="btn btn-ghost btn-small">Create checkpoint</button>
+          <button type="button" id="btnRestore" class="btn btn-danger btn-small">Restore selected</button>
+        </div>
+        <p class="hint">Checkpoints exclude <code>node_modules</code>, <code>dist</code>, <code>release</code>, <code>.git</code> and this dashboard's data. Restore asks for typed confirmation and creates a safety backup first.</p>
+        <div id="checkpointList" class="checkpoint-list"><p class="muted small">Loading…</p></div>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><h2>System</h2></div>
+        <dl class="kv" id="systemKv"></dl>
+      </article>
+    </aside>
+  </main>
+
+  <dialog id="tokenDialog" class="dialog">
+    <form method="dialog" class="dialog-body">
+      <h2>Debug token</h2>
+      <p class="muted">The token is created on first launch at <code>debug-center-data\.token</code>. It is stored only in this browser's local storage.</p>
+      <label class="field">
+        <span>Token</span>
+        <input id="tokenInput" type="password" spellcheck="false" autocomplete="off" placeholder="64 hex characters" />
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="btnTokenClear" class="btn btn-ghost">Clear stored token</button>
+        <button type="button" id="btnTokenSave" class="btn btn-primary">Save &amp; reload</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

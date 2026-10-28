@@ -1,0 +1,59 @@
+﻿node.exe : [33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At line:1 char:1
++ & "C:\Program Files\nodejs/node.exe" "C:\Program Files\nodejs/node_mo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([33m(!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - `__dirname` (vite.config.ts:11:27). Use `import.meta.dirname` instead
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+[36mvite v8.3.5 [32mbuilding client environment for production...[36m[39m
+transforming...
+Ô£ô 1968 modules transformed.
+[31mÔ£ù[39m Build failed in 47.22s
+[31merror during build:
+[31mBuild failed with 2 errors:
+
+[31m[builtin:vite-transform] [0mMissing catch or finally clause
+     [38;5;246mÔò¡[0m[38;5;246mÔöÇ[0m[38;5;246m[[0m src/components/PracticeModuleBuilderView.tsx:702:6 
+[38;5;246m][0m
+     [38;5;246mÔöé[0m
+ [38;5;246m702 Ôöé[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m 
+[0m[38;5;249m}[0m[38;5;249m;[0m
+ [38;5;240m    Ôöé[0m      Ôöé 
+ [38;5;240m    Ôöé[0m      Ôò░ÔöÇ 
+ [38;5;240m    Ôöé[0m 
+ [38;5;240m    Ôöé[0m [38;5;115mHelp[0m: Either unwrap this try block or add catch / finally clause
+[38;5;246mÔöÇÔöÇÔöÇÔöÇÔöÇÔò»[0m
+
+[31m[builtin:vite-transform] [0mExpected a semicolon or an implicit semicolon after a statement, but found none
+     [38;5;246mÔò¡[0m[38;5;246mÔöÇ[0m[38;5;246m[[0m src/components/PracticeModuleBuilderView.tsx:703:6 
+[38;5;246m][0m
+     [38;5;246mÔöé[0m
+ [38;5;246m703 Ôöé[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m}[0m[38;5;249m 
+[0m[38;5;249mc[0m[38;5;249ma[0m[38;5;249mt[0m[38;5;249mc[0m[38;5;249mh[0m[38;5;249m 
+[0m[38;5;249m([0m[38;5;249me[0m[38;5;249mr[0m[38;5;249mr[0m[38;5;249m:[0m[38;5;249m 
+[0m[38;5;249ma[0m[38;5;249mn[0m[38;5;249my[0m[38;5;249m)[0m[38;5;249m [0m[38;5;249m{[0m
+ [38;5;240m    Ôöé[0m      Ôöé 
+ [38;5;240m    Ôöé[0m      Ôò░ÔöÇ 
+ [38;5;240m    Ôöé[0m 
+ [38;5;240m    Ôöé[0m [38;5;115mHelp[0m: Try inserting a semicolon here
+[38;5;246mÔöÇÔöÇÔöÇÔöÇÔöÇÔò»[0m
+[31m
+    at aggregateBindingErrorsIntoJsError 
+(file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/rolldown/dist/shared/error-D0SD8_tL.mjs:49:18)
+    at unwrapBindingResult 
+(file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/rolldown/dist/shared/error-D0SD8_tL.mjs:19:128)
+    at #build 
+(file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/rolldown/dist/shared/rolldown-CMhwwZPA.mjs:145:34)
+    at async buildEnvironment 
+(file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/vite/dist/node/chunks/node.js:34849:66)
+    at async Object.build 
+(file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/vite/dist/node/chunks/node.js:35270:19)
+    at async Object.buildApp 
+(file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/vite/dist/node/chunks/node.js:35267:153)
+    at async CAC.<anonymous> 
+(file:///C:/Users/Abhijeet%20Sharma/PulseMed-105/node_modules/vite/dist/node/cli.js:790:3) {
+  errors: [Getter/Setter]
+}[39m

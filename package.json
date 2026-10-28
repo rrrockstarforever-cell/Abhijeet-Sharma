@@ -1,0 +1,113 @@
+{
+  "name": "pulse-med",
+  "private": true,
+  "version": "1.0.15",
+  "type": "module",
+  "scripts": {
+    "predev": "node tools/copy-tesseract-assets.mjs",
+    "prebuild": "node tools/copy-tesseract-assets.mjs",
+    "dev": "tsx server.ts",
+    "start": "tsx server.ts",
+    "build": "vite build",
+    "preview": "vite preview",
+    "clean": "rm -rf dist server.js",
+    "lint": "tsc --noEmit",
+    "app": "npm run build && npm run bundle:server && npm run check:secrets && electron .",
+    "appdist": "npm run build && npm run bundle:server && npm run check:secrets && electron-builder --win nsis --x64",
+    "bundle:server": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=server.mjs --external:vite",
+    "debug:center": "node tools/debug-center/server.mjs",
+    "debug:center:launch": "node tools/debug-center/launch.mjs",
+    "verify:debug-center": "node tools/debug-center/verify.mjs",
+    "check:secrets": "node tools/check-secrets.mjs"
+  },
+  "dependencies": {
+    "@google/genai": "^2.4.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@vitejs/plugin-react": "^6.1.1",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "lucide-react": "^0.546.0",
+    "mammoth": "^1.9.1",
+    "motion": "^12.23.24",
+    "pdfjs-dist": "^5.4.149",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "tesseract.js": "^6.0.1",
+    "vite": "^8.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@tesseract.js-data/eng": "^1.0.0",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "autoprefixer": "^10.4.21",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2",
+    "playwright": "^1.64.1",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.21.0",
+    "typescript": "^7.0.2",
+    "playwright-core": "^1.64.1"
+  },
+  "main": "electron/main.cjs",
+  "build": {
+    "appId": "com.abhijeet.pulsemed",
+    "productName": "Pulse Med",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "server.mjs",
+      "electron/**",
+      "package.json",
+      "!dist/assets/aistudio",
+      "!dist/assets/aistudio/**",
+      "!**/*.env",
+      "!**/.env*",
+      "!**/oauth*.json",
+      "!**/*token*.json",
+      "!**/.pulse-med/**",
+      "!**/.neet-pg-prep/**",
+      "!debug-center-data/**",
+      "!**/*.pem",
+      "!**/*.key"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Pulse Med",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "PulseMed-Setup-${version}.exe"
+    },
+    "extraResources": []
+  },
+  "description": "Pulse Med - AI-assisted NEET-PG / INI-CET / AMC CAT exam preparation desktop app",
+  "author": {
+    "name": "rrrockstarforever-cell",
+    "email": "rrrockstarforever@gmail.com"
+  },
+  "license": "MIT",
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "protobufjs@7.6.6": true,
+    "tesseract.js@6.0.1": true
+  }
+}
