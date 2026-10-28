@@ -121,10 +121,11 @@ const REAL_PROVIDERS: AIProvider[] = [
     hasTokenConfigured: false,
     availableModels: [
       { id: DEFAULT_MODELS.opencode, name: 'DeepSeek V4.1 Flash (Default)', description: 'Default fast model', latencyEstimate: '—', contextWindow: '—' },
-      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', description: 'Anthropic via OpenCode', latencyEstimate: '—', contextWindow: '—' },
-      { id: 'gpt-6.1-sol', name: 'GPT 6.1 Sol', description: 'OpenAI via OpenCode', latencyEstimate: '—', contextWindow: '—' },
-      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', description: 'Google via OpenCode', latencyEstimate: '—', contextWindow: '—' },
-      { id: 'kimi-k3', name: 'Kimi K3', description: 'Moonshot via OpenCode', latencyEstimate: '—', contextWindow: '—' },
+      { id: 'grok-4.7', name: 'Grok 4.7', description: 'Go-included', latencyEstimate: '—', contextWindow: '—' },
+      { id: 'qwen3.8-flash', name: 'Qwen 3.8 Flash', description: 'Go-included', latencyEstimate: '—', contextWindow: '—' },
+      { id: 'glm-5.3-flash', name: 'GLM 5.3 Flash', description: 'Go-included', latencyEstimate: '—', contextWindow: '—' },
+      { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', description: 'Go-included (Anthropic)', latencyEstimate: '—', contextWindow: '—' },
+      { id: 'gemini-4-argon', name: 'Gemini 4 Argon', description: 'Go-included (Google)', latencyEstimate: '—', contextWindow: '—' },
     ]
   },
 ];

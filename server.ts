@@ -121,6 +121,7 @@ const OPENCODE_CHAT_URL = 'https://opencode.ai/inference/openai/v1/chat/completi
 const OPENCODE_GO_CHAT_URL = 'https://opencode.ai/inference/go/openai/v1/chat/completions';
 const OPENCODE_SESSION = `pulsemed-${Math.random().toString(36).slice(2)}`;
 const OPENCODE_MODELS_URL = 'https://opencode.ai/inference/v1/models';
+const OPENCODE_GO_MODELS_URL = 'https://opencode.ai/inference/go/v1/models';
 
 function opencodeAuthFile(): string {
   return process.env.OPENCODE_AUTH_FILE || path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json');
@@ -308,6 +309,12 @@ async function runCompletion(opts: {
     const msg = String(err?.message || 'AI request failed');
     if (/not signed in|login expired/i.test(msg)) {
       throw new ApiError(notConnectedMessage(provider), 401);
+    }
+    if (provider === 'claude' && /not allowed for this organization/i.test(msg)) {
+      throw new ApiError('Claude subscription sign-in is restricted for your organisation. Use Claude via OpenCode (Claude Haiku 5.5) or add a Gemini API key instead.', 401);
+    }
+    if (provider === 'opencode' && /unavailable/i.test(msg)) {
+      throw new ApiError('OpenCode: this model is not on your plan. Pick one from “Find models” (Go-included: deepseek-v4.1-flash, grok-4.7, qwen3.8-flash, glm-5.3-flash …).', 400);
     }
     throw new ApiError(msg, 502);
   }
@@ -531,24 +538,32 @@ async function listProviderModels(uiId: 'claude' | 'grok' | 'chatgpt'): Promise<
 
 async function listOpenCodeModels(): Promise<{ models: { id: string; name: string; source: string }[]; error?: string }> {
   if (!isProviderConnected('opencode')) return { models: [], error: 'No OpenCode API key saved.' };
-  try {
-    const r = await fetch(OPENCODE_MODELS_URL, {
-      headers: { Authorization: `Bearer ${opencodeKey()}` },
-    });
-    const b: any = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(providerErrorText(b, r.status));
-    const rows: any[] = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
-    return {
-      models: rows
+  const key = opencodeKey();
+  // A Go subscription is served under /inference/go/v1/models, a Console key under
+  // /inference/v1/models. Try Go first so Go users only see their included models.
+  const urls = [OPENCODE_GO_MODELS_URL, OPENCODE_MODELS_URL];
+  let lastError = '';
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${key}` } });
+      const b: any = await r.json().catch(() => ({}));
+      if (!r.ok) { lastError = providerErrorText(b, r.status); continue; }
+      const rows: any[] = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
+      const models = rows
         .map((m: any) => {
           const id = String(m?.id ?? m?.name ?? '');
           return { id, name: String(m?.name || id), source: 'account' };
         })
-        .filter((m) => m.id),
-    };
-  } catch (e: any) {
-    return { models: [], error: e?.message || 'Could not list OpenCode models.' };
+        .filter((m) => m.id);
+      if (models.length) {
+        aiLog({ provider: 'opencode', action: 'models', url, count: models.length });
+        return { models };
+      }
+    } catch (e: any) {
+      lastError = e?.message || 'network error';
+    }
   }
+  return { models: [], error: lastError || 'Could not list OpenCode models.' };
 }
 
 async function listGeminiModels(): Promise<{ models: { id: string; name: string; source: string }[]; error?: string }> {
