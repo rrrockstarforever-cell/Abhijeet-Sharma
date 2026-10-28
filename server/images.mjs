@@ -99,6 +99,14 @@ export async function searchImages(query, { limit = 6 } = {}) {
     merged.push(item);
     if (merged.length >= limit) break;
   }
+  imageLog({
+    query: q,
+    commons: commons.length,
+    openi: openi.length,
+    total: merged.length,
+    top: merged[0] ? `${merged[0].provider}: ${merged[0].title}`.slice(0, 160) : null,
+    errors,
+  });
   return { results: merged, errors };
 }
 
@@ -171,6 +179,19 @@ async function searchOpenI(q, { limit = 6 } = {}) {
     if (out.length >= limit) break;
   }
   return out;
+}
+
+/** Metadata-only diagnostics for image lookups (query, counts, top title — never bytes). */
+function imageLog(entry) {
+  try {
+    const dir = join(DATA_ROOT, 'logs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'images.log'),
+      `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`,
+      { flag: 'a' },
+    );
+  } catch { /* logging must never break a search */ }
 }
 
 /** Fetch (and cache) one external figure so the app never hotlinks the source site. */
