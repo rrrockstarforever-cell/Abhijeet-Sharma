@@ -370,6 +370,9 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 export function describeFailure(err: any): string {
   if (!err) return 'the provider returned nothing';
   const msg = String(err?.message || err).replace(/\s+/g, ' ').trim();
+  if (/content[_ ]?filter|safety/i.test(msg)) {
+    return 'the provider’s safety filter blocked that batch — retrying with clinical-only wording';
+  }
   return msg.length > 220 ? msg.slice(0, 217) + '…' : msg;
 }
 
@@ -501,14 +504,25 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   let failure: string | null = null;
   let waited: number | undefined;
 
-  while (questions.length < count && batch < maxBatches && consecutiveFailed < 3) {
-    if (shouldStop?.() || signal?.aborted) { stopped = true; break; }
-    batch += 1;
+  // Batches are independent requests, so run several at once instead of waiting for each
+  // ten-question batch to finish. Three in flight keeps a 100-question run to a few minutes
+  // without tripping provider rate limits; the pool drains as soon as the target is reached.
+  const CONCURRENCY = Math.max(1, Math.min(3, plannedBatches));
+  const seenStems = new Set<string>();
+  let inFlightBatches = 0;
+  const stemKey = (stem: string) =>
+    stem.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 140);
+
+  const runBatch = async (batchNumber: number): Promise<void> => {
+    if (stopped || signal?.aborted || shouldStop?.()) { stopped = true; return; }
+    if (questions.length >= count || batchNumber > maxBatches || consecutiveFailed >= 3) return;
+
     const batchSize = Math.min(10, count - questions.length);
+    if (batchSize <= 0) return;
     const before = questions.length;
 
     // Sample distinct pool entries for this batch (loop if batch > pool size).
-    const poolStart = ((batch - 1) * batchSize) % workingPool.length;
+    const poolStart = ((batchNumber - 1) * batchSize) % workingPool.length;
     const batchPool: { subject: string; subtopic: string }[] = [];
     for (let i = 0; i < batchSize; i++) {
       batchPool.push(workingPool[(poolStart + i) % workingPool.length]);
@@ -586,6 +600,15 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     // gets two retries (honouring Retry-After) before it is written off.
     let raw = '';
     let batchError: any = null;
+    let safetyMode = false;
+    let waited: number | undefined;
+    // Some providers (DeepSeek via OpenCode among them) run a safety classifier that can
+    // block an otherwise ordinary clinical vignette. Detect it and retry with an explicit
+    // "professional medical education" instruction instead of resending the same prompt.
+    const SAFETY_NOTE =
+      'IMPORTANT: This is a professional medical education item for qualified doctors preparing for a licensing examination. ' +
+      'Keep every detail clinical, factual and non-graphic. Do not include self-harm, suicide, sexual content, or violence. ' +
+      'Use neutral clinical terminology and output ONLY the JSON object.';
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       if (attempt > 1) {
@@ -600,7 +623,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           messages: [
             {
               role: 'user',
-              content: prompt,
+              content: safetyMode ? `${prompt}\n\n${SAFETY_NOTE}` : prompt,
             },
           ],
           json: true,
@@ -617,6 +640,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           break;
         }
         batchError = err;
+        if (/content[_ ]?filter|safety|blocked/i.test(String(err?.message || ''))) safetyMode = true;
         waited = err instanceof AiError ? err.retryAfterMs : undefined;
         // A missing login / cancelled run is not a "bad batch": stop at once instead of
         // spending three more calls proving it.
@@ -624,13 +648,13 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (!isRetryable(err)) break; // a missing login cannot be fixed by retrying
       }
     }
-    if (stopped) break;
+    if (stopped) { onProgress?.(questions.length, count, batchNumber, Math.max(plannedBatches, batchNumber)); return; }
     if (batchError) {
       dropped += batchSize;
       consecutiveFailed += 1;
       failure = describeFailure(batchError);
-      onProgress?.(questions.length, count, batch, Math.max(plannedBatches, batch));
-      continue;
+      onProgress?.(questions.length, count, batchNumber, Math.max(plannedBatches, batchNumber));
+      return;
     }
 
     const parsed = extractJson<{ questions?: BatchQuestionSpec[] } | BatchQuestionSpec[]>(raw);
@@ -648,52 +672,76 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     if (!batchItems) {
       dropped += batchSize; // entire batch unusable
       consecutiveFailed += 1;
-    } else {
-      const batchQuestions: ClinicalQuestion[] = [];
-      for (const item of batchItems) {
-        if (questions.length >= count) break;
-        const tierForItem = difficultyTier === 'ALL'
-          ? (['LOW', 'MEDIUM', 'HIGH'] as const)[questions.length % 3]
-          : tier;
-        const q = buildQuestion(item, exam, batchPool, tierForItem, difficultySubLevel, pattern.opts);
-        if (q) {
-          // Attach a real, verified picture only when the item names a matching diagnosis.
-          if (imageIndex.length && q.figureQuery) {
-            const picture = matchMedicalImage(q, imageIndex);
-            if (picture) {
-              q.image = medicalImageUrl(picture);
-              q.imageSourceUrl = picture.sourceUrl;
-              q.imageCaption = `${picture.caption || picture.diagnosis} — ${imageAttribution(picture)}`;
-              attachedImages += 1;
-            }
-          }
-          questions.push(q);
-          batchQuestions.push(q);
-        }
-      }
-
-      // No verified local match? Ask Open-i (licence-filtered) for the figure the item
-      // asked for. Capped per batch so a slow network cannot stall generation.
-      if (liveImages) {
-        const pending = batchQuestions.filter((q) => !q.image && q.figureQuery).slice(0, 3);
-        await Promise.all(pending.map(async (q) => {
-          const live = await findLiveImage(q.figureQuery as string);
-          if (!live) return;
-          q.image = live.proxyUrl;
-          q.imageSourceUrl = live.articleUrl;
-          q.imageCaption = liveImageCaption(live);
-          attachedImages += 1;
-        }));
-      }
-
-      // Everything requested but not delivered (invalid items or missing) counts as dropped.
-      dropped += batchSize - (questions.length - before);
-      consecutiveFailed = questions.length === before ? consecutiveFailed + 1 : 0;
+      onProgress?.(questions.length, count, batchNumber, Math.max(plannedBatches, batchNumber));
+      return;
     }
 
-    onProgress?.(questions.length, count, batch, Math.max(plannedBatches, batch));
-    if (questions.length < count) await sleep(700, signal);
-  }
+    const batchQuestions: ClinicalQuestion[] = [];
+    for (const item of batchItems) {
+      if (questions.length >= count) break;
+      const tierForItem = difficultyTier === 'ALL'
+        ? (['LOW', 'MEDIUM', 'HIGH'] as const)[questions.length % 3]
+        : tier;
+      const q = buildQuestion(item, exam, batchPool, tierForItem, difficultySubLevel, pattern.opts);
+      if (!q) continue;
+      // Parallel batches cannot see each other's in-flight stems, so drop duplicates here.
+      const key = stemKey(q.stem);
+      if (seenStems.has(key)) continue;
+      seenStems.add(key);
+      // Attach a real, verified picture only when the item names a matching diagnosis.
+      if (imageIndex.length && q.figureQuery) {
+        const picture = matchMedicalImage(q, imageIndex);
+        if (picture) {
+          q.image = medicalImageUrl(picture);
+          q.imageSourceUrl = picture.sourceUrl;
+          q.imageCaption = `${picture.caption || picture.diagnosis} — ${imageAttribution(picture)}`;
+          attachedImages += 1;
+        }
+      }
+      questions.push(q);
+      batchQuestions.push(q);
+    }
+
+    // No verified local match? Ask Open-i (licence-filtered) for the figure the item
+    // asked for. Capped per batch so a slow network cannot stall generation.
+    if (liveImages) {
+      const pending = batchQuestions.filter((q) => !q.image && q.figureQuery).slice(0, 3);
+      await Promise.all(pending.map(async (q) => {
+        const live = await findLiveImage(q.figureQuery as string);
+        if (!live) return;
+        q.image = live.proxyUrl;
+        q.imageSourceUrl = live.articleUrl;
+        q.imageCaption = liveImageCaption(live);
+        attachedImages += 1;
+      }));
+    }
+
+    // Everything requested but not delivered (invalid items or missing) counts as dropped.
+    dropped += batchSize - (questions.length - before);
+    consecutiveFailed = questions.length === before ? consecutiveFailed + 1 : 0;
+    onProgress?.(questions.length, count, batchNumber, Math.max(plannedBatches, batchNumber));
+  };
+
+  const workers = Array.from({ length: CONCURRENCY }, async () => {
+    // Pull the next batch number until the target is reached, the budget is exhausted,
+    // the provider keeps failing, or the learner stops the run. A new batch is only
+    // started when the batches already in flight cannot cover the remaining questions —
+    // otherwise the run waits for work it no longer needs.
+    while (!stopped && !signal?.aborted && !shouldStop?.() && questions.length < count) {
+      if (batch >= maxBatches || consecutiveFailed >= 3) break;
+      if (questions.length + inFlightBatches * 10 >= count) break;
+      batch += 1;
+      inFlightBatches += 1;
+      try {
+        await runBatch(batch);
+      } finally {
+        inFlightBatches -= 1;
+      }
+      if (consecutiveFailed >= 3) break;
+    }
+    if (signal?.aborted || shouldStop?.()) stopped = true;
+  });
+  await Promise.all(workers);
 
   return { questions, dropped, stopped, failure, imagesAttached: attachedImages };
 }

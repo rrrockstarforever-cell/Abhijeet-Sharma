@@ -219,6 +219,15 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   const [partialReason, setPartialReason] = useState<string | null>(null);
   // "Batch 7 of 10 · retrying (1/2) · <why>"
   const [retrying, setRetrying] = useState<string | null>(null);
+  // Seconds spent on the current run, so a slow first batch does not look like a hang.
+  const [elapsedSec, setElapsedSec] = useState(0);
+  useEffect(() => {
+    if (!genState.busy) { setElapsedSec(0); return; }
+    const startedAt = Date.now();
+    setElapsedSec(0);
+    const timer = setInterval(() => setElapsedSec(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [genState.busy]);
   // Questions kept from an earlier run that a Continue call appends to.
   const appendBaseRef = useRef<ClinicalQuestion[] | null>(null);
 
@@ -1236,7 +1245,13 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 <div className="text-[10px] font-mono text-slate-600">
                   Batch {genState.batch} of {genState.totalBatches} · {genState.generated} / {genState.total} ready
                   {genState.dropped > 0 ? ` · ${genState.dropped} dropped` : ''}
+                  {elapsedSec > 0 ? ` · ${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, '0')} elapsed` : ''}
                 </div>
+                {elapsedSec >= 25 && (
+                  <div className="text-[9px] text-slate-400 leading-snug">
+                    The provider is still writing this batch — a full 10-question batch with explanations usually takes 1–3 minutes.
+                  </div>
+                )}
                 {retrying && (
                   <div className="text-[10px] font-mono text-amber-700 leading-snug">
                     {retrying}
