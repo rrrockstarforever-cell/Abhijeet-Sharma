@@ -174,6 +174,7 @@ export default function App() {
             onNavigate={handleNavigate}
             questions={activeTestQuestions}
             mode={activeTestMode}
+            darkMode={isDarkMode}
           />
         );
       case 'mistakes':

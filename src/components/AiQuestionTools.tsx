@@ -16,6 +16,8 @@ interface AiQuestionToolsProps {
   /** the option the user picked in the test (for tailored explanations) */
   userChoice?: string;
   className?: string;
+  /** renders the cockpit (night) skin used inside the Test Runner */
+  dark?: boolean;
 }
 
 const buildExplanationPrompt = (q: ClinicalQuestion, userChoice: string | undefined, length: AiToolLength): string => {
@@ -41,7 +43,7 @@ const buildExplanationPrompt = (q: ClinicalQuestion, userChoice: string | undefi
 // new response from the active provider. Saved "Note / Topic" highlights still land in
 // the user-highlights store, but the widget itself always starts empty for each question.
 
-export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, userChoice, className }) => {
+export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, userChoice, className, dark = false }) => {
   const [length, setLength] = useState<AiToolLength>('Standard');
   const [busy, setBusy] = useState<null | 'explain' | 'note' | 'topic'>(null);
   const [output, setOutput] = useState<{ kind: string; text: string } | null>(null);
@@ -121,21 +123,29 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
   const lengthChip = (val: AiToolLength) =>
     `px-2 py-0.5 rounded-full text-[10px] font-bold border ${
       length === val
-        ? 'bg-[#0f8b8d]/10 border-[#0f8b8d]/40 text-[#00696b]'
-        : 'bg-slate-50 border-slate-200 text-slate-500 hover:border-slate-300'
+        ? dark
+          ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300'
+          : 'bg-[#0f8b8d]/10 border-[#0f8b8d]/40 text-[#00696b]'
+        : dark
+          ? 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-600'
+          : 'bg-slate-50 border-slate-200 text-slate-500 hover:border-slate-300'
     }`;
 
   return (
-    <div className={`p-3.5 rounded-xl border border-[#0f8b8d]/25 bg-teal-50/30 space-y-2.5 ${className ?? ''}`}>
+    <div className={`space-y-2.5 rounded-xl border p-3.5 ${
+      dark ? 'border-slate-700/80 bg-[#151F30]' : 'border-[#0f8b8d]/25 bg-teal-50/30'
+    } ${className ?? ''}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-[10px] font-bold uppercase tracking-wider text-[#0f8b8d] flex items-center gap-1.5">
-          <Sparkles className="w-3 h-3" /> AI tools
+        <span className={`flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider ${
+          dark ? 'text-teal-300' : 'text-[#0f8b8d]'
+        }`}>
+          <Sparkles className="h-3 w-3" /> AI tools
         </span>
-        <span className="text-[9px] font-mono text-slate-400">{providerLabel}</span>
+        <span className={`font-mono text-[9px] ${dark ? 'text-slate-500' : 'text-slate-400'}`}>{providerLabel}</span>
       </div>
 
       <div className="flex items-center gap-1">
-        <span className="text-[10px] text-slate-500 font-semibold mr-0.5">Length</span>
+        <span className={`mr-0.5 text-[10px] font-semibold ${dark ? 'text-slate-400' : 'text-slate-500'}`}>Length</span>
         {(['Brief', 'Standard', 'Detailed'] as AiToolLength[]).map((v) => (
           <button key={v} onClick={() => setLength(v)} className={lengthChip(v)}>{v}</button>
         ))}
@@ -145,7 +155,9 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
         <button
           onClick={() => run('explain')}
           disabled={!!busy || !provider}
-          className="px-2.5 py-1.5 rounded-lg bg-[#001432] text-white text-[10px] font-bold disabled:opacity-40 flex items-center gap-1"
+          className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${
+            dark ? 'bg-teal-600 text-white hover:bg-teal-500' : 'bg-[#001432] text-white'
+          }`}
         >
           {busy === 'explain' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Brain className="w-3 h-3 text-[#8ff3f4]" />}
           Explain every option
@@ -153,7 +165,7 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
         <button
           onClick={() => run('note')}
           disabled={!!busy || !provider}
-          className="px-2.5 py-1.5 rounded-lg bg-amber-500/90 hover:bg-amber-500 text-white text-[10px] font-bold disabled:opacity-40 flex items-center gap-1"
+          className="flex items-center gap-1 rounded-lg bg-amber-500/90 px-2.5 py-1.5 text-[10px] font-bold text-white hover:bg-amber-500 disabled:opacity-40"
         >
           {busy === 'note' ? <Loader2 className="w-3 h-3 animate-spin" /> : <NotebookPen className="w-3 h-3" />}
           {savedFlags.note ? <><CheckCircle2 className="w-3 h-3" /> Note saved</> : 'Note for this question'}
@@ -161,40 +173,46 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
         <button
           onClick={() => run('topic')}
           disabled={!!busy || !provider}
-          className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 hover:border-[#0f8b8d]/40 text-slate-700 text-[10px] font-bold disabled:opacity-40 flex items-center gap-1"
+          className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${
+            dark
+              ? 'border border-slate-700 bg-slate-900 text-slate-200 hover:border-teal-500/50'
+              : 'border border-slate-200 bg-white text-slate-700 hover:border-[#0f8b8d]/40'
+          }`}
         >
           {busy === 'topic' ? <Loader2 className="w-3 h-3 animate-spin" /> : <NotebookPen className="w-3 h-3" />}
           {savedFlags.topic ? <><CheckCircle2 className="w-3 h-3 text-emerald-600" /> Saved</> : 'Notes for the whole topic'}
         </button>
         {output?.kind === 'topic' && !savedFlags.topic && (
-          <button onClick={saveTopicNote} className="text-[10px] font-bold text-[#0f8b8d] underline">
+          <button onClick={saveTopicNote} className={`text-[10px] font-bold underline ${dark ? 'text-teal-300' : 'text-[#0f8b8d]'}`}>
             Save to Highlights
           </button>
         )}
       </div>
 
       {!provider && (
-        <p className="text-[10px] text-rose-700">{NOT_CONNECTED_MESSAGE}</p>
+        <p className={`text-[10px] ${dark ? 'text-rose-300' : 'text-rose-700'}`}>{NOT_CONNECTED_MESSAGE}</p>
       )}
 
       {error && (
-        <div className="p-2 rounded-lg bg-rose-50 border border-rose-200 text-[10px] text-rose-800 flex items-start gap-1.5">
-          <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0 mt-0.5" />
+        <div className={`flex items-start gap-1.5 rounded-lg border p-2 text-[10px] ${
+          dark ? 'border-rose-800/70 bg-rose-950/30 text-rose-200' : 'border-rose-200 bg-rose-50 text-rose-800'
+        }`}>
+          <AlertCircle className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${dark ? 'text-rose-300' : 'text-rose-600'}`} />
           <span className="flex-1">{error}</span>
           <button onClick={() => setError(null)}><X className="w-3 h-3" /></button>
         </div>
       )}
 
       {output && !busy && (
-        <div className="rounded-lg bg-white border border-slate-200 max-h-80 overflow-y-auto">
-          <div className="p-2.5">
+        <div className={`overflow-hidden rounded-lg border ${dark ? 'border-slate-700 bg-white' : 'border-slate-200 bg-white'}`}>
+          <div className="max-h-80 overflow-y-auto p-2.5">
             <RevisionNote
               text={output.text}
               topic={`${question.subject} ${question.subtopic}`}
             />
           </div>
-          <div className="border-t border-slate-100 px-2.5 py-1.5 flex items-center justify-between">
-            <span className="text-[9px] font-mono text-slate-400">
+          <div className={`flex items-center justify-between border-t px-2.5 py-1.5 ${dark ? 'border-slate-200 bg-slate-50' : 'border-slate-100'}`}>
+            <span className="font-mono text-[9px] text-slate-400">
               {output.kind === 'explain' ? 'Explanation' : output.kind === 'note' ? 'Question note' : 'Topic notes'}
             </span>
             <button
