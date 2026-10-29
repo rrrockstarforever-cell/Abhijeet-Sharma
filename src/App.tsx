@@ -214,6 +214,7 @@ export default function App() {
         return (
           <PDFReaderView 
             onNavigate={handleNavigate}
+            darkMode={isDarkMode}
             onGenerateQuizFromPage={(book, page, snippet) => {
               handleNavigate('practice');
             }}

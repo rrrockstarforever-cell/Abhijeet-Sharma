@@ -42,7 +42,17 @@ import {
   NotebookPen,
   Square,
   Send,
-  Type as TypeIcon
+  Type as TypeIcon,
+  Database,
+  Focus,
+  LayoutGrid,
+  PanelRight,
+  Activity,
+  Ruler,
+  Contrast,
+  RotateCcw,
+  Stethoscope,
+  Zap
 } from 'lucide-react';
 import { AppView } from '../types.ts';
 import {
@@ -94,6 +104,8 @@ const ASK_QUICK_PROMPTS: { label: string; question: string }[] = [
 interface PDFReaderViewProps {
   onNavigate: (view: AppView, targetId?: string) => void;
   onGenerateQuizFromPage?: (bookTitle: string, pageNumber: number, textSnippet: string) => void;
+  /** Follow the app-wide theme so the suite has a real light counterpart. */
+  darkMode?: boolean;
 }
 
 const MAX_RENDERED = 24; // LRU bound for rendered pages
@@ -103,6 +115,75 @@ const HL_COLORS: { id: string; css: string; label: string }[] = [
   { id: 'pink', css: '#f9a8d4', label: 'Pink' },
   { id: 'blue', css: '#93c5fd', label: 'Blue' },
 ];
+
+/**
+ * The Stitch "Clinical Diagnostic Precision" shell has a real light counterpart:
+ * chrome, cards and text switch with the app theme, while the imaging plate stays
+ * dark in both (a PACS viewport should never glow white around a scan).
+ */
+const SUITE_LIGHT = {
+  page: 'bg-[#f6f8fc] text-slate-800',
+  panel: 'border-slate-200 bg-white',
+  panelSoft: 'border-slate-200 bg-slate-50',
+  border: 'border-slate-200',
+  divider: 'border-slate-100',
+  text: 'text-slate-700',
+  muted: 'text-slate-500',
+  dim: 'text-slate-400',
+  strong: 'text-slate-900',
+  accent: 'text-[#00696b]',
+  cta: 'bg-[#0f8b8d] text-white hover:bg-[#00696b]',
+  seg: 'border-slate-200 bg-slate-100',
+  tabOn: 'bg-[#0f8b8d] text-white shadow-sm',
+  tabOff: 'text-slate-600 hover:text-slate-900',
+  chip: 'border-slate-200 bg-slate-50 text-slate-600',
+  chipAccent: 'border-[#0f8b8d]/30 bg-[#0f8b8d]/10 text-[#00696b]',
+  chipWarn: 'border-amber-300 bg-amber-50 text-amber-700',
+  chipGood: 'border-emerald-300 bg-emerald-50 text-emerald-700',
+  softHover: 'hover:bg-slate-100',
+  input: 'border-slate-200 bg-white text-slate-800 placeholder:text-slate-400',
+  reader: 'bg-slate-200/70',
+  plate: 'bg-[#050b16]',
+  notes: 'bg-white',
+  segBtnOn: 'bg-[#0f8b8d] text-white',
+  segBtnOff: 'text-slate-500 hover:text-slate-800',
+};
+
+const SUITE_DARK: typeof SUITE_LIGHT = {
+  page: 'bg-[#070d18] text-slate-200',
+  panel: 'border-slate-700/70 bg-[#0e1a2b]',
+  panelSoft: 'border-slate-700/60 bg-[#0b1526]',
+  border: 'border-slate-700/70',
+  divider: 'border-slate-700/50',
+  text: 'text-slate-300',
+  muted: 'text-slate-400',
+  dim: 'text-slate-500',
+  strong: 'text-white',
+  accent: 'text-[#6bd8cb]',
+  cta: 'bg-[#0d9488] text-white hover:bg-[#0f766e]',
+  seg: 'border-slate-700 bg-[#060e20]',
+  tabOn: 'bg-[#0d9488] text-white shadow-sm',
+  tabOff: 'text-slate-400 hover:text-white',
+  chip: 'border-slate-700 bg-slate-800/60 text-slate-300',
+  chipAccent: 'border-[#6bd8cb]/40 bg-[#6bd8cb]/10 text-[#89f5e7]',
+  chipWarn: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+  chipGood: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+  softHover: 'hover:bg-slate-800/60',
+  input: 'border-slate-700 bg-[#060e20] text-slate-100 placeholder:text-slate-500',
+  reader: 'bg-[#060e20]',
+  plate: 'bg-[#050b16]',
+  notes: 'bg-[#0b1526]',
+  segBtnOn: 'bg-[#0d9488] text-white',
+  segBtnOff: 'text-slate-400 hover:text-white',
+};
+
+/** Radiographic window/level presets, expressed as CSS filters on the page raster. */
+const PLATE_FILTERS: Record<'normal' | 'lung' | 'mediastinum' | 'bone', { label: string; css: string }> = {
+  normal: { label: 'Normal', css: 'none' },
+  lung: { label: 'Lung', css: 'grayscale(1) contrast(1.35) brightness(0.96)' },
+  mediastinum: { label: 'Mediastinum', css: 'grayscale(1) contrast(1.12) brightness(1.06)' },
+  bone: { label: 'Bone', css: 'grayscale(1) contrast(1.65) brightness(1.12)' },
+};
 
 interface SelectionPopup { x: number; y: number; text: string; }
 
@@ -182,7 +263,7 @@ function splitDocxIntoPages(raw: string): string[] {
   return pages.length ? pages : [raw.trim()];
 }
 
-export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGenerateQuizFromPage }) => {
+export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGenerateQuizFromPage, darkMode = false }) => {
   // ----- library -----
   const [docs, setDocs] = useState<PDFLibraryMeta[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
@@ -227,6 +308,27 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   const [mcqs, setMcqs] = useState<{ question: string; options: string[]; answerIndex: number; explanation: string }[]>([]);
   const [mcqBusy, setMcqBusy] = useState<boolean>(false);
   const [showMcqAnswers, setShowMcqAnswers] = useState<Record<number, boolean>>({});
+  const [mcqIndex, setMcqIndex] = useState<number>(0);
+  const [mcqPicked, setMcqPicked] = useState<number | null>(null);
+
+  // ----- clinical suite shell (Stitch "Clinical Diagnostic Precision" design) -----
+  const [suiteMode, setSuiteMode] = useState<'correlated' | 'text' | 'flashcard'>('correlated');
+  const [plateTab, setPlateTab] = useState<'plate' | 'highlights'>('plate');
+  const [plateZoom, setPlateZoom] = useState<number>(1);
+  const [wlPreset, setWlPreset] = useState<'normal' | 'lung' | 'mediastinum' | 'bone'>('normal');
+  const [invertPlate, setInvertPlate] = useState<boolean>(false);
+  const [caliperMode, setCaliperMode] = useState<boolean>(false);
+  const [showThumbs, setShowThumbs] = useState<boolean>(false);
+  const [correlation, setCorrelation] = useState<string>('');
+  const [correlBusy, setCorrelBusy] = useState<boolean>(false);
+  const [correlError, setCorrelError] = useState<string | null>(null);
+
+  // ----- flashcards generated from the current page (real AI, no canned cards) -----
+  const [flashcards, setFlashcards] = useState<{ front: string; back: string; pearl?: string }[]>([]);
+  const [flashIndex, setFlashIndex] = useState<number>(0);
+  const [flashFlipped, setFlashFlipped] = useState<boolean>(false);
+  const [flashBusy, setFlashBusy] = useState<boolean>(false);
+  const [flashError, setFlashError] = useState<string | null>(null);
 
   // ----- view mode: rendered page vs extracted text (PARITY section 6) -----
   const [viewMode, setViewMode] = useState<'page' | 'text'>('page');
@@ -1043,7 +1145,11 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   const generateMcqs = async () => {
     const provider = getActiveProvider();
     if (!provider) { setAskError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`); return; }
-    const contextText = (askContext || (await ensurePageText(currentPageRef.current).catch(() => ''))).trim();
+    // Always question the page that is on screen: a stale selection from another page
+    // would otherwise leak into the generated MCQs.
+    const contextText = ((askContextLabel === `page ${currentPageRef.current}` && askContext)
+      ? askContext
+      : await ensurePageText(currentPageRef.current).catch(() => '')).trim();
     if (!contextText) { setAskError('No selectable text on this page.'); return; }
     setMcqBusy(true);
     setAskError(null);
@@ -1072,12 +1178,104 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
       if (!clean.length) throw new Error('The AI returned no valid MCQs. Try again.');
       setMcqs(clean);
       setShowMcqAnswers({});
+      setMcqIndex(0);
+      setMcqPicked(null);
     } catch (err: any) {
       setAskError(err?.message || 'MCQ generation failed.');
     } finally {
       setMcqBusy(false);
     }
   };
+
+  /**
+   * Flashcards are generated from the page that is actually open, so the drill always
+   * matches the text the learner is reading. Nothing is cached across pages.
+   */
+  const generateFlashcards = async () => {
+    const provider = getActiveProvider();
+    if (!provider) { setFlashError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`); return; }
+    setFlashBusy(true);
+    setFlashError(null);
+    try {
+      const text = (await ensurePageText(currentPageRef.current).catch(() => '')).trim();
+      if (!text) throw new Error('No text on this page. Run OCR first if the page is a scan.');
+      const raw = await aiComplete({
+        system:
+          'You write spaced-repetition flashcards strictly from the supplied medical textbook passage. ' +
+          'Respond with ONLY JSON: {"cards":[{"front":"prompt","back":"answer","pearl":"one-line exam pearl"}]}.',
+        messages: [{
+          role: 'user',
+          content:
+            `Passage (page ${currentPageRef.current} of ${activeDoc?.title ?? 'book'}):\n\n${text.slice(0, 6000)}\n\n` +
+            'Write 8 concise flashcards. Each front must be a single recall prompt (definition, mechanism, or ' +
+            'classic discriminator); each back the shortest complete answer; each pearl one line an examiner would test.',
+        }],
+        json: true,
+        provider,
+        model: getEffectiveModel(provider),
+      });
+      const parsed = extractJson<{ cards?: any[] }>(raw);
+      const list = (Array.isArray(parsed) ? parsed : parsed?.cards) ?? [];
+      const clean = list
+        .filter((c: any) => c && typeof c.front === 'string' && typeof c.back === 'string')
+        .map((c: any) => ({
+          front: String(c.front),
+          back: String(c.back),
+          pearl: c.pearl ? String(c.pearl) : undefined,
+        }))
+        .slice(0, 12);
+      if (!clean.length) throw new Error('The AI returned no valid flashcards. Try again.');
+      setFlashcards(clean);
+      setFlashIndex(0);
+      setFlashFlipped(false);
+    } catch (err: any) {
+      setFlashError(err?.message || 'Flashcard generation failed.');
+    } finally {
+      setFlashBusy(false);
+    }
+  };
+
+  /** Pathophysiology -> imaging/gross appearance -> clinical consequence, from this page only. */
+  const correlatePage = async () => {
+    const provider = getActiveProvider();
+    if (!provider) { setCorrelError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`); return; }
+    setCorrelBusy(true);
+    setCorrelError(null);
+    setCorrelation('');
+    try {
+      const text = (await ensurePageText(currentPageRef.current).catch(() => '')).trim();
+      if (!text) throw new Error('No text on this page. Run OCR first if the page is a scan.');
+      const raw = await aiComplete({
+        system:
+          'You are a radiology-pathology correlation tutor. Use ONLY the supplied passage. ' +
+          'Be concise, accurate and exam-oriented; if the passage has no imaging content, say so in one line and stop.',
+        messages: [{
+          role: 'user',
+          content:
+            `Passage (page ${currentPageRef.current}):\n\n${text.slice(0, 6000)}\n\n` +
+            'Write 3 short correlation points in this shape:\n' +
+            '- **Finding:** … — **Mechanism:** … — **Clinical consequence:** …\n' +
+            'End with one "**Trap:**" line. No preamble.',
+        }],
+        provider,
+        model: getEffectiveModel(provider),
+      });
+      setCorrelation(raw);
+    } catch (err: any) {
+      setCorrelError(err?.message || 'Correlation failed.');
+    } finally {
+      setCorrelBusy(false);
+    }
+  };
+
+  // A new page invalidates everything generated for the previous one.
+  useEffect(() => {
+    setMcqPicked(null);
+    setMcqIndex(0);
+    setFlashFlipped(false);
+    setCorrelation('');
+    setCorrelError(null);
+  }, [currentPage, activeDocId]);
 
   // ============================ OCR ============================
 
@@ -1415,291 +1613,328 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   const providerLabel = activeAskProvider ? `${activeAskProvider} · ${getEffectiveModel(activeAskProvider)}` : 'no active provider';
   const activeDoc = docs.find((d) => d.id === activeDocId);
 
-  return (
-    <div className="h-[calc(100vh-64px)] flex flex-col max-w-7xl mx-auto w-full px-2">
-      {/* Top toolbar */}
-      <div className="bg-[#001432] rounded-2xl mt-2 px-3 py-2 text-white border border-[#13294b] shadow-md flex flex-wrap items-center gap-2">
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="px-3 py-1.5 rounded-lg bg-[#0f8b8d] hover:bg-[#00696b] text-xs font-bold flex items-center gap-1.5"
-        >
-          <UploadCloud className="w-3.5 h-3.5" /> Open PDF
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="application/pdf,.pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-          multiple
-          className="hidden"
-          onChange={(e) => { handleImportFiles(e.target.files); e.target.value = ''; }}
-        />
+  const t = darkMode ? SUITE_DARK : SUITE_LIGHT;
+  const pageHighlights = highlights.filter((h) => h.page === currentPage && h.rects && h.rects.length > 0);
+  const currentOcr = ocrWordsRef.current.has(currentPage);
+  const currentNativeText = nativeTextPagesRef.current.has(currentPage);
+  const indexedPages = pageTextsRef.current.size;
+  const activeMcq = mcqs[mcqIndex];
+  const flashcard = flashcards[flashIndex];
+  const panelOpen = showNotes;
+  const toggleSuiteMode = (mode: 'correlated' | 'text' | 'flashcard') => {
+    setSuiteMode(mode);
+    setPopup(null);
+    if (mode === 'text') {
+      setViewMode('text');
+    } else if (viewMode === 'text') {
+      // Returning to a page view: the wrappers remount, so release the bookkeeping first.
+      clearRenderedPages();
+      setViewMode('page');
+    }
+  };
 
-        <select
-          value={activeDocId ?? ''}
-          onChange={(e) => { if (e.target.value) openDoc(e.target.value); }}
-          className="bg-slate-800/80 border border-slate-700 text-[11px] font-semibold text-white rounded-lg px-2 py-1.5 max-w-[220px] focus:outline-none"
-        >
-          <option value="">{docs.length ? 'Choose a document…' : 'No documents yet'}</option>
-          {docs.map((d) => (
-            <option key={d.id} value={d.id}>{d.title} ({d.numPages}p)</option>
-          ))}
-        </select>
+  return (
+    <div className={`flex h-[calc(100vh-64px)] flex-col gap-2 overflow-y-auto p-2 lg:overflow-hidden ${t.page}`}>
+      {/* ======================= TOP RIBBON: documents, modes, telemetry ======================= */}
+      <section className={`shrink-0 rounded-xl border px-2.5 py-2 ${t.panel}`}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-bold transition active:scale-95 ${t.cta}`}
+              title="Import a PDF or DOCX (stored locally in IndexedDB)"
+            >
+              <UploadCloud className="h-3.5 w-3.5" /> Import
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/pdf,.pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              multiple
+              className="hidden"
+              onChange={(e) => { handleImportFiles(e.target.files); e.target.value = ''; }}
+            />
+
+            <div className="flex min-w-0 items-center gap-1 overflow-x-auto py-0.5">
+              {docs.map((d) => {
+                const on = d.id === activeDocId;
+                return (
+                  <div
+                    key={d.id}
+                    className={`flex shrink-0 items-center rounded-lg border transition ${on ? t.chipAccent : `${t.border} ${t.panelSoft}`}`}
+                  >
+                    <button
+                      onClick={() => openDoc(d.id)}
+                      title={`${d.title} · ${d.numPages} pages`}
+                      className={`flex items-center gap-1.5 px-2 py-1.5 font-mono text-[10px] ${on ? 'font-bold' : t.muted}`}
+                    >
+                      <FileText className="h-3 w-3 shrink-0" />
+                      <span className="max-w-[150px] truncate">{d.title}</span>
+                      {on && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />}
+                    </button>
+                    {on && (
+                      <button
+                        onClick={() => handleDeleteDoc(d.id)}
+                        title="Remove from library"
+                        className="pr-1.5 text-current opacity-40 transition hover:opacity-100"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              {!docs.length && (
+                <span className={`px-1 font-mono text-[10px] ${t.dim}`}>No documents yet — import a PDF or DOCX</span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex shrink-0 items-center gap-2">
+            <span className={`hidden items-center gap-1.5 rounded-lg border px-2 py-1 font-mono text-[9px] uppercase tracking-wider xl:flex ${t.chip}`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${numPages ? 'bg-emerald-500' : 'bg-slate-500'}`} />
+              {numPages ? 'Local engine · ready' : 'Idle'}
+            </span>
+            <div className={`flex items-center gap-0.5 rounded-lg border p-0.5 ${t.seg}`}>
+              {([
+                ['correlated', 'Correlated View'],
+                ['text', 'Pure Text'],
+                ['flashcard', 'Flashcard Drill'],
+              ] as const).map(([mode, label]) => (
+                <button
+                  key={mode}
+                  onClick={() => toggleSuiteMode(mode)}
+                  className={`rounded-md px-2 py-1 font-mono text-[10px] font-semibold transition ${suiteMode === mode ? t.tabOn : t.tabOff}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
 
         {numPages > 0 && (
-          <>
-            <div className="flex items-center gap-1 bg-slate-800/80 border border-slate-700 rounded-lg px-2 py-1">
-              <button onClick={() => gotoPage(currentPage - 1)} disabled={currentPage <= 1} className="p-0.5 disabled:opacity-30 hover:text-[#8ff3f4]">
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-              <input
-                value={currentPage}
-                onChange={(e) => { const n = parseInt(e.target.value, 10); if (!Number.isNaN(n)) setCurrentPage(n); }}
-                onKeyDown={(e) => { if (e.key === 'Enter') gotoPage(currentPage); }}
-                className="w-9 bg-transparent text-center text-xs font-mono focus:outline-none"
-              />
-              <span className="text-[11px] text-slate-400">/ {numPages}</span>
-              <button onClick={() => gotoPage(currentPage + 1)} disabled={currentPage >= numPages} className="p-0.5 disabled:opacity-30 hover:text-[#8ff3f4]">
-                <ChevronRight className="w-4 h-4" />
-              </button>
+          <div className={`mt-2 flex flex-wrap items-center justify-between gap-2 border-t pt-1.5 ${t.divider}`}>
+            <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] ${t.dim}`}>
+              <span className="flex items-center gap-1"><Database className="h-3 w-3" /> {numPages} pages</span>
+              <span className="flex items-center gap-1">
+                <ScanText className="h-3 w-3" />
+                OCR: {ocrBusy ? 'running' : currentOcr ? `ready (${ocrWordsRef.current.size} pp)` : currentNativeText ? 'native text' : 'not scanned'}
+              </span>
+              <span className={`max-w-[170px] truncate ${t.accent}`} title={providerLabel}>{providerLabel}</span>
+              <span className="hidden sm:inline">{activeDoc?.subject ?? 'Uncategorised'}</span>
+              <span className="hidden lg:inline">{indexedPages} indexed</span>
             </div>
 
-            <div className="flex items-center gap-1 bg-slate-800/80 border border-slate-700 rounded-lg px-1.5 py-1">
-              <button onClick={() => setFitWidth(!fitWidth)} title="Fit width" className={`p-1 rounded hover:bg-slate-700 ${fitWidth ? 'text-[#8ff3f4]' : 'text-slate-400'}`}>
-                <Maximize className="w-3.5 h-3.5" />
-              </button>
-              <button onClick={() => { setFitWidth(false); setScale((s) => Math.max(0.25, +(s - 0.2).toFixed(2))); }} className="p-1 rounded hover:bg-slate-700">
-                <ZoomOut className="w-3.5 h-3.5" />
-              </button>
-              <span className="text-[11px] font-mono w-11 text-center">{Math.round(scale * 100)}%</span>
-              <button onClick={() => { setFitWidth(false); setScale((s) => Math.min(4, +(s + 0.2).toFixed(2))); }} className="p-1 rounded hover:bg-slate-700">
-                <ZoomIn className="w-3.5 h-3.5" />
-              </button>
-            </div>
-
-            {/* Search across all pages (on-demand index) */}
-            <div className="flex items-center gap-1 bg-slate-800/80 border border-slate-700 rounded-lg px-2 py-1 flex-1 min-w-[220px]">
-              <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <input
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') runSearch(); }}
-                placeholder="Search whole book…"
-                className="flex-1 min-w-0 bg-transparent text-xs placeholder-slate-500 focus:outline-none"
-              />
-              {indexing.busy ? (
-                <button onClick={stopSearch} className="text-[11px] text-amber-300 flex items-center gap-1 shrink-0" title="Stop indexing">
-                  <Loader2 className="w-3 h-3 animate-spin" /> {indexing.done}/{numPages}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <div className={`flex min-w-[180px] flex-1 items-center gap-1 rounded-lg border px-2 py-1 sm:flex-none ${t.input}`}>
+                <Search className={`h-3 w-3 shrink-0 ${t.dim}`} />
+                <input
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') runSearch(); }}
+                  placeholder="Search this book…"
+                  className="min-w-0 flex-1 bg-transparent text-[11px] focus:outline-none"
+                />
+                {indexing.busy ? (
+                  <button onClick={stopSearch} className="flex shrink-0 items-center gap-1 text-[9px] text-amber-600 dark:text-amber-300" title="Stop indexing">
+                    <Loader2 className="h-3 w-3 animate-spin" /> {indexing.done}/{numPages}
+                  </button>
+                ) : matches.length > 0 ? (
+                  <button onClick={() => moveMatch(1)} className={`shrink-0 font-mono text-[9px] ${t.accent}`} title="Next match">
+                    {matchIndex + 1}/{matches.length}
+                  </button>
+                ) : null}
+                <button onClick={() => moveMatch(-1)} disabled={!matches.length} className="p-0.5 disabled:opacity-30" title="Previous match">
+                  <ChevronLeft className="h-3 w-3" />
                 </button>
-              ) : matches.length > 0 ? (
-                <button onClick={() => moveMatch(1)} className="text-[11px] font-mono text-[#8ff3f4] shrink-0">
-                  {matchIndex + 1}/{matches.length}
+                <button onClick={() => moveMatch(1)} disabled={!matches.length} className="p-0.5 disabled:opacity-30" title="Next match">
+                  <ChevronRight className="h-3 w-3" />
                 </button>
-              ) : matches.length === 0 && matchIndex === -1 && !indexing.busy ? null : null}
-              <button onClick={() => moveMatch(-1)} disabled={!matches.length} className="p-0.5 disabled:opacity-30 hover:text-[#8ff3f4]" title="Previous match">
-                <ChevronLeft className="w-3.5 h-3.5" />
+              </div>
+
+              <div className={`flex items-center gap-1 rounded-lg border px-1.5 py-1 ${t.input}`}>
+                <button onClick={() => gotoPage(currentPage - 1)} disabled={currentPage <= 1} className="p-0.5 disabled:opacity-30" title="Previous page">
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </button>
+                <input
+                  value={currentPage}
+                  onChange={(e) => { const n = parseInt(e.target.value, 10); if (!Number.isNaN(n)) setCurrentPage(n); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') gotoPage(currentPage); }}
+                  className="w-8 bg-transparent text-center font-mono text-[11px] focus:outline-none"
+                  title="Jump to page"
+                />
+                <span className={`font-mono text-[9px] ${t.dim}`}>/ {numPages}</span>
+                <button onClick={() => gotoPage(currentPage + 1)} disabled={currentPage >= numPages} className="p-0.5 disabled:opacity-30" title="Next page">
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              <div className={`flex items-center gap-1 rounded-lg border px-1.5 py-1 ${t.input}`}>
+                <button onClick={() => { setFitWidth(false); setScale((s) => Math.max(0.25, +(s - 0.2).toFixed(2))); }} title="Zoom out">
+                  <ZoomOut className="h-3.5 w-3.5" />
+                </button>
+                <span className="w-9 text-center font-mono text-[10px]">{Math.round(scale * 100)}%</span>
+                <button onClick={() => { setFitWidth(false); setScale((s) => Math.min(4, +(s + 0.2).toFixed(2))); }} title="Zoom in">
+                  <ZoomIn className="h-3.5 w-3.5" />
+                </button>
+                <button onClick={() => setFitWidth(!fitWidth)} title="Fit width" className={fitWidth ? t.accent : t.dim}>
+                  <Maximize className="h-3.5 w-3.5" />
+                </button>
+                <button onClick={() => { setFitWidth(false); setScale(fitPageScale()); }} title="Fit whole page" className={t.dim}>
+                  <Focus className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              <button
+                onClick={() => setOcrOpen((v) => !v)}
+                title="OCR matrix — read scanned pages locally"
+                className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition ${ocrOpen ? t.chipAccent : t.chip}`}
+              >
+                <ScanText className="h-3 w-3" /> OCR Matrix
               </button>
-              <button onClick={() => moveMatch(1)} disabled={!matches.length} className="p-0.5 disabled:opacity-30 hover:text-[#8ff3f4]" title="Next match">
-                <ChevronRight className="w-3.5 h-3.5" />
+              <button
+                onClick={() => setNotesOpen((v) => !v)}
+                title="Generate revision notes from a page range"
+                className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition ${notesOpen ? t.chipAccent : t.chip}`}
+              >
+                <NotebookPen className="h-3 w-3" /> Page notes
+              </button>
+              <button
+                onClick={() => onNavigate('research')}
+                title="Open the clinical evidence browser"
+                className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition ${t.chip} ${t.softHover}`}
+              >
+                <Database className="h-3 w-3" /> Evidence
+              </button>
+              <button onClick={printDocument} title="Print" className={`rounded-lg border p-1.5 transition ${t.chip} ${t.softHover}`}>
+                <Printer className="h-3.5 w-3.5" />
+              </button>
+              <button onClick={downloadDocument} title="Download the original file" className={`rounded-lg border p-1.5 transition ${t.chip} ${t.softHover}`}>
+                <FileDown className="h-3.5 w-3.5" />
               </button>
             </div>
-
-            <button onClick={printDocument} title="Print" className="p-1.5 rounded-lg hover:bg-slate-700 text-slate-300">
-              <Printer className="w-3.5 h-3.5" />
-            </button>
-            <button onClick={downloadDocument} title="Download original file" className="p-1.5 rounded-lg hover:bg-slate-700 text-slate-300">
-              <UploadCloud className="w-3.5 h-3.5 rotate-180" />
-            </button>
-            <button
-              onClick={() => {
-                if (activeDoc?.fileType === 'docx') return;
-                if (viewMode === 'text') {
-                  // Returning to page view: the wrappers remount and setPageWrapRef re-renders
-                  // them, but only if the bookkeeping no longer claims they are rendered.
-                  clearRenderedPages();
-                  setViewMode('page');
-                } else {
-                  setViewMode('text');
-                }
-                setPopup(null);
-              }}
-              disabled={activeDoc?.fileType === 'docx'}
-              title={activeDoc?.fileType === 'docx' ? 'DOCX documents are shown as extracted text' : viewMode === 'page' ? 'Extracted-text view' : 'Page view'}
-              className={`p-1.5 rounded-lg hover:bg-slate-700 flex items-center gap-1 text-[10px] font-bold disabled:opacity-40 ${viewMode === 'text' ? 'text-[#8ff3f4] bg-slate-700/50' : 'text-slate-300'}`}
-            >
-              <TypeIcon className="w-3.5 h-3.5" /> {viewMode === 'page' ? 'Text' : 'Page'}
-            </button>
-            <button
-              onClick={() => setOcrOpen((v) => !v)}
-              title="Read pages with OCR"
-              className={`p-1.5 rounded-lg hover:bg-slate-700 flex items-center gap-1 text-[10px] font-bold ${ocrOpen ? 'text-[#8ff3f4] bg-slate-700/50' : 'text-slate-300'}`}
-            >
-              <ScanText className="w-3.5 h-3.5" /> OCR
-            </button>
-            <button
-              onClick={() => setNotesOpen((v) => !v)}
-              title="Make revision notes from a page range"
-              className={`p-1.5 rounded-lg hover:bg-slate-700 flex items-center gap-1 text-[10px] font-bold ${notesOpen ? 'text-[#8ff3f4] bg-slate-700/50' : 'text-slate-300'}`}
-            >
-              <NotebookPen className="w-3.5 h-3.5" /> Page notes
-            </button>
-            <button
-              onClick={() => { setFitWidth(false); setScale(fitPageScale()); }}
-              title="Fit whole page"
-              className={`p-1.5 rounded-lg text-xs font-bold ${fitWidth ? 'text-slate-400 hover:bg-slate-700' : 'text-[#8ff3f4] bg-slate-700/50'}`}
-            >
-              Fit page
-            </button>
-            <button onClick={() => setShowLibrary(!showLibrary)} title="Toggle sidebar" className={`p-1.5 rounded-lg hover:bg-slate-700 ${showLibrary ? 'text-[#8ff3f4]' : 'text-slate-400'}`}>
-              <ListTree className="w-3.5 h-3.5" />
-            </button>
-            <button onClick={toggleFullscreen} title="Full screen" className="p-1.5 rounded-lg hover:bg-slate-700 text-slate-300">
-              <Maximize className="w-3.5 h-3.5" />
-            </button>
-            <button onClick={() => openAskPanel('page')} title="Ask AI about this page" className="px-2 py-1.5 rounded-lg bg-[#0f8b8d]/40 border border-[#0f8b8d]/40 text-xs font-bold flex items-center gap-1.5 hover:bg-[#0f8b8d]/60">
-              <Sparkles className="w-3.5 h-3.5 text-[#8ff3f4]" /> Ask AI
-            </button>
-            <button onClick={() => setShowNotes(!showNotes)} title="Notes & highlights" className={`p-1.5 rounded-lg hover:bg-slate-700 ${showNotes ? 'text-[#8ff3f4]' : 'text-slate-400'}`}>
-              <ListTree className="w-3.5 h-3.5" />
-            </button>
-          </>
-        )}
-      </div>
-
-      {/* OCR panel (real tesseract.js; Force OCR checkbox from section 14) */}
-      {ocrOpen && numPages > 0 && (
-        <div className="mt-2 p-3 bg-white rounded-xl border border-slate-200 shadow-sm text-xs space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="font-bold text-slate-800 flex items-center gap-1.5">
-              <ScanText className="w-4 h-4 text-[#0f8b8d]" /> OCR this book
-              <span className="font-mono text-[10px] text-slate-400">tesseract.js · English</span>
-            </span>
-            <label className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-slate-600">
-              <input
-                type="checkbox"
-                checked={ocrForce}
-                onChange={(e) => setOcrForce(e.target.checked)}
-                className="accent-[#0f8b8d]"
-              />
-              Force OCR even when a page already has text
-            </label>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+        )}
+      </section>
+
+      {/* ======================= OCR matrix ======================= */}
+      {ocrOpen && numPages > 0 && (
+        <div className={`shrink-0 rounded-xl border p-2.5 text-xs ${t.panel}`}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className={`flex items-center gap-1.5 text-[11px] font-bold ${t.strong}`}>
+              <ScanText className={`h-4 w-4 ${t.accent}`} /> OCR matrix
+              <span className={`font-mono text-[9px] ${t.dim}`}>tesseract.js · English · on-device</span>
+            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className={`inline-flex items-center gap-1.5 text-[10px] font-semibold ${t.muted}`}>
+                <input type="checkbox" checked={ocrForce} onChange={(e) => setOcrForce(e.target.checked)} className="accent-[#0f8b8d]" />
+                Force OCR even where text exists
+              </label>
+              <button onClick={() => setOcrOpen(false)} className={`${t.dim} hover:opacity-70`} title="Close"><X className="h-3.5 w-3.5" /></button>
+            </div>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <button
               onClick={() => runOcr('current')}
               disabled={ocrBusy || !pdfRef.current}
-              className="px-2.5 py-1.5 rounded-lg bg-[#001432] text-white text-[10px] font-bold disabled:opacity-40 flex items-center gap-1"
+              className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${t.cta}`}
             >
-              {ocrBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <ScanText className="w-3 h-3 text-[#8ff3f4]" />}
+              {ocrBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <ScanText className="h-3 w-3" />}
               OCR current page ({currentPage})
             </button>
             <button
               onClick={() => runOcr('missing')}
               disabled={ocrBusy || !pdfRef.current}
-              className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 text-slate-700 text-[10px] font-bold disabled:opacity-40 flex items-center gap-1"
+              className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${t.chip}`}
             >
-              <FileDown className="w-3 h-3" /> OCR pages without text
+              <FileDown className="h-3 w-3" /> OCR pages without text
             </button>
             {ocrBusy && (
               <button
-                onClick={() => {
-                  if (ocrJobRef.current) stopJob(ocrJobRef.current.id);
-                }}
-                className="px-2.5 py-1.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-[10px] font-bold flex items-center gap-1"
+                onClick={() => { if (ocrJobRef.current) stopJob(ocrJobRef.current.id); }}
+                className="flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[10px] font-bold text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300"
               >
-                <Square className="w-3 h-3" /> Stop OCR
+                <Square className="h-3 w-3" /> Stop OCR
               </button>
             )}
-            <button onClick={() => setOcrOpen(false)} className="ml-auto text-slate-400 hover:text-slate-600" title="Close">
-              <X className="w-3.5 h-3.5" />
-            </button>
+            {ocrNote && <span className={`text-[10px] ${t.muted}`}>{ocrNote}</span>}
+            {!pdfRef.current && <span className="text-[10px] text-amber-600 dark:text-amber-300">OCR needs a PDF. DOCX already has real text.</span>}
           </div>
-          <p className="text-[10px] text-slate-500 leading-relaxed">
-            OCR is lossy — review recognised text before relying on it. The first run downloads tesseract language data.
-            Recognised text is saved to this book's page cache and used by search and Ask AI.
+          <p className={`mt-1.5 text-[9px] leading-relaxed ${t.dim}`}>
+            OCR is lossy — review recognised text. Results feed search, Copilot, MCQs and flashcards, and are cached per page.
           </p>
-          {ocrNote && (
-            <div className="p-2 rounded-lg bg-slate-50 border border-slate-200 text-[10px] text-slate-700">{ocrNote}</div>
-          )}
-          {!pdfRef.current && (
-            <div className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
-              OCR needs a PDF document. DOCX imports already contain real extracted text.
-            </div>
-          )}
         </div>
       )}
 
-      {/* Make notes from pages panel */}
+      {/* ======================= Page notes ======================= */}
       {notesOpen && numPages > 0 && (
-        <div className="mt-2 p-3 bg-white rounded-xl border border-slate-200 shadow-sm text-xs space-y-2">
+        <div className={`shrink-0 rounded-xl border p-2.5 text-xs ${t.panel}`}>
           <div className="flex items-center justify-between">
-            <span className="font-bold text-slate-800 flex items-center gap-1.5">
-              <NotebookPen className="w-4 h-4 text-[#0f8b8d]" /> Make revision notes from pages
+            <span className={`flex items-center gap-1.5 text-[11px] font-bold ${t.strong}`}>
+              <NotebookPen className={`h-4 w-4 ${t.accent}`} /> Make revision notes from pages
             </span>
-            <button onClick={() => setNotesOpen(false)} className="text-slate-400 hover:text-slate-600"><X className="w-3.5 h-3.5" /></button>
+            <button onClick={() => setNotesOpen(false)} className={`${t.dim} hover:opacity-70`} title="Close"><X className="h-3.5 w-3.5" /></button>
           </div>
-          <div className="flex flex-wrap items-end gap-2">
-            <label className="text-[10px] font-semibold text-slate-600">
-              From page
+          <div className="mt-2 flex flex-wrap items-end gap-2">
+            <label className={`text-[9px] font-semibold ${t.muted}`}>
+              From
               <input type="number" min={1} max={numPages} value={notesFrom}
                 onChange={(e) => setNotesFrom(Number(e.target.value))}
-                className="block w-20 mt-0.5 px-2 py-1 rounded-lg border border-slate-200 text-[11px]" />
+                className={`mt-0.5 block w-16 rounded-lg border px-2 py-1 text-[11px] ${t.input}`} />
             </label>
-            <label className="text-[10px] font-semibold text-slate-600">
-              To page
+            <label className={`text-[9px] font-semibold ${t.muted}`}>
+              To
               <input type="number" min={1} max={numPages} value={notesTo}
                 onChange={(e) => setNotesTo(Number(e.target.value))}
-                className="block w-20 mt-0.5 px-2 py-1 rounded-lg border border-slate-200 text-[11px]" />
+                className={`mt-0.5 block w-16 rounded-lg border px-2 py-1 text-[11px] ${t.input}`} />
             </label>
-            <label className="text-[10px] font-semibold text-slate-600">
-              Pages per part
+            <label className={`text-[9px] font-semibold ${t.muted}`}>
+              Pages / part
               <input type="number" min={1} max={20} value={notesPartSize}
                 onChange={(e) => setNotesPartSize(Number(e.target.value))}
-                className="block w-20 mt-0.5 px-2 py-1 rounded-lg border border-slate-200 text-[11px]" />
+                className={`mt-0.5 block w-16 rounded-lg border px-2 py-1 text-[11px] ${t.input}`} />
             </label>
             <button
               onClick={makeNotesFromPages}
               disabled={notesBusy}
-              className="px-3 py-1.5 rounded-lg bg-[#0f8b8d] hover:bg-[#00696b] text-white text-[10px] font-bold disabled:opacity-40 flex items-center gap-1"
+              className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${t.cta}`}
             >
-              {notesBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+              {notesBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
               {notesBusy ? 'Generating…' : 'Generate in parts'}
             </button>
             {notesBusy && (
               <button
                 onClick={() => { notesCancelRef.current = true; }}
-                className="px-2.5 py-1.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-[10px] font-bold flex items-center gap-1"
+                className="flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[10px] font-bold text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300"
               >
-                <Square className="w-3 h-3" /> Stop (keeps saved parts)
+                <Square className="h-3 w-3" /> Stop (keeps saved parts)
               </button>
             )}
             {madeNotes.length > 0 && (
               <button
                 onClick={() => downloadNotesPdf(
-                  `${docs.find((d) => d.id === activeDocId)?.title ?? 'Book'} — page notes`,
+                  `${activeDoc?.title ?? 'Book'} — page notes`,
                   madeNotes.map((n) => `## ${n.range}\n\n${n.text}`).join('\n\n'),
-                  getActiveProvider() ? `${getActiveProvider()} · ${getEffectiveModel(getActiveProvider()!)}` : undefined,
+                  activeAskProvider ? `${activeAskProvider} · ${getEffectiveModel(activeAskProvider)}` : undefined,
                 )}
-                className="ml-auto px-2.5 py-1.5 rounded-lg bg-[#001432] text-white text-[10px] font-bold flex items-center gap-1"
+                className={`ml-auto flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold ${t.chip}`}
               >
-                <FileDown className="w-3 h-3 text-[#8ff3f4]" /> Download all notes (PDF)
+                <FileDown className="h-3 w-3" /> Download all notes (PDF)
               </button>
             )}
           </div>
-          <p className="text-[10px] text-slate-500 leading-relaxed">
-            Each part is written by your active AI provider from the book text, saved to your highlights immediately, and
-            kept even if you press Stop. Page citations open the reader.
-          </p>
           {notesError && (
-            <div className="p-2 rounded-lg bg-rose-50 border border-rose-200 text-[10px] text-rose-800 flex items-start gap-1.5">
-              <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" /> <span>{notesError}</span>
+            <div className="mt-1.5 flex items-start gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] text-rose-800 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300">
+              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> <span>{notesError}</span>
             </div>
           )}
           {madeNotes.length > 0 && (
-            <div className="space-y-2 max-h-56 overflow-y-auto">
+            <div className="mt-2 max-h-40 space-y-2 overflow-y-auto">
               {madeNotes.map((n, i) => (
-                <div key={`${n.range}-${i}`} className="p-2 rounded-lg border border-slate-200 bg-slate-50">
-                  <div className="text-[9px] font-mono font-bold text-slate-500 mb-1">{n.range}</div>
-                  <RevisionNote text={n.text} topic={docs.find((d) => d.id === activeDocId)?.title} />
+                <div key={`${n.range}-${i}`} className={`rounded-lg border p-2 ${t.panelSoft}`}>
+                  <div className={`mb-1 font-mono text-[9px] font-bold ${t.dim}`}>{n.range}</div>
+                  <RevisionNote text={n.text} topic={activeDoc?.title} />
                 </div>
               ))}
             </div>
@@ -1707,421 +1942,713 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
         </div>
       )}
 
-      {/* Library / doc errors */}
+      {/* ======================= Errors ======================= */}
       {(libraryError || docOpenError) && (
-        <div className="mt-2 p-2.5 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-xl flex items-center gap-2">
-          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+        <div className="flex shrink-0 items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-2.5 py-2 text-xs text-rose-800 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300">
+          <AlertCircle className="h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
           <span className="flex-1">{libraryError || docOpenError}</span>
-          <button onClick={() => { setLibraryError(null); setDocOpenError(null); }}><X className="w-3.5 h-3.5" /></button>
+          <button onClick={() => { setLibraryError(null); setDocOpenError(null); }}><X className="h-3.5 w-3.5" /></button>
         </div>
       )}
 
-      {/* Main area */}
-      <div className="flex-1 min-h-0 flex gap-2 mt-2 pb-2 relative">
-        {/* Left: library list + thumbnails */}
-        <div className={`${showLibrary ? 'hidden md:flex' : 'hidden'} flex-col w-44 shrink-0 bg-white rounded-2xl border border-slate-200 shadow-sm`}>
-          <div className="p-2 border-b border-slate-100">
-            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 px-1 pb-1 flex items-center gap-1">
-              <BookOpen className="w-3 h-3" /> Library
-            </div>
-            <div className="max-h-28 overflow-y-auto space-y-1">
-              {docs.map((d) => (
-                <div
-                  key={d.id}
-                  onClick={() => openDoc(d.id)}
-                  className={`group flex items-center justify-between px-2 py-1.5 rounded-lg text-[11px] cursor-pointer ${
-                    d.id === activeDocId ? 'bg-teal-50 text-[#00696b] font-semibold border border-[#0f8b8d]/30' : 'hover:bg-slate-50 text-slate-700'
-                  }`}
-                >
-                  <span className="truncate">{d.title}</span>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleDeleteDoc(d.id); }}
-                    className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-rose-600 shrink-0"
-                    title="Delete from library"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
-              ))}
-              {!docs.length && <div className="text-[10px] text-slate-400 px-2 py-1">Import with “Open file”</div>}
-            </div>
-            {activeDoc && (
-              <div className="mt-1.5 pt-1.5 border-t border-slate-100 flex items-center justify-between gap-1 text-[10px]">
-                <button
-                  onClick={editSubject}
-                  className="truncate font-semibold text-[#00696b] hover:underline"
-                  title="Edit the subject for this book"
-                >
-                  {activeDoc.subject || 'Uncategorised'}
-                </button>
-                <button
-                  onClick={classifyWithAi}
-                  className="shrink-0 px-1.5 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold"
-                  title="Classify this book's subject with your active AI"
-                >
-                  AI
-                </button>
-              </div>
-            )}
-          </div>
-          {/* Thumbnails (lazy render) */}
-          <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-2" data-thumb-scroll>
-            {numPages > 0 && activeDoc?.fileType === 'docx' && Array.from({ length: numPages }, (_, i) => i + 1).map((n) => (
-              <button
-                key={n}
-                onClick={() => gotoPage(n)}
-                className={`w-full text-left px-2 py-1.5 rounded-lg text-[11px] font-mono ${
-                  n === currentPage ? 'bg-teal-50 text-[#00696b] border border-[#0f8b8d]/30 font-bold' : 'text-slate-600 hover:bg-slate-50'
-                }`}
-              >
-                Page {n}
-              </button>
-            ))}
-            {numPages > 0 && activeDoc?.fileType !== 'docx' && Array.from({ length: numPages }, (_, i) => i + 1).map((n) => (
-              <Thumb
-                key={n}
-                num={n}
-                active={n === currentPage}
-                scaleHint={fitScale()}
-                pdfRef={pdfRef}
-                onClick={() => gotoPage(n)}
-              />
-            ))}
-            {!numPages && (
-              <div className="h-full flex flex-col items-center justify-center text-center p-3">
-                {loadingDoc ? (
-                  <Loader2 className="w-5 h-5 animate-spin text-[#0f8b8d]" />
-                ) : (
-                  <>
-                    <FileText className="w-6 h-6 text-slate-300 mb-1" />
-                    <p className="text-[10px] text-slate-400 leading-relaxed">
-                      Open a PDF to start reading. Files stay on this machine (IndexedDB).
-                    </p>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Center: continuous scroll viewer */}
-        <div
-          ref={scrollRef}
-          onPointerDown={handlePointerDown}
-          onMouseUp={handleMouseUp}
-          className={`flex-1 min-w-0 bg-slate-300/70 overflow-y-auto overflow-x-auto ${
-            // `relative` must NOT be present while immersive: Tailwind emits .fixed before
-            // .relative, so both classes together resolve to relative and the viewer never
-            // actually goes full screen.
-            immersive ? 'fixed inset-0 z-50 rounded-none border-0' : 'relative rounded-2xl border border-slate-300'
+      {/* ======================= MAIN: document stream + spatial plate ======================= */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-12">
+        {/* LEFT — document stream */}
+        <article
+          className={`flex min-h-0 flex-col overflow-hidden rounded-xl border ${t.panel} ${
+            immersive ? 'fixed inset-0 z-50 rounded-none' : panelOpen && suiteMode !== 'text' ? 'lg:col-span-7' : 'lg:col-span-12'
           }`}
-          style={{ scrollbarGutter: 'stable' }}
         >
-          {immersive && (
-            <button
-              onClick={() => setImmersive(false)}
-              title="Exit full screen"
-              className="fixed top-3 right-3 z-[60] px-3 py-1.5 rounded-lg bg-slate-900/85 text-white text-xs font-bold flex items-center gap-1.5 hover:bg-slate-900 shadow-lg"
-            >
-              <X className="w-3.5 h-3.5" /> Exit full screen
-            </button>
-          )}
-          {loadingDoc && (
-            <div className="absolute inset-0 z-10 bg-white/70 flex items-center justify-center">
-              <Loader2 className="w-6 h-6 animate-spin text-[#0f8b8d]" />
-            </div>
-          )}
-          {viewMode === 'text' && numPages > 0 ? (
-            <div className="h-full overflow-y-auto bg-white">
-              <div className="max-w-3xl mx-auto p-5">
-                <div className="sticky top-0 bg-white/95 backdrop-blur pb-2 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 mb-3">
-                  <span className="text-[11px] font-bold text-slate-700">
-                    Extracted text · page {textView.page} / {numPages}
-                  </span>
-                  <div className="flex items-center gap-1">
+          <header className={`flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-2.5 py-1.5 ${t.divider}`}>
+            <div className="flex min-w-0 items-center gap-2">
+              <BookOpen className={`h-4 w-4 shrink-0 ${t.accent}`} />
+              <div className="min-w-0">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className={`truncate text-[11px] font-bold ${t.strong}`}>{activeDoc?.title ?? 'No document open'}</span>
+                  {activeDoc && (
                     <button
-                      onClick={() => gotoPage(currentPage - 1)}
-                      disabled={currentPage <= 1}
-                      className="p-1 rounded-lg border border-slate-200 disabled:opacity-30 hover:bg-slate-50"
+                      onClick={editSubject}
+                      title="Edit subject"
+                      className={`shrink-0 rounded border px-1 py-0.5 font-mono text-[8px] uppercase tracking-wider ${t.chip}`}
                     >
-                      <ChevronLeft className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={() => gotoPage(currentPage + 1)}
-                      disabled={currentPage >= numPages}
-                      className="p-1 rounded-lg border border-slate-200 disabled:opacity-30 hover:bg-slate-50"
-                    >
-                      <ChevronRight className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-                {textView.loading ? (
-                  <div className="flex items-center gap-2 text-xs text-slate-500 py-8">
-                    <Loader2 className="w-4 h-4 animate-spin text-[#0f8b8d]" /> Extracting page text…
-                  </div>
-                ) : (
-                  <div className="text-[12px] leading-relaxed text-slate-800 whitespace-pre-wrap">
-                    {textView.text || 'No extractable text on this page. Run OCR from the toolbar to read a scanned page.'}
-                  </div>
-                )}
-                <p className="mt-6 pt-3 border-t border-slate-100 text-[10px] text-slate-400">
-                  Extracted text comes from the document itself or from a real OCR run — it is never invented.
-                </p>
-              </div>
-            </div>
-          ) : pdfRef.current && numPages > 0 ? (
-            <div
-              className="py-4 px-2 flex flex-col items-center gap-4"
-              style={{
-                // pdf.js 5.7 sizes text-layer spans with --total-scale-factor, which its CSS only
-                // defines inside `.pdfViewer .page`. Outside that selector the calc() is invalid
-                // and every span falls back to a default size — that is what made selections
-                // balloon past the words. Define both properties for our standalone layer.
-                ['--scale-factor' as any]: String(scale),
-                ['--total-scale-factor' as any]: String(scale),
-                ['--user-unit' as any]: '1',
-              }}
-            >
-              {Array.from({ length: numPages }, (_, i) => i + 1).map((n) => {
-                const base = baseDimsRef.current;
-                const w = base ? Math.floor(base.w * scale) : 620;
-                const h = base ? Math.floor(base.h * scale) : 800;
-                return (
-                  <div
-                    key={n}
-                    data-page-number={n}
-                    ref={(el) => setPageWrapRef(n, el)}
-                    className="relative bg-white shadow-md border border-slate-300 rounded-sm overflow-hidden"
-                    style={{ width: w, height: h, containerType: 'size' }}
-                  >
-                    {/* canvas slot */}
-                    <div data-canvas-slot className="absolute inset-0 pointer-events-none" />
-                    {/* text layer slot (pdf.js TextLayer fills it) */}
-                    <div data-text-slot className="textLayer absolute inset-0 overflow-hidden" />
-                    {/* OCR text layer — invisible selectable text over the scan (Acrobat's model).
-                        Percentages + cqh keep it aligned at any zoom; scaleX fits each word to its box. */}
-                    {ocrWordsRef.current.has(n) && !nativeTextPagesRef.current.has(n) && (
-                      <div className="ocrTextLayer absolute inset-0 overflow-hidden select-text" style={{ zIndex: 2 }}>
-                        {ocrWordsRef.current.get(n)!.map((w, i) => (
-                          <span
-                            key={i}
-                            className="absolute select-text"
-                            style={{
-                              left: `${w.bbox.x0 * 100}%`,
-                              top: `${w.bbox.y0 * 100}%`,
-                              width: `${(w.bbox.x1 - w.bbox.x0) * 100}%`,
-                              height: `${(w.bbox.y1 - w.bbox.y0) * 100}%`,
-                              fontSize: `${(w.bbox.y1 - w.bbox.y0) * 100}cqh`,
-                              lineHeight: `${(w.bbox.y1 - w.bbox.y0) * 100}cqh`,
-                              transform: `scaleX(${w.sx ?? 1})`,
-                              transformOrigin: 'left top',
-                              whiteSpace: 'pre',
-                              color: 'transparent',
-                              userSelect: 'text',
-                              cursor: 'text',
-                            }}
-                          >
-                            {w.text + ' '}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    {/* saved highlight overlay (normalised rects, so it scales with zoom) */}
-                    {highlights
-                      .filter((h) => h.page === n && h.rects && h.rects.length > 0)
-                      .map((h) =>
-                        (h.rects ?? []).map((r, ri) => (
-                          <div
-                            key={`${h.id}-${ri}`}
-                            title={h.quote.slice(0, 160)}
-                            className="absolute rounded-[1px] mix-blend-multiply pointer-events-none"
-                            style={{
-                              left: `${r.x * 100}%`,
-                              top: `${r.y * 100}%`,
-                              width: `${r.w * 100}%`,
-                              height: `${r.h * 100}%`,
-                              background: HL_COLORS.find((c) => c.id === h.color)?.css ?? '#fde047',
-                              opacity: 0.42,
-                              pointerEvents: 'none',
-                              zIndex: 3,
-                            }}
-                          />
-                        )),
-                      )}
-                    {/* page number plate */}
-                    <div className="absolute bottom-1 right-2 text-[9px] text-slate-400 font-mono select-none z-10 bg-white/70 px-1 rounded">
-                      {n}
-                    </div>
-                    {/* render error */}
-                    {pageErrors[n] && (
-                      <div className="absolute inset-0 flex items-center justify-center p-4 bg-rose-50/90 text-xs text-rose-700 text-center z-10">
-                        <span>{pageErrors[n]}</span>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            !loadingDoc && (
-              <div className="h-full flex flex-col items-center justify-center text-center p-8 space-y-3">
-                <div className="w-14 h-14 rounded-2xl bg-white border border-slate-200 shadow-sm flex items-center justify-center">
-                  <BookOpen className="w-7 h-7 text-slate-300" />
-                </div>
-                <h3 className="text-sm font-bold text-slate-800">Real PDF reader</h3>
-                <p className="text-xs text-slate-500 max-w-sm leading-relaxed">
-                  Import your books with <strong>Open PDF</strong>. Pages render on demand while you scroll (fast even for
-                  1,500-page texts), text is selectable, highlights &amp; notes are saved, and search covers the entire book.
-                </p>
-              </div>
-            )
-          )}
-        </div>
-
-        {/* Floating selection popup (positioned relative to the viewer row) */}
-        {popup && (
-          <div
-            className="absolute z-30 bg-white border border-slate-200 shadow-xl rounded-xl px-2 py-1.5 flex items-center gap-1"
-            style={{ left: popup.x, top: popup.y }}
-          >
-            {HL_COLORS.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => saveSelectionHighlight(c.id)}
-                title={`Highlight ${c.label}`}
-                className="w-5 h-5 rounded-full border border-slate-300 hover:scale-110 transition-transform"
-                style={{ background: c.css }}
-              />
-            ))}
-            <div className="w-px h-4 bg-slate-200 mx-0.5" />
-            <button onClick={copySelection} className="p-1 rounded hover:bg-slate-100 text-slate-500" title="Copy">
-              {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-            </button>
-            <button onClick={() => openAskPanel('selection')} className="px-2 py-1 rounded-lg bg-[#001432] text-white text-[10px] font-bold flex items-center gap-1" title="Ask AI about this selection">
-              <Sparkles className="w-3 h-3 text-[#8ff3f4]" /> Ask AI
-            </button>
-            <button onClick={() => setPopup(null)} className="p-1 rounded hover:bg-slate-100 text-slate-400"><X className="w-3 h-3" /></button>
-          </div>
-        )}
-
-        {/* Right: notes/highlights + Ask AI */}
-        {showNotes && (
-          <div className="hidden lg:flex flex-col w-80 shrink-0 bg-white rounded-2xl border border-slate-200 shadow-sm">
-            <div className="p-3 border-b border-slate-100 flex items-center justify-between">
-              <div className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                <StickyNote className="w-3.5 h-3.5 text-amber-500" /> Highlights &amp; notes
-              </div>
-              <button onClick={() => setShowNotes(false)} className="text-slate-400 hover:text-slate-600"><X className="w-3.5 h-3.5" /></button>
-            </div>
-
-            {/* Ask AI panel — context-first assistant rail */}
-            <div className="border-b border-slate-100 bg-gradient-to-br from-white to-teal-50/50 p-3 space-y-2.5">
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className="w-7 h-7 rounded-lg bg-[#001432] flex items-center justify-center shrink-0 shadow-xs">
-                    <Sparkles className="w-3.5 h-3.5 text-[#8ff3f4]" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[11px] font-bold text-slate-900 leading-tight">Ask AI</div>
-                    <div className="text-[9px] text-slate-500 truncate">
-                      <span className="capitalize">{askContextLabel}</span> · grounded in this passage
-                    </div>
-                  </div>
-                </div>
-                <div className="flex items-center gap-1 shrink-0">
-                  {activeAskProvider ? (
-                    <span
-                      className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-white border border-teal-200 text-[#00696b] max-w-[96px] truncate"
-                      title={providerLabel}
-                    >
-                      {activeAskProvider} · {getEffectiveModel(activeAskProvider)}
-                    </span>
-                  ) : (
-                    <button
-                      onClick={() => onNavigate('settings')}
-                      className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 border border-amber-200 text-amber-800"
-                    >
-                      Connect AI
+                      {activeDoc.subject || 'Uncategorised'}
                     </button>
                   )}
-                  <button
-                    onClick={() => setAskPanel(false)}
-                    title="Hide the answer"
-                    className="text-slate-400 hover:text-slate-600 p-0.5"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
+                  {activeDoc && (
+                    <button onClick={classifyWithAi} title="Classify the subject with your active AI" className={`shrink-0 rounded border px-1 py-0.5 font-mono text-[8px] font-bold ${t.chipAccent}`}>
+                      AI
+                    </button>
+                  )}
+                </div>
+                <div className={`font-mono text-[9px] ${t.dim}`}>
+                  {activeDoc ? `${activeDoc.fileType?.toUpperCase() ?? ''} · page ${currentPage} of ${numPages} · ${highlights.length} highlights` : 'Import a PDF or DOCX to begin'}
                 </div>
               </div>
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setShowThumbs((v) => !v)}
+                title="Page thumbnails"
+                className={`rounded-lg border p-1.5 transition ${showThumbs ? t.chipAccent : `${t.chip} ${t.softHover}`}`}
+              >
+                <LayoutGrid className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={() => setShowNotes((v) => !v)}
+                title={panelOpen ? 'Hide the spatial plate' : 'Show the spatial plate'}
+                className={`hidden rounded-lg border p-1.5 transition lg:block ${panelOpen ? t.chipAccent : `${t.chip} ${t.softHover}`}`}
+              >
+                <PanelRight className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={toggleFullscreen}
+                title={immersive ? 'Exit full screen' : 'Full screen reader'}
+                className={`rounded-lg border p-1.5 transition ${t.chip} ${t.softHover}`}
+              >
+                <Maximize className="h-3.5 w-3.5" />
+              </button>
+              <button onClick={printDocument} title="Print" className={`rounded-lg border p-1.5 transition ${t.chip} ${t.softHover}`}>
+                <Printer className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </header>
 
-              {!activeAskProvider && (
-                <div className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-[10px] leading-snug text-amber-800">
-                  No AI provider is active.{' '}
-                  <button onClick={() => onNavigate('settings')} className="font-bold underline decoration-dotted">
-                    Connect one in Settings
-                  </button>{' '}
-                  to ask about this page.
+          <div className="relative min-h-0 flex-1">
+            {suiteMode === 'flashcard' ? (
+              <div className={`flex h-full min-h-[280px] flex-col items-center justify-center gap-3 p-4 ${t.reader}`}>
+                {!flashcards.length ? (
+                  <>
+                    <div className={`flex h-12 w-12 items-center justify-center rounded-xl border ${t.chipAccent}`}>
+                      <Zap className="h-5 w-5" />
+                    </div>
+                    <div className="text-center">
+                      <p className={`text-xs font-bold ${t.strong}`}>Flashcard drill · page {currentPage}</p>
+                      <p className={`mx-auto mt-1 max-w-sm text-[11px] leading-relaxed ${t.muted}`}>
+                        The active AI writes recall cards from this page only — prompt on the front, answer and an exam pearl on the back.
+                      </p>
+                    </div>
+                    {flashError && (
+                      <p className="max-w-sm text-center text-[10px] leading-snug text-rose-600 dark:text-rose-300">{flashError}</p>
+                    )}
+                    <button
+                      onClick={generateFlashcards}
+                      disabled={flashBusy}
+                      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-bold disabled:opacity-40 ${t.cta}`}
+                    >
+                      {flashBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                      {flashBusy ? 'Writing cards…' : 'Generate 8 flashcards'}
+                    </button>
+                  </>
+                ) : (
+                  <div className="flex w-full max-w-xl flex-col gap-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`font-mono text-[10px] uppercase tracking-wider ${t.dim}`}>
+                        Card {flashIndex + 1} / {flashcards.length} · page {currentPage}
+                      </span>
+                      <button
+                        onClick={generateFlashcards}
+                        disabled={flashBusy}
+                        className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-bold disabled:opacity-40 ${t.chip}`}
+                      >
+                        {flashBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />} Regenerate
+                      </button>
+                    </div>
+
+                    <button
+                      onClick={() => setFlashFlipped((f) => !f)}
+                      className={`flex min-h-[170px] flex-col rounded-xl border p-3.5 text-left transition ${t.panelSoft} ${t.border} ${t.softHover}`}
+                    >
+                      <span className={`w-fit rounded border px-1.5 py-0.5 font-mono text-[8px] font-bold uppercase tracking-wider ${flashFlipped ? t.chipAccent : t.chip}`}>
+                        {flashFlipped ? 'Answer' : 'Front · tap to flip'}
+                      </span>
+                      <p className={`mt-2 flex-1 text-[13px] font-semibold leading-relaxed ${t.strong}`}>
+                        {flashFlipped ? flashcard.back : flashcard.front}
+                      </p>
+                      {flashFlipped && flashcard.pearl && (
+                        <p className={`mt-2 border-t pt-2 text-[10px] leading-snug ${t.divider} ${t.accent}`}>
+                          <span className="font-bold uppercase tracking-wider">Pearl · </span>{flashcard.pearl}
+                        </p>
+                      )}
+                    </button>
+
+                    <div className="flex items-center justify-between gap-2">
+                      <button
+                        onClick={() => { setFlashIndex((i) => Math.max(0, i - 1)); setFlashFlipped(false); }}
+                        disabled={flashIndex === 0}
+                        className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-bold disabled:opacity-30 ${t.chip}`}
+                      >
+                        <ChevronLeft className="h-3 w-3" /> Previous
+                      </button>
+                      <div className="flex items-center gap-1">
+                        {flashcards.map((_, i) => (
+                          <button
+                            key={i}
+                            onClick={() => { setFlashIndex(i); setFlashFlipped(false); }}
+                            title={`Card ${i + 1}`}
+                            className={`h-1.5 rounded-full transition-all ${i === flashIndex ? 'w-4 bg-[#0f8b8d]' : 'w-1.5 bg-slate-400/40 hover:bg-slate-400'}`}
+                          />
+                        ))}
+                      </div>
+                      <button
+                        onClick={() => { setFlashIndex((i) => Math.min(flashcards.length - 1, i + 1)); setFlashFlipped(false); }}
+                        disabled={flashIndex >= flashcards.length - 1}
+                        className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-bold disabled:opacity-30 ${t.chip}`}
+                      >
+                        Next <ChevronRight className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div
+                ref={scrollRef}
+                onPointerDown={handlePointerDown}
+                onMouseUp={handleMouseUp}
+                className={`h-full overflow-auto ${t.reader} ${immersive ? '' : ''}`}
+                style={{ scrollbarGutter: 'stable' }}
+                data-ocr-version={wordsVersion}
+              >
+                {loadingDoc && (
+                  <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/70 dark:bg-slate-900/70">
+                    <Loader2 className={`h-6 w-6 animate-spin ${t.accent}`} />
+                  </div>
+                )}
+
+                {viewMode === 'text' && numPages > 0 ? (
+                  <div className={`min-h-full ${t.panel}`}>
+                    <div className="mx-auto max-w-3xl p-4">
+                      <div className={`sticky top-0 z-10 flex flex-wrap items-center justify-between gap-2 border-b pb-2 ${t.divider} ${t.panel}`}>
+                        <span className={`font-mono text-[10px] uppercase tracking-wider ${t.muted}`}>
+                          Extracted text · page {textView.page} / {numPages}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => gotoPage(currentPage - 1)} disabled={currentPage <= 1} className={`rounded-lg border p-1 disabled:opacity-30 ${t.chip}`}>
+                            <ChevronLeft className="h-3.5 w-3.5" />
+                          </button>
+                          <button onClick={() => gotoPage(currentPage + 1)} disabled={currentPage >= numPages} className={`rounded-lg border p-1 disabled:opacity-30 ${t.chip}`}>
+                            <ChevronRight className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                      {textView.loading ? (
+                        <div className={`flex items-center gap-2 py-8 text-xs ${t.muted}`}>
+                          <Loader2 className={`h-4 w-4 animate-spin ${t.accent}`} /> Extracting page text…
+                        </div>
+                      ) : (
+                        <div className={`whitespace-pre-wrap text-[13px] leading-7 ${t.text}`}>
+                          {textView.text || 'No extractable text on this page. Run OCR from the toolbar to read a scanned page.'}
+                        </div>
+                      )}
+                      <p className={`mt-6 border-t pt-3 text-[10px] ${t.divider} ${t.dim}`}>
+                        Extracted text comes from the document itself or from a real OCR run — it is never invented.
+                      </p>
+                    </div>
+                  </div>
+                ) : pdfRef.current && numPages > 0 ? (
+                  <div
+                    className="flex flex-col items-center gap-4 px-2 py-4"
+                    style={{
+                      ['--scale-factor' as any]: String(scale),
+                      ['--total-scale-factor' as any]: String(scale),
+                      ['--user-unit' as any]: '1',
+                    }}
+                  >
+                    {Array.from({ length: numPages }, (_, i) => i + 1).map((n) => {
+                      const base = baseDimsRef.current;
+                      const w = base ? Math.floor(base.w * scale) : 620;
+                      const h = base ? Math.floor(base.h * scale) : 800;
+                      return (
+                        <div
+                          key={n}
+                          data-page-number={n}
+                          ref={(el) => setPageWrapRef(n, el)}
+                          className="relative overflow-hidden rounded-sm border border-slate-300 bg-white shadow-md"
+                          style={{ width: w, height: h, containerType: 'size' }}
+                        >
+                          <div data-canvas-slot className="pointer-events-none absolute inset-0" />
+                          <div data-text-slot className="textLayer absolute inset-0 overflow-hidden" />
+                          {ocrWordsRef.current.has(n) && !nativeTextPagesRef.current.has(n) && (
+                            <div className="ocrTextLayer absolute inset-0 select-text overflow-hidden" style={{ zIndex: 2 }}>
+                              {ocrWordsRef.current.get(n)!.map((word, i) => (
+                                <span
+                                  key={i}
+                                  className="absolute select-text"
+                                  style={{
+                                    left: `${word.bbox.x0 * 100}%`,
+                                    top: `${word.bbox.y0 * 100}%`,
+                                    width: `${(word.bbox.x1 - word.bbox.x0) * 100}%`,
+                                    height: `${(word.bbox.y1 - word.bbox.y0) * 100}%`,
+                                    fontSize: `${(word.bbox.y1 - word.bbox.y0) * 100}cqh`,
+                                    lineHeight: `${(word.bbox.y1 - word.bbox.y0) * 100}cqh`,
+                                    transform: `scaleX(${word.sx ?? 1})`,
+                                    transformOrigin: 'left top',
+                                    whiteSpace: 'pre',
+                                    color: 'transparent',
+                                    userSelect: 'text',
+                                    cursor: 'text',
+                                  }}
+                                >
+                                  {word.text + ' '}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {highlights
+                            .filter((h) => h.page === n && h.rects && h.rects.length > 0)
+                            .map((h) =>
+                              (h.rects ?? []).map((r, ri) => (
+                                <div
+                                  key={`${h.id}-${ri}`}
+                                  title={h.quote.slice(0, 160)}
+                                  className="pointer-events-none absolute rounded-[1px] mix-blend-multiply"
+                                  style={{
+                                    left: `${r.x * 100}%`,
+                                    top: `${r.y * 100}%`,
+                                    width: `${r.w * 100}%`,
+                                    height: `${r.h * 100}%`,
+                                    background: HL_COLORS.find((c) => c.id === h.color)?.css ?? '#fde047',
+                                    opacity: 0.42,
+                                    zIndex: 3,
+                                  }}
+                                />
+                              )),
+                            )}
+                          <div className="absolute bottom-1 right-2 z-10 select-none rounded bg-white/70 px-1 font-mono text-[9px] text-slate-400">
+                            {n}
+                          </div>
+                          {pageErrors[n] && (
+                            <div className="absolute inset-0 z-10 flex items-center justify-center bg-rose-50/90 p-4 text-center text-xs text-rose-700">
+                              <span>{pageErrors[n]}</span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  !loadingDoc && (
+                    <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+                      <div className={`flex h-14 w-14 items-center justify-center rounded-2xl border ${t.panelSoft}`}>
+                        <BookOpen className={`h-7 w-7 ${t.dim}`} />
+                      </div>
+                      <h3 className={`text-sm font-bold ${t.strong}`}>Clinical reading suite</h3>
+                      <p className={`max-w-sm text-xs leading-relaxed ${t.muted}`}>
+                        Import a book with <strong>Import</strong>. Pages render on demand, text is selectable, highlights and notes persist,
+                        and the spatial plate keeps the current page beside the text.
+                      </p>
+                      <button onClick={() => fileInputRef.current?.click()} className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-bold ${t.cta}`}>
+                        <UploadCloud className="h-3.5 w-3.5" /> Import your first book
+                      </button>
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+
+            {/* selection popup — coordinates are relative to this positioned parent */}
+            {popup && (
+              <div
+                className="absolute z-30 flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-2 py-1.5 shadow-xl"
+                style={{ left: popup.x, top: popup.y }}
+              >
+                {HL_COLORS.map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => saveSelectionHighlight(c.id)}
+                    title={`Highlight ${c.label}`}
+                    className="h-5 w-5 rounded-full border border-slate-300 transition-transform hover:scale-110"
+                    style={{ background: c.css }}
+                  />
+                ))}
+                <div className="mx-0.5 h-4 w-px bg-slate-200" />
+                <button onClick={copySelection} className="rounded p-1 text-slate-500 hover:bg-slate-100" title="Copy">
+                  {copied ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
+                </button>
+                <button
+                  onClick={() => openAskPanel('selection')}
+                  className="flex items-center gap-1 rounded-lg bg-[#001432] px-2 py-1 text-[10px] font-bold text-white"
+                  title="Ask the copilot about this selection"
+                >
+                  <Sparkles className="h-3 w-3 text-[#8ff3f4]" /> Ask AI
+                </button>
+                <button onClick={() => setPopup(null)} className="rounded p-1 text-slate-400 hover:bg-slate-100"><X className="h-3 w-3" /></button>
+              </div>
+            )}
+          </div>
+
+          {showThumbs && numPages > 0 && (
+            <div className={`shrink-0 border-t ${t.divider}`}>
+              {activeDoc?.fileType === 'docx' ? (
+                <div className="flex gap-1 overflow-x-auto p-1.5">
+                  {Array.from({ length: numPages }, (_, i) => i + 1).map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => gotoPage(n)}
+                      className={`shrink-0 rounded border px-2 py-1 font-mono text-[10px] ${n === currentPage ? t.chipAccent : t.chip}`}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex gap-1.5 overflow-x-auto p-1.5">
+                  {Array.from({ length: numPages }, (_, i) => i + 1).map((n) => (
+                    <div key={n} className="w-14 shrink-0">
+                      <Thumb
+                        num={n}
+                        active={n === currentPage}
+                        scaleHint={fitScale()}
+                        pdfRef={pdfRef}
+                        onClick={() => gotoPage(n)}
+                      />
+                    </div>
+                  ))}
                 </div>
               )}
+            </div>
+          )}
+        </article>
 
-              {/* One-tap prompts: the fastest path from reading to an answer */}
-              <div className="flex gap-1 overflow-x-auto pb-0.5 -mb-0.5">
-                {ASK_QUICK_PROMPTS.map((preset) => (
+        {/* RIGHT — spatial plate + correlation + highlights */}
+        {panelOpen && suiteMode !== 'text' && (
+          <section className={`flex min-h-0 flex-col overflow-hidden rounded-xl border lg:col-span-5 ${t.panel}`}>
+            <header className={`flex shrink-0 items-center justify-between gap-2 border-b px-2.5 py-1.5 ${t.divider}`}>
+              <div className={`flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-wider ${t.muted}`}>
+                <Activity className={`h-3.5 w-3.5 ${t.accent}`} /> Spatial plate
+              </div>
+              <div className={`flex items-center gap-0.5 rounded-lg border p-0.5 ${t.seg}`}>
+                <button
+                  onClick={() => setPlateTab('plate')}
+                  className={`rounded px-1.5 py-0.5 font-mono text-[9px] font-semibold ${plateTab === 'plate' ? t.tabOn : t.tabOff}`}
+                >
+                  Plate
+                </button>
+                <button
+                  onClick={() => setPlateTab('highlights')}
+                  className={`rounded px-1.5 py-0.5 font-mono text-[9px] font-semibold ${plateTab === 'highlights' ? t.tabOn : t.tabOff}`}
+                >
+                  Highlights {highlights.length}
+                </button>
+              </div>
+            </header>
+
+            {plateTab === 'plate' ? (
+              <>
+                <div className={`flex shrink-0 flex-wrap items-center justify-between gap-1 border-b px-2 py-1.5 ${t.divider}`}>
+                  <div className="flex items-center gap-0.5">
+                    <button
+                      onClick={() => setCaliperMode((v) => !v)}
+                      title="Caliper — drag on the plate to measure"
+                      className={`rounded-md border p-1 transition ${caliperMode ? t.chipAccent : `${t.chip} ${t.softHover}`}`}
+                    >
+                      <Ruler className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      onClick={() => setInvertPlate((v) => !v)}
+                      title="Invert contrast"
+                      className={`rounded-md border p-1 transition ${invertPlate ? t.chipAccent : `${t.chip} ${t.softHover}`}`}
+                    >
+                      <Contrast className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      onClick={() => { setWlPreset('normal'); setInvertPlate(false); setPlateZoom(1); }}
+                      title="Reset window / level"
+                      className={`rounded-md border p-1 transition ${t.chip} ${t.softHover}`}
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-0.5">
+                    {(Object.keys(PLATE_FILTERS) as Array<keyof typeof PLATE_FILTERS>).map((key) => (
+                      <button
+                        key={key}
+                        onClick={() => setWlPreset(key)}
+                        title={`W/L preset: ${PLATE_FILTERS[key].label}`}
+                        className={`rounded border px-1.5 py-0.5 font-mono text-[8px] font-semibold uppercase tracking-wider transition ${
+                          wlPreset === key ? t.chipAccent : t.chip
+                        }`}
+                      >
+                        {PLATE_FILTERS[key].label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className={`flex items-center gap-1 rounded border px-1 py-0.5 ${t.chip}`}>
+                    <button onClick={() => setPlateZoom((z) => Math.max(1, +(z - 0.25).toFixed(2)))} title="Plate zoom out">
+                      <ZoomOut className="h-3 w-3" />
+                    </button>
+                    <span className="w-8 text-center font-mono text-[9px]">{Math.round(plateZoom * 100)}%</span>
+                    <button onClick={() => setPlateZoom((z) => Math.min(3, +(z + 0.25).toFixed(2)))} title="Plate zoom in">
+                      <ZoomIn className="h-3 w-3" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className={`relative min-h-[170px] flex-1 overflow-auto ${t.plate}`}>
+                  <PagePlate
+                    pdfRef={pdfRef}
+                    page={currentPage}
+                    zoom={plateZoom}
+                    filter={PLATE_FILTERS[wlPreset].css}
+                    invert={invertPlate}
+                    caliper={caliperMode}
+                    highlights={pageHighlights}
+                    hasDocument={numPages > 0 && !!(pdfRef.current || activeDoc?.fileType === 'docx')}
+                  />
+
+                  {/* HUD — monospaced telemetry fixed to the viewport, not the raster */}
+                  <div className="pointer-events-none absolute left-2 top-2 z-10 max-w-[62%] font-mono text-[8px] leading-tight text-slate-400">
+                    <div className="truncate text-[9px] font-semibold text-slate-100">{activeDoc?.title ?? 'NO DOCUMENT'}</div>
+                    <div>PLATE · PAGE {currentPage} / {numPages || '—'}</div>
+                    <div className="truncate">{activeDoc?.subject?.toUpperCase() ?? 'UNCATEGORISED'}</div>
+                  </div>
+                  <div className="pointer-events-none absolute right-2 top-2 z-10 text-right font-mono text-[8px] leading-tight text-slate-400">
+                    <div className="font-bold text-cyan-300">PLATE {Math.round(plateZoom * 100)}%</div>
+                    <div>READER {Math.round(scale * 100)}%</div>
+                    <div>{pageHighlights.length} PIN · {highlights.length} HL</div>
+                  </div>
+                  <div className="pointer-events-none absolute bottom-2 left-2 z-10 font-mono text-[8px] leading-tight text-slate-400">
+                    <div>{activeDoc?.fileType?.toUpperCase() ?? '—'} · {currentOcr ? 'OCR LAYER' : currentNativeText ? 'NATIVE TEXT' : 'RASTER'}</div>
+                    <div className={caliperMode ? 'font-bold text-cyan-300' : ''}>{caliperMode ? 'CALIPER: DRAG TO MEASURE' : 'CALIPER: OFF'}</div>
+                  </div>
+                  <div className="pointer-events-none absolute bottom-2 right-2 z-10 text-right font-mono text-[8px] leading-tight text-slate-400">
+                    <div className="text-slate-200">SERIES: PAGE {String(currentPage).padStart(3, '0')}</div>
+                    <div className="text-cyan-300">{currentPage >= numPages ? 'END OF BOOK' : `NEXT ${currentPage + 1}`}</div>
+                  </div>
+                </div>
+
+                <div className={`shrink-0 border-t px-2 py-1.5 ${t.divider}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className={`flex items-center gap-1 font-mono text-[9px] font-bold uppercase tracking-wider ${t.accent}`}>
+                      <Stethoscope className="h-3 w-3" /> Live clinical correlation
+                    </span>
+                    <button
+                      onClick={correlatePage}
+                      disabled={correlBusy}
+                      className={`flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[8px] font-bold uppercase tracking-wider disabled:opacity-40 ${t.chipAccent}`}
+                    >
+                      {correlBusy ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Sparkles className="h-2.5 w-2.5" />}
+                      {correlBusy ? 'Reading…' : 'Correlate'}
+                    </button>
+                  </div>
+                  {correlError ? (
+                    <p className="mt-1 text-[9px] leading-snug text-rose-600 dark:text-rose-300">{correlError}</p>
+                  ) : correlation ? (
+                    <div className={`mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap text-[9px] leading-relaxed ${t.muted}`}>{correlation}</div>
+                  ) : (
+                    <p className={`mt-1 text-[9px] leading-snug ${t.dim}`}>
+                      Links mechanism → imaging / gross appearance → clinical consequence for page {currentPage}.
+                    </p>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                {highlights.length === 0 && (
+                  <p className={`text-[10px] leading-relaxed ${t.dim}`}>
+                    No highlights yet. Select text in the reader and pick a colour — highlights appear here and as pins on the plate.
+                  </p>
+                )}
+                <div className="space-y-1.5">
+                  {highlights.map((h) => (
+                    <div key={h.id} className={`group rounded-lg border p-2 ${t.panelSoft} ${t.border}`}>
+                      <div className="flex items-center justify-between gap-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className="h-2.5 w-2.5 rounded-full border border-slate-300/60" style={{ background: h.color ?? '#fde047' }} />
+                          <button
+                            onClick={() => { if (h.page) gotoPage(h.page); setPlateTab('plate'); }}
+                            className={`font-mono text-[9px] font-bold hover:underline ${t.accent}`}
+                            title="Jump to this page"
+                          >
+                            p. {h.page ?? '—'}
+                          </button>
+                        </div>
+                        <button onClick={() => deleteHighlight(h.id)} className={`opacity-0 transition group-hover:opacity-100 ${t.dim} hover:text-rose-500`} title="Delete highlight">
+                          <Trash className="h-3 w-3" />
+                        </button>
+                      </div>
+                      <p className={`mt-1 line-clamp-4 text-[10px] leading-relaxed ${t.text}`}>{h.quote}</p>
+                      {h.note && (
+                        <p className={`mt-1 rounded border px-1.5 py-1 text-[9px] ${t.chipWarn}`}>{h.note}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+      </div>
+
+      {/* ======================= BOTTOM: question bank + copilot ======================= */}
+      {numPages > 0 && (
+        <div className="grid shrink-0 grid-cols-1 gap-2 lg:grid-cols-12">
+          <section className={`flex h-[210px] flex-col overflow-hidden rounded-xl border lg:col-span-8 ${t.panel}`}>
+            <header className={`flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-2.5 py-1.5 ${t.divider}`}>
+              <div className="flex items-center gap-1.5">
+                <span className={`rounded px-1.5 py-0.5 font-mono text-[8px] font-bold uppercase tracking-wider ${t.chipAccent}`}>
+                  Page question bank
+                </span>
+                <span className={`font-mono text-[9px] ${t.dim}`}>
+                  Page {currentPage} · {mcqs.length ? `item ${mcqIndex + 1} of ${mcqs.length}` : 'not generated'}
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                {mcqs.length > 1 && (
+                  <div className={`flex items-center gap-0.5 rounded border px-1 py-0.5 ${t.chip}`}>
+                    <button
+                      onClick={() => { setMcqIndex((i) => Math.max(0, i - 1)); setMcqPicked(null); }}
+                      disabled={mcqIndex === 0}
+                      className="disabled:opacity-30"
+                      title="Previous question"
+                    >
+                      <ChevronLeft className="h-3 w-3" />
+                    </button>
+                    <span className="font-mono text-[9px]">{mcqIndex + 1}/{mcqs.length}</span>
+                    <button
+                      onClick={() => { setMcqIndex((i) => Math.min(mcqs.length - 1, i + 1)); setMcqPicked(null); }}
+                      disabled={mcqIndex >= mcqs.length - 1}
+                      className="disabled:opacity-30"
+                      title="Next question"
+                    >
+                      <ChevronRight className="h-3 w-3" />
+                    </button>
+                  </div>
+                )}
+                <button
+                  onClick={generateMcqs}
+                  disabled={mcqBusy || !activeAskProvider || !activeDoc}
+                  className={`flex items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-bold disabled:opacity-40 ${t.cta}`}
+                  title={activeAskProvider ? 'Generate MCQs from this page' : 'Connect an AI provider first'}
+                >
+                  {mcqBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <GraduationCap className="h-3 w-3" />}
+                  {mcqBusy ? 'Writing…' : mcqs.length ? 'Regenerate' : 'Generate MCQs'}
+                </button>
+              </div>
+            </header>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+              {askError && (
+                <div className="mb-1.5 flex items-start gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] leading-snug text-rose-800 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300">
+                  <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" /> <span>{askError}</span>
+                </div>
+              )}
+              {!activeMcq ? (
+                <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+                  <GraduationCap className={`h-7 w-7 ${t.dim}`} />
+                  <p className={`text-[11px] font-semibold ${t.strong}`}>No questions for page {currentPage} yet</p>
+                  <p className={`max-w-md text-[10px] leading-relaxed ${t.muted}`}>
+                    Generate single-best-answer MCQs from this page's text. Options are interactive; the explanation cites the passage.
+                  </p>
+                  {!activeAskProvider && (
+                    <button onClick={() => onNavigate('settings')} className={`rounded-lg border px-2 py-1 text-[10px] font-bold ${t.chipWarn}`}>
+                      Connect an AI provider in Settings
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <p className={`text-[12px] font-medium leading-snug ${t.text}`}>{activeMcq.question}</p>
+                  <div className="mt-1.5 grid grid-cols-1 gap-1 md:grid-cols-2">
+                    {activeMcq.options.map((option, oi) => {
+                      const isCorrect = oi === activeMcq.answerIndex;
+                      const isPicked = mcqPicked === oi;
+                      const reveal = mcqPicked !== null || !!showMcqAnswers[mcqIndex];
+                      const state = !reveal
+                        ? `${t.panelSoft} ${t.border} ${t.softHover}`
+                        : isCorrect
+                          ? 'border-emerald-400/70 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200'
+                          : isPicked
+                            ? 'border-rose-400/70 bg-rose-500/10 text-rose-800 dark:text-rose-200'
+                            : `${t.border} opacity-60`;
+                      return (
+                        <button
+                          key={oi}
+                          onClick={() => {
+                            if (mcqPicked !== null) return;
+                            setMcqPicked(oi);
+                            setShowMcqAnswers((prev) => ({ ...prev, [mcqIndex]: true }));
+                          }}
+                          className={`flex items-start gap-1.5 rounded-lg border p-1.5 text-left text-[10px] leading-snug transition ${state}`}
+                        >
+                          <span className={`shrink-0 rounded px-1 font-mono text-[9px] font-bold ${t.chip}`}>{String.fromCharCode(65 + oi)}</span>
+                          <span className="min-w-0">{option}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {(mcqPicked !== null || showMcqAnswers[mcqIndex]) && (
+                    <div
+                      className={`mt-1.5 rounded-lg border px-2 py-1 text-[10px] leading-snug ${
+                        mcqPicked === null || mcqPicked === activeMcq.answerIndex
+                          ? t.chipGood
+                          : 'border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300'
+                      }`}
+                    >
+                      <b>
+                        {mcqPicked === null ? 'Answer' : mcqPicked === activeMcq.answerIndex ? 'Correct' : 'Not quite'} · [{String.fromCharCode(65 + activeMcq.answerIndex)}]
+                      </b>{' '}
+                      {activeMcq.explanation}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </section>
+
+          <section className={`flex h-[210px] flex-col overflow-hidden rounded-xl border lg:col-span-4 ${t.panel}`}>
+            <header className={`flex shrink-0 items-center justify-between gap-2 border-b px-2.5 py-1.5 ${t.divider}`}>
+              <span className={`flex items-center gap-1.5 font-mono text-[9px] font-bold uppercase tracking-wider ${t.accent}`}>
+                <Sparkles className="h-3 w-3" /> Clinical copilot
+              </span>
+              <span className={`max-w-[130px] truncate rounded border px-1.5 py-0.5 font-mono text-[8px] ${t.chip}`} title={providerLabel}>
+                {activeAskProvider ? providerLabel : 'no provider'}
+              </span>
+            </header>
+
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="flex shrink-0 flex-wrap items-center gap-1 px-2 pt-1.5">
+                {ASK_QUICK_PROMPTS.slice(0, 3).map((preset) => (
                   <button
                     key={preset.label}
-                    onClick={() => askAi(preset.question)}
+                    onClick={() => { setAskPanel(true); askAi(preset.question); }}
                     disabled={askBusy}
                     title={preset.question}
-                    className="shrink-0 text-[9px] font-semibold px-2 py-1 rounded-full bg-white border border-slate-200 text-slate-600 hover:border-[#0f8b8d]/50 hover:text-[#0f8b8d] disabled:opacity-40 transition-colors"
+                    className={`rounded-full border px-2 py-0.5 text-[9px] font-semibold transition disabled:opacity-40 ${t.chip} ${t.softHover}`}
                   >
                     {preset.label}
                   </button>
                 ))}
+                <button
+                  onClick={() => setAskIncludeWeb(!askIncludeWeb)}
+                  className={`ml-auto flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-semibold ${askIncludeWeb ? t.chipAccent : t.chip}`}
+                  title="Include live web + PubMed sources"
+                >
+                  <Globe className="h-2.5 w-2.5" /> Web
+                </button>
               </div>
 
-              {/* Web sources switch */}
-              <button
-                onClick={() => setAskIncludeWeb(!askIncludeWeb)}
-                className={`w-full flex items-center justify-between gap-2 rounded-lg border px-2 py-1.5 transition-colors ${
-                  askIncludeWeb
-                    ? 'bg-teal-50 border-[#0f8b8d]/40 text-[#00696b]'
-                    : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300'
-                }`}
-                title="Include live web + PubMed sources in the answer context"
-              >
-                <span className="flex items-center gap-1.5 text-[10px] font-semibold">
-                  <Globe className="w-3 h-3" /> Live web sources
-                </span>
-                <span className={`relative w-7 h-3.5 rounded-full transition-colors ${askIncludeWeb ? 'bg-[#0f8b8d]' : 'bg-slate-300'}`}>
-                  <span className={`absolute top-0.5 w-2.5 h-2.5 rounded-full bg-white transition-all ${askIncludeWeb ? 'left-3.5' : 'left-0.5'}`} />
-                </span>
-              </button>
-
-              {/* Conversation */}
-              <div className="space-y-2">
+              <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1.5">
                 {askQuestion && (askBusy || askReply || askError) && (
-                  <div className="flex justify-end">
-                    <div className="max-w-[92%] rounded-xl rounded-br-sm bg-[#13294b] px-2 py-1.5 text-[10px] leading-snug text-white/90">
-                      {askQuestion}
-                    </div>
+                  <div className="mb-1 flex justify-end">
+                    <div className="max-w-[92%] rounded-lg rounded-br-sm bg-[#13294b] px-2 py-1 text-[9px] leading-snug text-white/90">{askQuestion}</div>
                   </div>
                 )}
-
                 {askBusy ? (
-                  <div className="rounded-xl border border-slate-200 bg-white p-2 space-y-1.5">
-                    <div className="flex items-center gap-1.5 text-[9px] font-semibold text-[#0f8b8d]">
-                      <Loader2 className="w-3 h-3 animate-spin" /> Reading {askContextLabel}…
+                  <div className={`space-y-1.5 rounded-lg border p-2 ${t.panelSoft} ${t.border}`}>
+                    <div className={`flex items-center gap-1.5 text-[9px] font-semibold ${t.accent}`}>
+                      <Loader2 className="h-3 w-3 animate-spin" /> Reading {askContextLabel}…
                     </div>
-                    <div className="h-1.5 rounded bg-slate-100 animate-pulse" />
-                    <div className="h-1.5 rounded bg-slate-100 animate-pulse w-5/6" />
-                    <div className="h-1.5 rounded bg-slate-100 animate-pulse w-2/3" />
+                    <div className="h-1.5 w-full animate-pulse rounded bg-slate-400/20" />
+                    <div className="h-1.5 w-5/6 animate-pulse rounded bg-slate-400/20" />
+                    <div className="h-1.5 w-2/3 animate-pulse rounded bg-slate-400/20" />
                   </div>
                 ) : askReply ? (
-                  <div className="rounded-xl border border-teal-200/70 bg-white shadow-xs overflow-hidden">
-                    <div className="flex items-center justify-between px-2 py-1 border-b border-slate-100">
-                      <span className="text-[9px] font-bold uppercase tracking-wider text-[#0f8b8d] flex items-center gap-1">
-                        <Sparkles className="w-2.5 h-2.5" /> Answer
-                      </span>
+                  <div className={`rounded-lg border ${t.panelSoft} ${t.border}`}>
+                    <div className={`flex items-center justify-between border-b px-1.5 py-1 ${t.divider}`}>
+                      <span className={`font-mono text-[8px] font-bold uppercase tracking-wider ${t.accent}`}>Answer · {askContextLabel}</span>
                       <button
                         onClick={() => {
                           navigator.clipboard?.writeText(askReply).then(() => {
@@ -2130,34 +2657,30 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
                           }).catch(() => {});
                         }}
                         title="Copy the answer"
-                        className="text-slate-400 hover:text-[#0f8b8d] p-0.5"
+                        className={`${t.dim} hover:opacity-70`}
                       >
-                        {askCopied ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                        {askCopied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
                       </button>
                     </div>
-                    <div className="p-2 text-[10px] leading-relaxed text-slate-800 max-h-56 overflow-y-auto whitespace-pre-wrap">
-                      {askReply}
-                    </div>
+                    <div className={`whitespace-pre-wrap p-1.5 text-[10px] leading-relaxed ${t.text}`}>{askReply}</div>
                   </div>
                 ) : !askError ? (
-                  <div className="rounded-xl border border-dashed border-slate-200 bg-white/70 px-2.5 py-3 text-center space-y-1">
-                    <Sparkles className="w-4 h-4 text-slate-300 mx-auto" />
-                    <p className="text-[10px] font-semibold text-slate-600">Select text on the page, or ask about the whole page</p>
-                    <p className="text-[9px] leading-snug text-slate-400">
-                      Answers stay inside this passage{askIncludeWeb ? ' plus the live sources' : ''} — nothing is invented.
+                  <div className={`rounded-lg border border-dashed px-2 py-2.5 text-center ${t.border}`}>
+                    <p className={`text-[10px] font-semibold ${t.muted}`}>Ground the answer in page {currentPage}</p>
+                    <p className={`mt-0.5 text-[9px] leading-snug ${t.dim}`}>
+                      Select text for a focused answer, or use a quick prompt. Nothing is invented.
                     </p>
                   </div>
                 ) : null}
 
                 {askError && (
-                  <div className="text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2 py-1.5 flex items-start gap-1.5">
-                    <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
-                    <span>{askError}</span>
+                  <div className="mt-1 flex items-start gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 text-[9px] leading-snug text-rose-800 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300">
+                    <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" /> <span>{askError}</span>
                   </div>
                 )}
 
                 {askCitations.length > 0 && (
-                  <div className="flex flex-wrap gap-1">
+                  <div className="mt-1 flex flex-wrap gap-1">
                     {askCitations.map((citation, i) => {
                       const url = citation.match(/https?:\/\/\S+/)?.[0];
                       const label = citation.replace(/^-?\s*W\d+:\s*/, '').replace(/https?:\/\/\S+/, '').replace(/[()]/g, '').trim();
@@ -2168,146 +2691,57 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
                           target="_blank"
                           rel="noopener noreferrer"
                           title={url}
-                          className="max-w-full truncate text-[9px] font-mono px-1.5 py-0.5 rounded border border-slate-200 bg-white text-[#00696b] hover:border-[#0f8b8d]/50"
+                          className={`max-w-full truncate rounded border px-1 py-0.5 font-mono text-[8px] ${t.chip} ${t.accent}`}
                         >
                           {label || `Source ${i + 1}`}
                         </a>
                       ) : (
-                        <span key={i} className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-slate-200 bg-white text-slate-500">
-                          {citation}
-                        </span>
+                        <span key={i} className={`rounded border px-1 py-0.5 font-mono text-[8px] ${t.chip}`}>{citation}</span>
                       );
                     })}
                   </div>
                 )}
               </div>
 
-              {/* Practice questions from the same passage */}
-              {mcqs.length > 0 && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[9px] font-bold uppercase tracking-wider text-amber-600 flex items-center gap-1">
-                      <GraduationCap className="w-3 h-3" /> Practice questions
-                    </span>
-                    <span className="text-[9px] font-mono text-slate-400">{mcqs.length} items</span>
-                  </div>
-                  <div className="space-y-2 max-h-64 overflow-y-auto pr-0.5">
-                    {mcqs.map((q, qi) => (
-                      <div key={qi} className="p-2 bg-white border border-slate-200 rounded-lg space-y-1.5 shadow-xs">
-                        <div className="text-[10px] font-semibold text-slate-800 leading-snug">{qi + 1}. {q.question}</div>
-                        <div className="space-y-0.5">
-                          {q.options.map((o, oi) => (
-                            <div key={oi} className="text-[10px] text-slate-600 pl-2">
-                              <span className="font-mono text-slate-400">{String.fromCharCode(65 + oi)}.</span> {o}
-                            </div>
-                          ))}
-                        </div>
-                        <button
-                          onClick={() => setShowMcqAnswers((prev) => ({ ...prev, [qi]: !prev[qi] }))}
-                          className="text-[9px] font-bold text-[#0f8b8d] hover:underline"
-                        >
-                          {showMcqAnswers[qi] ? 'Hide answer' : 'Reveal answer'}
-                        </button>
-                        {showMcqAnswers[qi] && (
-                          <div className="text-[10px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-1 leading-snug">
-                            <span className="font-bold">{String.fromCharCode(65 + q.answerIndex)}.</span> {q.explanation}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Composer */}
-              <div className="rounded-xl border border-slate-200 bg-white focus-within:border-[#0f8b8d] focus-within:ring-2 focus-within:ring-[#0f8b8d]/20 transition-shadow">
-                <textarea
-                  value={askInput}
-                  onChange={(e) => setAskInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      const question = askInput.trim();
-                      if (!question || askBusy) return;
-                      setAskInput('');
-                      askAi(question);
-                    }
-                  }}
-                  placeholder={`Ask about ${askContextLabel}…`}
-                  rows={2}
-                  className="w-full text-[10px] px-2 pt-1.5 pb-1 bg-transparent resize-none focus:outline-none placeholder:text-slate-400"
-                />
-                <div className="flex items-center justify-between px-1.5 pb-1.5">
-                  <span className="text-[8px] text-slate-400">Enter to send · Shift+Enter for a new line</span>
+              <div className={`shrink-0 border-t p-1.5 ${t.divider}`}>
+                <div className={`flex items-end gap-1 rounded-lg border p-1 ${t.input}`}>
+                  <textarea
+                    value={askInput}
+                    onChange={(e) => setAskInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        const question = askInput.trim();
+                        if (!question || askBusy) return;
+                        setAskPanel(true);
+                        setAskInput('');
+                        askAi(question);
+                      }
+                    }}
+                    placeholder={`Ask copilot about page ${currentPage}…`}
+                    rows={1}
+                    className="max-h-14 min-h-[22px] flex-1 resize-none bg-transparent px-1 py-0.5 text-[10px] focus:outline-none"
+                  />
                   <button
                     onClick={() => {
                       const question = askInput.trim();
                       if (!question || askBusy) return;
+                      setAskPanel(true);
                       setAskInput('');
                       askAi(question);
                     }}
                     disabled={!askInput.trim() || askBusy}
                     title="Send"
-                    className="w-6 h-6 rounded-lg bg-[#001432] text-white flex items-center justify-center disabled:opacity-30 hover:bg-[#13294b] transition-colors"
+                    className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md disabled:opacity-30 ${t.cta}`}
                   >
-                    {askBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3" />}
+                    {askBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
                   </button>
                 </div>
               </div>
-
-              <div className="flex items-center justify-between">
-                <button
-                  onClick={() => generateMcqs()}
-                  disabled={mcqBusy || !activeAskProvider}
-                  className="text-[9px] font-bold px-2 py-1 rounded-lg bg-amber-500/90 hover:bg-amber-500 text-white disabled:opacity-40 flex items-center gap-1"
-                >
-                  {mcqBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <GraduationCap className="w-3 h-3" />}
-                  Generate MCQs
-                </button>
-                <button
-                  onClick={() => askAi()}
-                  disabled={askBusy || !activeAskProvider}
-                  className="text-[9px] font-bold px-2 py-1 rounded-lg border border-slate-200 bg-white text-slate-700 hover:border-[#0f8b8d]/40 hover:text-[#0f8b8d] disabled:opacity-40 flex items-center gap-1"
-                >
-                  <Sparkles className="w-3 h-3" /> Explain {askContextLabel}
-                </button>
-              </div>
             </div>
-
-            {/* Saved highlights list */}
-            <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
-              {highlights.length === 0 && (
-                <p className="text-[10px] text-slate-400">
-                  No highlights in this book yet. Select any text and pick a colour — it is saved to your Highlights collection.
-                </p>
-              )}
-              {highlights.map((h) => (
-                <div key={h.id} className="group p-2 rounded-lg border border-slate-200 bg-slate-50 space-y-1">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-3 h-3 rounded-full border border-slate-300" style={{ background: h.color ?? '#fde047' }} />
-                      <button
-                        onClick={() => h.page && gotoPage(h.page)}
-                        className="text-[10px] font-bold text-[#0f8b8d] hover:underline"
-                      >
-                        {`p. ${h.page ?? '—'}`}
-                      </button>
-                    </div>
-                    <button
-                      onClick={() => deleteHighlight(h.id)}
-                      className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-rose-600"
-                    >
-                      <Trash className="w-3 h-3" />
-                    </button>
-                  </div>
-                  <p className="text-[10px] text-slate-700 leading-relaxed line-clamp-4">{h.quote}</p>
-                  {h.note && <p className="text-[10px] text-amber-800 bg-amber-50 border border-amber-100 rounded px-1.5 py-1">{h.note}</p>}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 };
@@ -2366,6 +2800,199 @@ const Thumb: React.FC<{
         <div ref={canvasHostRef} className="relative w-full" />
       </div>
       <div className={`text-center text-[9px] font-mono mt-0.5 ${active ? 'text-[#00696b] font-bold' : 'text-slate-400'}`}>{num}</div>
+    </div>
+  );
+};
+
+// ---------------- spatial plate (synced single-page raster) ----------------
+
+/**
+ * A second, independent render of the current page, framed like a PACS viewport.
+ * It is a real pdf.js render (not a screenshot) so the window/level filters, the
+ * caliper and the highlight pins all operate on the true page geometry.
+ */
+const PagePlate: React.FC<{
+  pdfRef: React.MutableRefObject<any>;
+  page: number;
+  zoom: number;
+  filter: string;
+  invert: boolean;
+  caliper: boolean;
+  highlights: UserHighlight[];
+  hasDocument: boolean;
+}> = ({ pdfRef, page, zoom, filter, invert, caliper, highlights, hasDocument }) => {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [width, setWidth] = useState(0);
+  const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
+  const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [drag, setDrag] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  const [measure, setMeasure] = useState<{ x1: number; y1: number; x2: number; y2: number; mm: number } | null>(null);
+  const draggingRef = useRef(false);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const update = () => setWidth(host.clientWidth);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(host);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setMeasure(null);
+    setDrag(null);
+    const doc = pdfRef.current;
+    if (!doc || !width) { setState('idle'); return; }
+    setState('loading');
+    (async () => {
+      try {
+        const pdfPage = await doc.getPage(page);
+        if (cancelled) return;
+        const base = pdfPage.getViewport({ scale: 1 });
+        setDims({ w: base.width, h: base.height });
+        const fit = Math.max(0.12, (width - 12) / base.width);
+        const viewport = pdfPage.getViewport({ scale: fit * zoom });
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        canvas.width = Math.max(1, Math.floor(viewport.width));
+        canvas.height = Math.max(1, Math.floor(viewport.height));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+        if (!cancelled) setState('ready');
+      } catch {
+        if (!cancelled) setState('error');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [page, zoom, width, pdfRef]);
+
+  const coords = (e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height)),
+    };
+  };
+
+  const finish = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current || !drag) return;
+    draggingRef.current = false;
+    const c = coords(e);
+    const next = { ...drag, x2: c.x, y2: c.y };
+    setDrag(null);
+    if (dims) {
+      // PDF user units are points: 1 pt = 25.4 / 72 mm.
+      const dx = (next.x2 - next.x1) * dims.w;
+      const dy = (next.y2 - next.y1) * dims.h;
+      setMeasure({ ...next, mm: Math.sqrt(dx * dx + dy * dy) * (25.4 / 72) });
+    }
+  };
+
+  if (!hasDocument) {
+    return (
+      <div className="flex h-full min-h-[150px] flex-col items-center justify-center gap-1 p-6 text-center text-slate-500">
+        <ScanText className="h-6 w-6" />
+        <p className="font-mono text-[9px] uppercase tracking-wider">No raster plate</p>
+        <p className="max-w-[220px] text-[10px] leading-snug">Import a PDF to see the page raster, pins and caliper here.</p>
+      </div>
+    );
+  }
+
+  if (state === 'idle' && !pdfRef.current) {
+    return (
+      <div className="flex h-full min-h-[150px] flex-col items-center justify-center gap-1 p-6 text-center text-slate-500">
+        <FileText className="h-6 w-6" />
+        <p className="font-mono text-[9px] uppercase tracking-wider">Text-only document</p>
+        <p className="max-w-[220px] text-[10px] leading-snug">DOCX imports have no page raster — use Pure Text.</p>
+      </div>
+    );
+  }
+
+  const m = measure ?? (drag ? { ...drag, mm: 0 } : null);
+
+  return (
+    <div ref={hostRef} className="flex min-h-full w-full items-start justify-center p-1.5">
+      <div className="relative inline-block select-none">
+        <canvas
+          ref={canvasRef}
+          className={`block h-auto max-w-none rounded-sm bg-white shadow-2xl ${caliper ? 'cursor-crosshair' : ''}`}
+          style={{ filter: `${filter}${invert ? ' invert(1)' : ''}` }}
+        />
+
+        {/* saved highlight pins (normalised to the page) */}
+        {highlights.map((h) =>
+          (h.rects ?? []).map((r, i) => (
+            <span
+              key={`${h.id}-${i}`}
+              title={h.quote.slice(0, 160)}
+              className="pointer-events-none absolute h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-200/80 bg-cyan-400/90 shadow-[0_0_6px_rgba(34,211,238,0.8)]"
+              style={{ left: `${(r.x + r.w / 2) * 100}%`, top: `${(r.y + r.h / 2) * 100}%` }}
+            />
+          )),
+        )}
+
+        {m && (
+          <>
+            <svg
+              viewBox="0 0 100 100"
+              preserveAspectRatio="none"
+              className="pointer-events-none absolute inset-0 z-30 h-full w-full"
+            >
+              <line
+                x1={m.x1 * 100}
+                y1={m.y1 * 100}
+                x2={m.x2 * 100}
+                y2={m.y2 * 100}
+                stroke="#38bdf8"
+                strokeWidth={1.5}
+                vectorEffect="non-scaling-stroke"
+              />
+              <circle cx={m.x1 * 100} cy={m.y1 * 100} r={1.2} fill="#38bdf8" />
+              <circle cx={m.x2 * 100} cy={m.y2 * 100} r={1.2} fill="#38bdf8" />
+            </svg>
+            <div
+              className="pointer-events-none absolute z-30 -translate-x-1/2 -translate-y-1/2 rounded bg-[#050b16]/90 px-1 py-0.5 font-mono text-[9px] font-bold text-cyan-300"
+              style={{ left: `${((m.x1 + m.x2) / 2) * 100}%`, top: `${((m.y1 + m.y2) / 2) * 100}%` }}
+            >
+              {m.mm ? `${m.mm.toFixed(1)} mm` : '…'}
+            </div>
+          </>
+        )}
+
+        {caliper && (
+          <div
+            className="absolute inset-0 z-20 touch-none"
+            onPointerDown={(e) => {
+              draggingRef.current = true;
+              const c = coords(e);
+              setDrag({ x1: c.x, y1: c.y, x2: c.x, y2: c.y });
+              try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+            }}
+            onPointerMove={(e) => {
+              if (!draggingRef.current) return;
+              const c = coords(e);
+              setDrag((d) => (d ? { ...d, x2: c.x, y2: c.y } : d));
+            }}
+            onPointerUp={finish}
+            onPointerCancel={() => { draggingRef.current = false; setDrag(null); }}
+          />
+        )}
+
+        {state === 'loading' && (
+          <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/30">
+            <Loader2 className="h-5 w-5 animate-spin text-cyan-300" />
+          </div>
+        )}
+        {state === 'error' && (
+          <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 p-3 text-center font-mono text-[9px] text-rose-300">
+            Could not render page {page}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
