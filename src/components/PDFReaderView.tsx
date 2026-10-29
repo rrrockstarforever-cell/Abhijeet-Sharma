@@ -116,74 +116,7 @@ const HL_COLORS: { id: string; css: string; label: string }[] = [
   { id: 'blue', css: '#93c5fd', label: 'Blue' },
 ];
 
-/**
- * The Stitch "Clinical Diagnostic Precision" shell has a real light counterpart:
- * chrome, cards and text switch with the app theme, while the imaging plate stays
- * dark in both (a PACS viewport should never glow white around a scan).
- */
-const SUITE_LIGHT = {
-  page: 'bg-[#f6f8fc] text-slate-800',
-  panel: 'border-slate-200 bg-white',
-  panelSoft: 'border-slate-200 bg-slate-50',
-  border: 'border-slate-200',
-  divider: 'border-slate-100',
-  text: 'text-slate-700',
-  muted: 'text-slate-500',
-  dim: 'text-slate-400',
-  strong: 'text-slate-900',
-  accent: 'text-[#00696b]',
-  cta: 'bg-[#0f8b8d] text-white hover:bg-[#00696b]',
-  seg: 'border-slate-200 bg-slate-100',
-  tabOn: 'bg-[#0f8b8d] text-white shadow-sm',
-  tabOff: 'text-slate-600 hover:text-slate-900',
-  chip: 'border-slate-200 bg-slate-50 text-slate-600',
-  chipAccent: 'border-[#0f8b8d]/30 bg-[#0f8b8d]/10 text-[#00696b]',
-  chipWarn: 'border-amber-300 bg-amber-50 text-amber-700',
-  chipGood: 'border-emerald-300 bg-emerald-50 text-emerald-700',
-  softHover: 'hover:bg-slate-100',
-  input: 'border-slate-200 bg-white text-slate-800 placeholder:text-slate-400',
-  reader: 'bg-slate-200/70',
-  plate: 'bg-[#050b16]',
-  notes: 'bg-white',
-  segBtnOn: 'bg-[#0f8b8d] text-white',
-  segBtnOff: 'text-slate-500 hover:text-slate-800',
-};
 
-const SUITE_DARK: typeof SUITE_LIGHT = {
-  page: 'bg-[#070d18] text-slate-200',
-  panel: 'border-slate-700/70 bg-[#0e1a2b]',
-  panelSoft: 'border-slate-700/60 bg-[#0b1526]',
-  border: 'border-slate-700/70',
-  divider: 'border-slate-700/50',
-  text: 'text-slate-300',
-  muted: 'text-slate-400',
-  dim: 'text-slate-500',
-  strong: 'text-white',
-  accent: 'text-[#6bd8cb]',
-  cta: 'bg-[#0d9488] text-white hover:bg-[#0f766e]',
-  seg: 'border-slate-700 bg-[#060e20]',
-  tabOn: 'bg-[#0d9488] text-white shadow-sm',
-  tabOff: 'text-slate-400 hover:text-white',
-  chip: 'border-slate-700 bg-slate-800/60 text-slate-300',
-  chipAccent: 'border-[#6bd8cb]/40 bg-[#6bd8cb]/10 text-[#89f5e7]',
-  chipWarn: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
-  chipGood: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
-  softHover: 'hover:bg-slate-800/60',
-  input: 'border-slate-700 bg-[#060e20] text-slate-100 placeholder:text-slate-500',
-  reader: 'bg-[#060e20]',
-  plate: 'bg-[#050b16]',
-  notes: 'bg-[#0b1526]',
-  segBtnOn: 'bg-[#0d9488] text-white',
-  segBtnOff: 'text-slate-400 hover:text-white',
-};
-
-/** Radiographic window/level presets, expressed as CSS filters on the page raster. */
-const PLATE_FILTERS: Record<'normal' | 'lung' | 'mediastinum' | 'bone', { label: string; css: string }> = {
-  normal: { label: 'Normal', css: 'none' },
-  lung: { label: 'Lung', css: 'grayscale(1) contrast(1.35) brightness(0.96)' },
-  mediastinum: { label: 'Mediastinum', css: 'grayscale(1) contrast(1.12) brightness(1.06)' },
-  bone: { label: 'Bone', css: 'grayscale(1) contrast(1.65) brightness(1.12)' },
-};
 
 interface SelectionPopup { x: number; y: number; text: string; }
 
@@ -310,25 +243,6 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   const [showMcqAnswers, setShowMcqAnswers] = useState<Record<number, boolean>>({});
   const [mcqIndex, setMcqIndex] = useState<number>(0);
   const [mcqPicked, setMcqPicked] = useState<number | null>(null);
-
-  // ----- clinical suite shell (Stitch "Clinical Diagnostic Precision" design) -----
-  const [suiteMode, setSuiteMode] = useState<'correlated' | 'text' | 'flashcard'>('correlated');
-  const [plateTab, setPlateTab] = useState<'plate' | 'highlights'>('plate');
-  const [plateZoom, setPlateZoom] = useState<number>(1);
-  const [wlPreset, setWlPreset] = useState<'normal' | 'lung' | 'mediastinum' | 'bone'>('normal');
-  const [invertPlate, setInvertPlate] = useState<boolean>(false);
-  const [caliperMode, setCaliperMode] = useState<boolean>(false);
-  const [showThumbs, setShowThumbs] = useState<boolean>(false);
-  const [correlation, setCorrelation] = useState<string>('');
-  const [correlBusy, setCorrelBusy] = useState<boolean>(false);
-  const [correlError, setCorrelError] = useState<string | null>(null);
-
-  // ----- flashcards generated from the current page (real AI, no canned cards) -----
-  const [flashcards, setFlashcards] = useState<{ front: string; back: string; pearl?: string }[]>([]);
-  const [flashIndex, setFlashIndex] = useState<number>(0);
-  const [flashFlipped, setFlashFlipped] = useState<boolean>(false);
-  const [flashBusy, setFlashBusy] = useState<boolean>(false);
-  const [flashError, setFlashError] = useState<string | null>(null);
 
   // ----- view mode: rendered page vs extracted text (PARITY section 6) -----
   const [viewMode, setViewMode] = useState<'page' | 'text'>('page');
@@ -1610,7 +1524,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   // ============================ render ============================
 
   const activeAskProvider = getActiveProvider();
-  const providerLabel = activeAskProvider ? `${activeAskProvider} · ${getEffectiveModel(activeAskProvider)}` : 'no active provider';
+  const providerLabel = activeAskProvider ? 'AI chat' : 'no active provider';
   const activeDoc = docs.find((d) => d.id === activeDocId);
 
   const t = darkMode ? SUITE_DARK : SUITE_LIGHT;
@@ -1621,17 +1535,6 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
   const activeMcq = mcqs[mcqIndex];
   const flashcard = flashcards[flashIndex];
   const panelOpen = showNotes;
-  const toggleSuiteMode = (mode: 'correlated' | 'text' | 'flashcard') => {
-    setSuiteMode(mode);
-    setPopup(null);
-    if (mode === 'text') {
-      setViewMode('text');
-    } else if (viewMode === 'text') {
-      // Returning to a page view: the wrappers remount, so release the bookkeeping first.
-      clearRenderedPages();
-      setViewMode('page');
-    }
-  };
 
   return (
     <div className={`flex h-[calc(100vh-64px)] flex-col gap-2 overflow-y-auto p-2 lg:overflow-hidden ${t.page}`}>
@@ -1695,23 +1598,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
               <span className={`h-1.5 w-1.5 rounded-full ${numPages ? 'bg-emerald-500' : 'bg-slate-500'}`} />
               {numPages ? 'Local engine · ready' : 'Idle'}
             </span>
-            <div className={`flex items-center gap-0.5 rounded-lg border p-0.5 ${t.seg}`}>
-              {([
-                ['correlated', 'Correlated View'],
-                ['text', 'Pure Text'],
-                ['flashcard', 'Flashcard Drill'],
-              ] as const).map(([mode, label]) => (
-                <button
-                  key={mode}
-                  onClick={() => toggleSuiteMode(mode)}
-                  className={`rounded-md px-2 py-1 font-mono text-[10px] font-semibold transition ${suiteMode === mode ? t.tabOn : t.tabOff}`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
+            
 
         {numPages > 0 && (
           <div className={`mt-2 flex flex-wrap items-center justify-between gap-2 border-t pt-1.5 ${t.divider}`}>
@@ -1721,7 +1608,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
                 <ScanText className="h-3 w-3" />
                 OCR: {ocrBusy ? 'running' : currentOcr ? `ready (${ocrWordsRef.current.size} pp)` : currentNativeText ? 'native text' : 'not scanned'}
               </span>
-              <span className={`max-w-[170px] truncate ${t.accent}`} title={providerLabel}>{providerLabel}</span>
+              <span className={`max-w-[170px] truncate ${t.accent}`} title="AI chat">AI chat</span>
               <span className="hidden sm:inline">{activeDoc?.subject ?? 'Uncategorised'}</span>
               <span className="hidden lg:inline">{indexedPages} indexed</span>
             </div>
@@ -1956,7 +1843,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
         {/* LEFT — document stream */}
         <article
           className={`flex min-h-0 flex-col overflow-hidden rounded-xl border ${t.panel} ${
-            immersive ? 'fixed inset-0 z-50 rounded-none' : panelOpen && suiteMode !== 'text' ? 'lg:col-span-7' : 'lg:col-span-12'
+            immersive ? 'fixed inset-0 z-50 rounded-none' : 'lg:col-span-12'
           }`}
         >
           <header className={`flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-2.5 py-1.5 ${t.divider}`}>
@@ -2315,9 +2202,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
           <section className={`flex min-h-0 flex-col overflow-hidden rounded-xl border lg:col-span-5 ${t.panel}`}>
             <header className={`flex shrink-0 items-center justify-between gap-2 border-b px-2.5 py-1.5 ${t.divider}`}>
               <div className={`flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-wider ${t.muted}`}>
-                <Activity className={`h-3.5 w-3.5 ${t.accent}`} /> Spatial plate
+                
               </div>
-              <div className={`flex items-center gap-0.5 rounded-lg border p-0.5 ${t.seg}`}>
+              
                 <button
                   onClick={() => setPlateTab('plate')}
                   className={`rounded px-1.5 py-0.5 font-mono text-[9px] font-semibold ${plateTab === 'plate' ? t.tabOn : t.tabOff}`}
@@ -2360,19 +2247,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
                     </button>
                   </div>
 
-                  <div className="flex items-center gap-0.5">
-                    {(Object.keys(PLATE_FILTERS) as Array<keyof typeof PLATE_FILTERS>).map((key) => (
-                      <button
-                        key={key}
-                        onClick={() => setWlPreset(key)}
-                        title={`W/L preset: ${PLATE_FILTERS[key].label}`}
-                        className={`rounded border px-1.5 py-0.5 font-mono text-[8px] font-semibold uppercase tracking-wider transition ${
-                          wlPreset === key ? t.chipAccent : t.chip
-                        }`}
-                      >
-                        {PLATE_FILTERS[key].label}
-                      </button>
-                    ))}
+                  
                   </div>
 
                   <div className={`flex items-center gap-1 rounded border px-1 py-0.5 ${t.chip}`}>
@@ -2487,11 +2362,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
         <div className="grid shrink-0 grid-cols-1 gap-2 lg:grid-cols-12">
           <section className={`flex h-[210px] flex-col overflow-hidden rounded-xl border lg:col-span-8 ${t.panel}`}>
             <header className={`flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-2.5 py-1.5 ${t.divider}`}>
-              <div className="flex items-center gap-1.5">
-                <span className={`rounded px-1.5 py-0.5 font-mono text-[8px] font-bold uppercase tracking-wider ${t.chipAccent}`}>
-                  Page question bank
-                </span>
-                <span className={`font-mono text-[9px] ${t.dim}`}>
+              
                   Page {currentPage} · {mcqs.length ? `item ${mcqIndex + 1} of ${mcqs.length}` : 'not generated'}
                 </span>
               </div>
@@ -2601,14 +2472,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, onGene
           <section className={`flex h-[210px] flex-col overflow-hidden rounded-xl border lg:col-span-4 ${t.panel}`}>
             <header className={`flex shrink-0 items-center justify-between gap-2 border-b px-2.5 py-1.5 ${t.divider}`}>
               <span className={`flex items-center gap-1.5 font-mono text-[9px] font-bold uppercase tracking-wider ${t.accent}`}>
-                <Sparkles className="h-3 w-3" /> Clinical copilot
-              </span>
-              <span className={`max-w-[130px] truncate rounded border px-1.5 py-0.5 font-mono text-[8px] ${t.chip}`} title={providerLabel}>
-                {activeAskProvider ? providerLabel : 'no provider'}
-              </span>
-            </header>
-
-            <div className="flex min-h-0 flex-1 flex-col">
+                
               <div className="flex shrink-0 flex-wrap items-center gap-1 px-2 pt-1.5">
                 {ASK_QUICK_PROMPTS.slice(0, 3).map((preset) => (
                   <button
@@ -2897,7 +2761,7 @@ const PagePlate: React.FC<{
       <div className="flex h-full min-h-[150px] flex-col items-center justify-center gap-1 p-6 text-center text-slate-500">
         <ScanText className="h-6 w-6" />
         <p className="font-mono text-[9px] uppercase tracking-wider">No raster plate</p>
-        <p className="max-w-[220px] text-[10px] leading-snug">Import a PDF to see the page raster, pins and caliper here.</p>
+        
       </div>
     );
   }
