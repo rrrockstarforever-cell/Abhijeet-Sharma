@@ -666,6 +666,8 @@ export const SettingsAIView: React.FC = () => {
 
   // Start adding a new custom endpoint.
   const addNewCustomEndpoint = () => {
+    const customProvider = REAL_PROVIDERS.find((p) => p.id === 'custom');
+    setSelectedProvider(customProvider ?? null);
     setEditingEndpoint({
       id: '',
       name: '',
