@@ -113,21 +113,6 @@ const REAL_PROVIDERS: AIProvider[] = [
     ]
   },
   {
-    id: 'custom',
-    name: 'Custom (OpenAI-Compatible)',
-    brand: 'openai',
-    model: DEFAULT_MODELS.custom,
-    status: 'ready',
-    type: 'API Key (custom endpoint)',
-    features: ['API Key in Settings', 'Custom base URL & model', 'OpenAI-compatible /chat/completions'],
-    isDefault: false,
-    isSignedIn: false,
-    hasTokenConfigured: false,
-    availableModels: [
-      { id: DEFAULT_MODELS.custom, name: 'Custom Model (Default)', description: 'Set your own model id in Settings', latencyEstimate: '—', contextWindow: '—' },
-    ]
-  },
-  {
     id: 'opencode',
     name: 'OpenCode (Console / Go)',
     brand: 'opencode',
