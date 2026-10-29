@@ -1,6 +1,0 @@
-{
-  "summary":  "Revised implementation plan incorporating: (1) Granular Low/Medium/High difficulty selector with specific sub-tiers and an All-Levels adaptive mix; (2) Dual-mode syllabus for INI-CET (Toggle between 19 NMC Subjects and 6 AIIMS Integrated Domains), 19 NMC subjects for NEET-PG, and 6 official domains for AMC CAT; (3) Full-featured high-speed PDF reader with 10-16 parallel SIMD OCR workers, one-click AI chapter/concept indexing, real-time in-document keyword search, and a pleasant, glare-free reading viewer; (4) AI subscription sign-in modals (Claude, ChatGPT, Grok, Gemini, DeepSeek, Ollama); and (5) AMC CAT Computer Adaptive Test with live calibration bar.",
-  "updatedAt":  "2026-10-24T07:52:23.275126521Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

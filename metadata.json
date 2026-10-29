@@ -1,8 +1,0 @@
-{
-  "name": "Pulse Med - Clinical Exam Engine",
-  "description": "High-yield postgraduate medical exam engine for NEET-PG, INI-CET, AMC CAT, and USMLE with RAG textbook search, SRS mistake notebook, and multi-model AI reasoning.",
-  "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
-}
