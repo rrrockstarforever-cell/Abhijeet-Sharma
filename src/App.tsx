@@ -212,13 +212,7 @@ export default function App() {
         );
       case 'pdf-reader':
         return (
-          <PDFReaderView 
-            onNavigate={handleNavigate}
-            darkMode={isDarkMode}
-            onGenerateQuizFromPage={(book, page, snippet) => {
-              handleNavigate('practice');
-            }}
-          />
+          <PDFReaderView onNavigate={handleNavigate} />
         );
       case 'research':
         return (
