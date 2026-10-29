@@ -1687,65 +1687,6 @@ export const SettingsAIView: React.FC = () => {
             )}
 
             {/* Custom Endpoint: Saved endpoints list */}
-            {selectedProvider.id === 'custom' && customEndpoints.length > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-bold text-slate-700">Saved Endpoints</span>
-                  <button
-                    onClick={addNewCustomEndpoint}
-                    className="text-xs font-bold text-[#0f8b8d] hover:underline"
-                  >
-                    + New endpoint
-                  </button>
-                </div>
-                <div className="space-y-1">
-                  {customEndpoints.map((ep) => (
-                    <div key={ep.id} className="p-2.5 rounded-xl border border-slate-200 bg-white flex items-center justify-between gap-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900 truncate">
-                          <span>{ep.name}</span>
-                          {ep.useForNewChats && <span className="px-1 py-0.5 rounded bg-emerald-50 text-emerald-700 text-[9px] font-bold border border-emerald-200">Active</span>}
-                        </div>
-                        <div className="flex items-center gap-1 text-[9px] text-slate-500">
-                          <span>{ep.providerId}</span>
-                          <span>•</span>
-                          <span>{ep.apiMode}</span>
-                          <span>•</span>
-                          <span>{ep.defaultModel || '—'}</span>
-                        </div>
-                        <div className="text-[9px] font-mono text-slate-400 truncate">{ep.endpointUrl}</div>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => editCustomEndpoint(ep)}
-                          className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-700"
-                          title="Edit"
-                        >
-                          <Pencil className="w-3 h-3" />
-                        </button>
-                        <button
-                          onClick={() => testCustomEndpoint(ep.id)}
-                          disabled={testingEndpoint === ep.id}
-                          className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-700"
-                          title="Test"
-                        >
-                          {testingEndpoint === ep.id ? <Activity className="w-2.5 h-2.5 animate-spin" /> : <Zap className="w-2.5 h-2.5" />}
-                        </button>
-                        <button
-                          onClick={() => deleteCustomEndpoint(ep.id)}
-                          className="p-1 hover:bg-rose-50 rounded text-rose-400 hover:text-rose-600"
-                          title="Delete"
-                        >
-                          <X className="w-2.5 h-2.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Custom Endpoint: Saved endpoints list */}
             {selectedProvider.id === 'custom' && !editingEndpoint && customEndpoints.length > 0 && (
               <div className="space-y-4 py-2">
                 <div className="flex items-center justify-between mb-1">
