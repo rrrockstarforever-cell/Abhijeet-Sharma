@@ -242,6 +242,10 @@ export const SettingsAIView: React.FC = () => {
   const [discoveredModels, setDiscoveredModels] = useState<{ id: string; name: string }[]>([]);
   const [isSearchingModels, setIsSearchingModels] = useState<boolean>(false);
   const [modelsSearchError, setModelsSearchError] = useState<string | null>(null);
+  const [nvidiaDiscoveredModels, setNvidiaDiscoveredModels] = useState<{ id: string; name: string }[]>([]);
+  const [nvidiaIsSearchingModels, setNvidiaIsSearchingModels] = useState<boolean>(false);
+  const [nvidiaModelsSearchError, setNvidiaModelsSearchError] = useState<string | null>(null);
+  const [nvidiaModel, setNvidiaModel] = useState<string>(DEFAULT_MODELS.nvidia);
 
   // OCR worker pool (1–16) — persisted so whole-book OCR keeps the chosen parallelism.
   const [ocrWorkers, setOcrWorkersState] = useState<number>(() => getOcrWorkers());
@@ -598,6 +602,9 @@ export const SettingsAIView: React.FC = () => {
       if (!res.ok) throw new Error(data?.error || 'Could not save the API key.');
       setKeySavedMsg(`API key saved and active. ${label} is now connected.`);
       setKeyInput('');
+      if (selectedProvider.id === 'nvidia') {
+        persistModel('nvidia', nvidiaModel);
+      }
       await fetchOAuthStatus();
       await loadAccountModels(true, selectedProvider.id);
       setTimeout(() => setSelectedProvider(null), 1200);
@@ -652,8 +659,35 @@ export const SettingsAIView: React.FC = () => {
     }
   };
 
-  // Search for available models from the custom endpoint.
-  const searchCustomModels = async () => {
+  // Search for available models from a custom endpoint or NVIDIA.
+  const searchCustomModels = async (provider: 'custom' | 'nvidia' = 'custom') => {
+    if (provider === 'nvidia') {
+      if (!keyInput.trim()) {
+        setNvidiaModelsSearchError('Enter your NVIDIA API Key first.');
+        return;
+      }
+      setNvidiaIsSearchingModels(true);
+      setNvidiaModelsSearchError(null);
+      setNvidiaDiscoveredModels([]);
+      try {
+        const res = await fetch('/api/models/custom?provider=nvidia', {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-session-id': getClientSessionId()
+          }
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data?.error || 'NVIDIA model search failed.');
+        setNvidiaDiscoveredModels(data.models || []);
+      } catch (err: any) {
+        setNvidiaModelsSearchError(err?.message || 'Could not search for NVIDIA models.');
+      } finally {
+        setNvidiaIsSearchingModels(false);
+      }
+      return;
+    }
+
     if (!editingEndpoint?.endpointUrl.trim() || !editingEndpoint?.apiKey.trim()) {
       setModelsSearchError('Enter Endpoint URL and API Key first.');
       return;
@@ -1639,7 +1673,7 @@ export const SettingsAIView: React.FC = () => {
                   <div className="flex items-center gap-2">
                     <label className="text-xs font-bold text-slate-700 block">Default Model</label>
                     <button
-                      onClick={searchCustomModels}
+                      onClick={() => searchCustomModels()}
                       disabled={isSearchingModels || !editingEndpoint.endpointUrl.trim() || !editingEndpoint.apiKey.trim()}
                       className={`text-xs font-bold px-3 py-1.5 rounded-xl border transition-colors ${
                         isSearchingModels ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-[#0f8b8d] text-white border-[#0f8b8d] hover:bg-[#0f8b8d]/90'
@@ -1894,6 +1928,60 @@ export const SettingsAIView: React.FC = () => {
                     className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
                   />
                 </div>
+
+                {selectedProvider.id === 'nvidia' && (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs font-bold text-slate-700 block">Default Model</label>
+                      <button
+                        onClick={() => searchCustomModels('nvidia')}
+                        disabled={nvidiaIsSearchingModels || !keyInput.trim()}
+                        className={`text-xs font-bold px-3 py-1.5 rounded-xl border transition-colors ${
+                          nvidiaIsSearchingModels ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-[#0f8b8d] text-white border-[#0f8b8d] hover:bg-[#0f8b8d]/90'
+                        }`}
+                      >
+                        {nvidiaIsSearchingModels ? (
+                          <Activity className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Search className="w-3 h-3" />
+                        )}
+                        {nvidiaIsSearchingModels ? ' Searching…' : ' Search Models'}
+                      </button>
+                    </div>
+                    {nvidiaModelsSearchError && (
+                      <div className="p-2 bg-rose-50 border border-rose-200 text-rose-800 text-[10px] rounded-xl">
+                        {nvidiaModelsSearchError}
+                      </div>
+                    )}
+                    {nvidiaDiscoveredModels.length > 0 && (
+                      <div className="space-y-1">
+                        <label className="text-xs font-bold text-slate-700 block">Discovered Models</label>
+                        <select
+                          value={nvidiaModel}
+                          onChange={(e) => setNvidiaModel(e.target.value)}
+                          className="w-full text-xs font-mono p-2 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                        >
+                          <option value="">Select a model…</option>
+                          {nvidiaDiscoveredModels.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.id}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-[10px] text-slate-500">
+                          Or type a custom model ID below:
+                        </p>
+                      </div>
+                    )}
+                    <input
+                      type="text"
+                      value={nvidiaModel}
+                      onChange={(e) => setNvidiaModel(e.target.value)}
+                      placeholder="e.g. nvidia/nemotron-3.5-super-vl-120b-a12b"
+                      className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                    />
+                  </div>
+                )}
 
                 <div className="pt-2 flex items-center justify-end gap-2.5">
                   <button

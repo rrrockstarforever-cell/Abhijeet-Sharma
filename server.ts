@@ -805,8 +805,40 @@ app.post('/api/settings/custom-endpoints/:id/test', async (req: Request, res: Re
   }
 });
 
-// GET /api/models/custom: discover models from a custom endpoint (uses active endpoint or first saved)
+// GET /api/models/custom: discover models from a custom endpoint or NVIDIA.
+// Query param `provider=nvidia` fetches NVIDIA NIM models instead.
 app.get('/api/models/custom', async (_req: Request, res: Response) => {
+  const provider = String(_req.query.provider || '').trim();
+  if (provider === 'nvidia') {
+    const key = nvidiaKey();
+    if (!key) {
+      return res.status(401).json({ error: 'NVIDIA API key not configured. Add it in Settings → AI Subscription Hub.' });
+    }
+    try {
+      const r = await fetch('https://integrate.api.nvidia.com/v1/models', {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${key}`,
+        },
+      });
+      const raw = await r.text();
+      let body: any = {};
+      try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+      if (!r.ok) {
+        return res.status(502).json({ error: `NVIDIA model discovery failed: ${providerErrorText(body, r.status)}` });
+      }
+      const rows: any[] = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+      const models = rows
+        .map((m) => ({ id: String(m?.id ?? m?.name ?? ''), name: String(m?.name || m?.id || ''), source: 'nvidia' }))
+        .filter((m) => m.id);
+      return res.json({ models, fetchedAt: new Date().toISOString(), provider: 'nvidia' });
+    } catch (err: any) {
+      return res.status(502).json({ error: err?.message || 'Could not discover NVIDIA models.' });
+    }
+  }
+
+  // Default: custom endpoint model discovery
   const endpoints = readCustomEndpoints();
   const activeEndpoint = endpoints.find((e) => e.useForNewChats) || endpoints[0];
   if (!activeEndpoint) {
