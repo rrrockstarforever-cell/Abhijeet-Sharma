@@ -345,7 +345,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                   )}
 
                   {/* Question */}
-                  <h2 className="text-lg sm:text-lg font-bold text-slate-900 leading-snug">
+                  <h2 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
                     {questionPrompt}
                   </h2>
                 </>
@@ -415,6 +415,26 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
               })}
             </div>
 
+            {/* Navigation Buttons */}
+            <div className="flex items-center justify-between pt-2">
+              <button
+                disabled={currentIndex === 0}
+                onClick={() => setCurrentIndex(prev => Math.max(0, prev - 1))}
+                className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 transition-colors"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+                Previous
+              </button>
+              <button
+                disabled={currentIndex === questions.length - 1}
+                onClick={() => setCurrentIndex(prev => Math.min(questions.length - 1, prev + 1))}
+                className="px-4 py-2 rounded-xl bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs"
+              >
+                Next
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
             {/* Explanation */}
             {isAnswered && showExplanation && (
               <div className="space-y-4">
@@ -471,10 +491,10 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                 let baseClass = 'w-6 h-6 rounded-lg text-xs font-mono flex items-center justify-center transition-all border';
                 let colorClass = 'border-slate-200 bg-white text-slate-700';
                 
-                if (isAnswered) {
+                if (ans) {
                   if (ans === q.correctOption) {
                     colorClass = 'bg-emerald-50 border-emerald-200 text-emerald-800';
-                  } else if (ans !== q.correctOption) {
+                  } else {
                     colorClass = 'bg-rose-50 border-rose-200 text-rose-800';
                   }
                 }
