@@ -501,8 +501,8 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left Column: Question Details & Dissection */}
         <div className="lg:col-span-8 space-y-6">
-          <div className="bg-white rounded-2xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6">
-            {/* Clinical Vignette Stem & Question Text: Render stem only if not missing or equal to question */}
+          <div className="bg-white rounded-2xl p-5 sm:p-7 border border-slate-200 shadow-sm space-y-5">
+            {/* Clinical Vignette Stem & Question Text */}
             {(() => {
               const questionPrompt = ((currentQ as any)?.question || currentQ?.questionText || '').trim();
               const rawStem = (currentQ?.stem || '').trim();
@@ -511,18 +511,20 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
               return (
                 <>
                   {!isStemMissingOrEqual && (
-                    <div className="p-4 rounded-xl bg-slate-50 border-l-4 border-[#001432] text-slate-800 text-sm leading-relaxed font-sans">
-                      <span className="font-bold text-slate-900 block mb-1">
-                        Clinical Vignette:
-                      </span>
-                      {rawStem}
+                    <div className="mb-3 p-3.5 rounded-xl border border-slate-200 bg-white">
+                      <div className="flex items-start gap-1.5">
+                        <span className="flex-shrink-0 text-[10px] font-bold text-[#0f8b8d]">CLINICAL VIGNETTE</span>
+                      </div>
+                      <p className="mt-2 text-sm text-slate-800 leading-relaxed">
+                        {rawStem}
+                      </p>
                     </div>
                   )}
 
                   {/* Embedded Image if available */}
                   {currentQ?.image && (
-                    <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-                      <div className="flex items-start justify-between gap-3 text-xs font-bold text-slate-700">
+                    <div className="mb-3 p-3.5 rounded-xl border border-slate-200 bg-white space-y-2">
+                      <div className="flex items-start justify-between gap-2 text-xs font-bold text-slate-700">
                         <span className="leading-snug">{currentQ.imageCaption || 'Clinical image'}</span>
                         {currentQ.imageSourceUrl && (
                           <a
@@ -545,7 +547,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                   )}
 
                   {/* Question Text */}
-                  <h2 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
+                  <h2 className="text-lg sm:text-xl font-bold text-slate-900 leading-snug">
                     {questionPrompt}
                   </h2>
                 </>
