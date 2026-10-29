@@ -548,23 +548,58 @@ app.post('/api/settings/opencode-key', (req: Request, res: Response) => {
   }
 });
 
-// 6c. POST /api/settings/custom-api-key: save the Custom provider's base URL, model id and API key.
-// NEVER echoes the key back.
+// 6c. POST /api/settings/custom-api-key: save the Custom provider's base URL and API key.
+// NEVER echoes the key back. Model ID is optional — it can be discovered via GET /api/models/custom.
 app.post('/api/settings/custom-api-key', (req: Request, res: Response) => {
   const { apiKey, baseUrl, modelId } = req.body || {};
   const key = String(apiKey || '').trim();
   const url = String(baseUrl || '').trim();
   const model = String(modelId || '').trim();
-  if (!key || !url || !model) {
-    return res.status(400).json({ error: 'API Base URL, Model ID and API Key are all required.' });
+  if (!key || !url) {
+    return res.status(400).json({ error: 'API Base URL and API Key are required.' });
   }
   try {
     writeEnvValue('CUSTOM_API_KEY', key);
     writeEnvValue('CUSTOM_BASE_URL', url);
-    writeEnvValue('CUSTOM_MODEL_ID', model);
+    if (model) {
+      writeEnvValue('CUSTOM_MODEL_ID', model);
+    }
     return res.json({ ok: true, connected: true });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Could not save the custom provider settings.' });
+  }
+});
+
+// 6d. GET /api/models/custom: discover models from the custom OpenAI-compatible endpoint.
+// Fetches {CUSTOM_BASE_URL}/models and returns the model id list so the user can pick one.
+app.get('/api/models/custom', async (_req: Request, res: Response) => {
+  const baseUrl = customBaseUrl();
+  const apiKey = customApiKey();
+  if (!baseUrl || !apiKey) {
+    return res.status(401).json({ error: 'Custom provider not configured. Save API Base URL, Model ID and API Key first.' });
+  }
+  try {
+    const modelsUrl = baseUrl.replace(/\/$/, '') + '/models';
+    const r = await fetch(modelsUrl, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+    const raw = await r.text();
+    let body: any = {};
+    try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+    if (!r.ok) {
+      return res.status(502).json({ error: `Custom model discovery failed: ${providerErrorText(body, r.status)}` });
+    }
+    const rows: any[] = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+    const models = rows
+      .map((m) => ({ id: String(m?.id ?? m?.name ?? ''), name: String(m?.name || m?.id || ''), source: 'custom' }))
+      .filter((m) => m.id);
+    return res.json({ models, fetchedAt: new Date().toISOString() });
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'Could not discover models from custom endpoint.' });
   }
 });
 

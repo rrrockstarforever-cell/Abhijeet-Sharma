@@ -188,6 +188,9 @@ export const SettingsAIView: React.FC = () => {
   const [keyInput, setKeyInput] = useState<string>('');
   const [customBaseUrl, setCustomBaseUrl] = useState<string>('');
   const [customModelId, setCustomModelId] = useState<string>('');
+  const [customModels, setCustomModels] = useState<{ id: string; name: string }[]>([]);
+  const [customModelsBusy, setCustomModelsBusy] = useState<boolean>(false);
+  const [customModelsError, setCustomModelsError] = useState<string | null>(null);
   const [isSavingKey, setIsSavingKey] = useState<boolean>(false);
   const [keySavedMsg, setKeySavedMsg] = useState<string | null>(null);
 
@@ -533,9 +536,8 @@ export const SettingsAIView: React.FC = () => {
     const body: any = { apiKey: key };
     if (selectedProvider.id === 'custom') {
       body.baseUrl = customBaseUrl.trim();
-      body.modelId = customModelId.trim();
-      if (!body.baseUrl || !body.modelId) {
-        setAuthError('API Base URL and Model ID are required for the custom provider.');
+      if (!body.baseUrl) {
+        setAuthError('API Base URL is required for the custom provider.');
         return;
       }
     }
@@ -561,6 +563,33 @@ export const SettingsAIView: React.FC = () => {
       setAuthError(err.message || 'Could not save the API key.');
     } finally {
       setIsSavingKey(false);
+    }
+  };
+
+  // Discover available models from the custom OpenAI-compatible endpoint.
+  const fetchCustomModels = async () => {
+    if (!customBaseUrl.trim() || !keyInput.trim()) {
+      setCustomModelsError('Enter API Base URL and API Key first.');
+      return;
+    }
+    setCustomModelsBusy(true);
+    setCustomModelsError(null);
+    setCustomModels([]);
+    try {
+      const res = await fetch('/api/models/custom', {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-session-id': getClientSessionId()
+        }
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || 'Model discovery failed.');
+      setCustomModels(data.models || []);
+    } catch (err: any) {
+      setCustomModelsError(err?.message || 'Could not discover models from custom endpoint.');
+    } finally {
+      setCustomModelsBusy(false);
     }
   };
 
@@ -1374,14 +1403,68 @@ export const SettingsAIView: React.FC = () => {
                       placeholder="https://api.openai.com/v1"
                       className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
                     />
-                    <label className="text-xs font-bold text-slate-700 block">Model ID</label>
-                    <input
-                      type="text"
-                      value={customModelId}
-                      onChange={(e) => setCustomModelId(e.target.value)}
-                      placeholder="gpt-4o-mini"
-                      className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
-                    />
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs font-bold text-slate-700 block">Model ID</label>
+                      <button
+                        onClick={fetchCustomModels}
+                        disabled={customModelsBusy || !customBaseUrl.trim() || !keyInput.trim()}
+                        className={`text-xs font-bold px-3 py-1.5 rounded-xl border transition-colors ${
+                          customModelsBusy ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-[#0f8b8d] text-white border-[#0f8b8d] hover:bg-[#0f8b8d]/90'
+                        }`}
+                      >
+                        {customModelsBusy ? (
+                          <Activity className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Search className="w-3 h-3" />
+                        )}
+                        {customModelsBusy ? ' Finding…' : ' Find Models'}
+                      </button>
+                    </div>
+                    {customModelsError && (
+                      <div className="p-2 bg-rose-50 border border-rose-200 text-rose-800 text-[10px] rounded-xl">
+                        {customModelsError}
+                      </div>
+                    )}
+                    {customModels.length > 0 ? (
+                      <div className="space-y-1">
+                        <label className="text-xs font-bold text-slate-700 block">Discovered Models</label>
+                        <select
+                          value={customModelId}
+                          onChange={(e) => setCustomModelId(e.target.value)}
+                          className="w-full text-xs font-mono p-2 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                        >
+                          <option value="">Select a model…</option>
+                          {customModels.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.id} {m.name ? `— ${m.name}` : ''}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-[10px] text-slate-500">
+                          Or type a custom model ID below:
+                        </p>
+                        <input
+                          type="text"
+                          value={customModelId}
+                          onChange={(e) => setCustomModelId(e.target.value)}
+                          placeholder="e.g. gpt-4o-mini"
+                          className="w-full text-xs font-mono p-2 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                        />
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <input
+                          type="text"
+                          value={customModelId}
+                          onChange={(e) => setCustomModelId(e.target.value)}
+                          placeholder="e.g. gpt-4o-mini"
+                          className="w-full text-xs font-mono p-2 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                        />
+                        <p className="text-[10px] text-slate-500">
+                          Enter a model ID manually, or click “Find Models” to discover models from your endpoint.
+                        </p>
+                      </div>
+                    )}
                     <label className="text-xs font-bold text-slate-700 block">API Key</label>
                     <input
                       type="password"
@@ -1415,7 +1498,7 @@ export const SettingsAIView: React.FC = () => {
                   </button>
                   <button
                     onClick={handleSaveKey}
-                    disabled={isSavingKey || !keyInput.trim() || (selectedProvider.id === 'custom' && (!customBaseUrl.trim() || !customModelId.trim()))}
+                    disabled={isSavingKey || !keyInput.trim() || (selectedProvider.id === 'custom' && !customBaseUrl.trim())}
                     className="px-4 py-2 text-xs font-bold bg-[#001432] hover:bg-[#13294b] disabled:opacity-40 text-white rounded-xl flex items-center gap-1.5 transition-all"
                   >
                     {isSavingKey ? (
