@@ -20,7 +20,11 @@ import {
   Search,
   ScanText,
   Boxes,
-  Images
+  Images,
+  Plus,
+  Pencil,
+  Zap,
+  Save
 } from 'lucide-react';
 import { AIProvider } from '../types.ts';
 import {
@@ -184,15 +188,40 @@ export const SettingsAIView: React.FC = () => {
   const [authSuccess, setAuthSuccess] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
 
-  // Key-based providers (Gemini, OpenCode, Custom): the pasted key never leaves the local server.
+  // Key-based providers (Gemini, OpenCode): the pasted key never leaves the local server.
   const [keyInput, setKeyInput] = useState<string>('');
-  const [customBaseUrl, setCustomBaseUrl] = useState<string>('');
-  const [customModelId, setCustomModelId] = useState<string>('');
-  const [customModels, setCustomModels] = useState<{ id: string; name: string }[]>([]);
-  const [customModelsBusy, setCustomModelsBusy] = useState<boolean>(false);
-  const [customModelsError, setCustomModelsError] = useState<string | null>(null);
   const [isSavingKey, setIsSavingKey] = useState<boolean>(false);
   const [keySavedMsg, setKeySavedMsg] = useState<string | null>(null);
+
+  // Custom endpoints (user-configurable OpenAI-compatible endpoints)
+  const [customEndpoints, setCustomEndpoints] = useState<{
+    id: string;
+    name: string;
+    providerId: string;
+    endpointUrl: string;
+    apiMode: string;
+    defaultModel: string;
+    context: string;
+    apiKey: string;
+    useForNewChats: boolean;
+    discoverModels: boolean;
+  }[]>([]);
+  const [editingEndpoint, setEditingEndpoint] = useState<{
+    id: string;
+    name: string;
+    providerId: string;
+    endpointUrl: string;
+    apiMode: string;
+    defaultModel: string;
+    context: string;
+    apiKey: string;
+    useForNewChats: boolean;
+    discoverModels: boolean;
+  } | null>(null);
+  const [isSavingEndpoint, setIsSavingEndpoint] = useState<boolean>(false);
+  const [testingEndpoint, setTestingEndpoint] = useState<string | null>(null);
+  const [endpointTestResult, setEndpointTestResult] = useState<{ ok: boolean; reply?: string; error?: string } | null>(null);
+  const [endpointError, setEndpointError] = useState<string | null>(null);
 
   // OCR worker pool (1–16) — persisted so whole-book OCR keeps the chosen parallelism.
   const [ocrWorkers, setOcrWorkersState] = useState<number>(() => getOcrWorkers());
@@ -317,6 +346,7 @@ export const SettingsAIView: React.FC = () => {
   useEffect(() => {
     loadModelCatalog();
     loadAccountModels();
+    fetchCustomEndpoints();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -347,14 +377,14 @@ export const SettingsAIView: React.FC = () => {
     setAuthSuccess(false);
     setKeySavedMsg(null);
     setCopied(false);
-    setClaudeInputCode('');
     setKeyInput('');
-    setCustomBaseUrl('');
-    setCustomModelId('');
+    setEditingEndpoint(null);
+    setEndpointError(null);
+    setEndpointTestResult(null);
     setDeviceCodeData(null);
     setPkceData(null);
 
-    if (provider.id === 'gemini' || provider.id === 'opencode' || provider.id === 'custom') {
+    if (provider.id === 'gemini' || provider.id === 'opencode') {
       // Key-based providers: the pasted key is handled inside the modal.
       setIsLoadingFlow(false);
       return;
@@ -523,24 +553,13 @@ export const SettingsAIView: React.FC = () => {
     }
   };
 
-  // Save the pasted key (Gemini, OpenCode or Custom); the server stores it in the user's data dir.
+  // Save the pasted key (Gemini or OpenCode); the server stores it in the user's data dir.
   const handleSaveKey = async () => {
     const key = keyInput.trim();
     if (!key || !selectedProvider) return;
     const endpoint = selectedProvider.id === 'opencode' ? '/api/settings/opencode-key'
-      : selectedProvider.id === 'custom' ? '/api/settings/custom-api-key'
       : '/api/settings/gemini-key';
-    const label = selectedProvider.id === 'opencode' ? 'OpenCode'
-      : selectedProvider.id === 'custom' ? 'Custom'
-      : 'Gemini';
-    const body: any = { apiKey: key };
-    if (selectedProvider.id === 'custom') {
-      body.baseUrl = customBaseUrl.trim();
-      if (!body.baseUrl) {
-        setAuthError('API Base URL is required for the custom provider.');
-        return;
-      }
-    }
+    const label = selectedProvider.id === 'opencode' ? 'OpenCode' : 'Gemini';
     setIsSavingKey(true);
     setAuthError(null);
     try {
@@ -550,7 +569,7 @@ export const SettingsAIView: React.FC = () => {
           'Content-Type': 'application/json',
           'x-session-id': getClientSessionId()
         },
-        body: JSON.stringify(body)
+        body: JSON.stringify({ apiKey: key })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || 'Could not save the API key.');
@@ -566,31 +585,115 @@ export const SettingsAIView: React.FC = () => {
     }
   };
 
-  // Discover available models from the custom OpenAI-compatible endpoint.
-  const fetchCustomModels = async () => {
-    if (!customBaseUrl.trim() || !keyInput.trim()) {
-      setCustomModelsError('Enter API Base URL and API Key first.');
+  // Fetch saved custom endpoints from the server.
+  const fetchCustomEndpoints = async () => {
+    try {
+      const res = await fetch('/api/settings/custom-endpoints', {
+        headers: { 'x-session-id': getClientSessionId() }
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || 'Failed to load custom endpoints.');
+      setCustomEndpoints(data.endpoints || []);
+    } catch (err: any) {
+      setEndpointError(err?.message || 'Could not load custom endpoints.');
+    }
+  };
+
+  // Save (create or update) a custom endpoint.
+  const saveCustomEndpoint = async () => {
+    if (!editingEndpoint) return;
+    if (!editingEndpoint.name.trim() || !editingEndpoint.endpointUrl.trim() || !editingEndpoint.apiKey.trim()) {
+      setEndpointError('Name, Endpoint URL and API Key are required.');
       return;
     }
-    setCustomModelsBusy(true);
-    setCustomModelsError(null);
-    setCustomModels([]);
+    setIsSavingEndpoint(true);
+    setEndpointError(null);
     try {
-      const res = await fetch('/api/models/custom', {
-        method: 'GET',
+      const res = await fetch(`/api/settings/custom-endpoints/${editingEndpoint.id}`, {
+        method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           'x-session-id': getClientSessionId()
-        }
+        },
+        body: JSON.stringify(editingEndpoint)
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || 'Model discovery failed.');
-      setCustomModels(data.models || []);
+      if (!res.ok) throw new Error(data?.error || 'Could not save custom endpoint.');
+      setEditingEndpoint(null);
+      await fetchCustomEndpoints();
+      await fetchOAuthStatus();
     } catch (err: any) {
-      setCustomModelsError(err?.message || 'Could not discover models from custom endpoint.');
+      setEndpointError(err?.message || 'Could not save custom endpoint.');
     } finally {
-      setCustomModelsBusy(false);
+      setIsSavingEndpoint(false);
     }
+  };
+
+  // Delete a custom endpoint.
+  const deleteCustomEndpoint = async (id: string) => {
+    if (!window.confirm('Delete this custom endpoint?')) return;
+    try {
+      const res = await fetch(`/api/settings/custom-endpoints/${id}`, {
+        method: 'DELETE',
+        headers: { 'x-session-id': getClientSessionId() }
+      });
+      if (!res.ok) throw new Error('Could not delete endpoint.');
+      await fetchCustomEndpoints();
+      await fetchOAuthStatus();
+    } catch (err: any) {
+      setEndpointError(err?.message || 'Could not delete custom endpoint.');
+    }
+  };
+
+  // Test a custom endpoint connection.
+  const testCustomEndpoint = async (id: string) => {
+    setTestingEndpoint(id);
+    setEndpointTestResult(null);
+    try {
+      const res = await fetch(`/api/settings/custom-endpoints/${id}/test`, {
+        method: 'POST',
+        headers: { 'x-session-id': getClientSessionId() }
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || 'Test failed.');
+      setEndpointTestResult({ ok: true, reply: data.reply });
+    } catch (err: any) {
+      setEndpointTestResult({ ok: false, error: err?.message || 'Test failed.' });
+    } finally {
+      setTestingEndpoint(null);
+    }
+  };
+
+  // Start adding a new custom endpoint.
+  const addNewCustomEndpoint = () => {
+    setEditingEndpoint({
+      id: '',
+      name: '',
+      providerId: '',
+      endpointUrl: '',
+      apiMode: 'auto-detect',
+      defaultModel: '',
+      context: 'Auto',
+      apiKey: '',
+      useForNewChats: true,
+      discoverModels: true,
+    });
+    setEndpointError(null);
+    setEndpointTestResult(null);
+  };
+
+  // Edit an existing custom endpoint.
+  const editCustomEndpoint = (endpoint: typeof customEndpoints[number]) => {
+    setEditingEndpoint({ ...endpoint });
+    setEndpointError(null);
+    setEndpointTestResult(null);
+  };
+
+  // Cancel editing.
+  const cancelEditCustomEndpoint = () => {
+    setEditingEndpoint(null);
+    setEndpointError(null);
+    setEndpointTestResult(null);
   };
 
   // Revoke subscription tokens on the server (real logout of stored tokens)
@@ -681,8 +784,9 @@ export const SettingsAIView: React.FC = () => {
     setIsPolling(false);
     setKeySavedMsg(null);
     setKeyInput('');
-    setCustomBaseUrl('');
-    setCustomModelId('');
+    setEditingEndpoint(null);
+    setEndpointError(null);
+    setEndpointTestResult(null);
     setSelectedProvider(null);
   };
 
@@ -1186,7 +1290,7 @@ export const SettingsAIView: React.FC = () => {
 
                     {/* Controls: Sign In Button or Connected State + Set Active */}
                     <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
-                      {(p.id === 'gemini' || p.id === 'opencode' || p.id === 'custom') ? (
+                      {(p.id === 'gemini' || p.id === 'opencode') ? (
                         <div className="flex items-center gap-2">
                           <span className={`text-xs font-bold px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
                             isConnected
@@ -1211,6 +1315,33 @@ export const SettingsAIView: React.FC = () => {
                           >
                             <Key className="w-3.5 h-3.5 text-[#0f8b8d]" />
                             <span>{isConnected ? 'Update Key' : 'Add API Key'}</span>
+                          </button>
+                        </div>
+                      ) : p.id === 'custom' ? (
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-bold px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+                            customEndpoints.length > 0
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                              : 'bg-slate-50 border-slate-200 text-slate-500'
+                          }`}>
+                            {customEndpoints.length > 0 ? (
+                              <>
+                                <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                <span>Endpoint Saved</span>
+                              </>
+                            ) : (
+                              <>
+                                <Key className="w-3.5 h-3.5 text-slate-400" />
+                                <span>No Endpoint</span>
+                              </>
+                            )}
+                          </span>
+                          <button
+                            onClick={addNewCustomEndpoint}
+                            className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 hover:text-[#0f8b8d] flex items-center gap-1.5 transition-colors"
+                          >
+                            <Key className="w-3.5 h-3.5 text-[#0f8b8d]" />
+                            <span>{customEndpoints.length > 0 ? 'Update Endpoint' : 'Add Endpoint'}</span>
                           </button>
                         </div>
                       ) : isConnected ? (
@@ -1318,9 +1449,11 @@ export const SettingsAIView: React.FC = () => {
                       ? 'Gemini API Key'
                       : selectedProvider.id === 'opencode'
                         ? 'OpenCode API Key'
-                        : selectedProvider.id === 'custom'
-                          ? 'Custom API Key'
-                          : `Sign in with ${selectedProvider.name}`}
+                        : selectedProvider.id === 'custom' && editingEndpoint
+                          ? 'Edit Endpoint'
+                          : selectedProvider.id === 'custom'
+                            ? 'Custom API Key'
+                            : `Sign in with ${selectedProvider.name}`}
                   </h3>
                   <p className="text-xs text-slate-500">
                     {selectedProvider.id === 'claude' 
@@ -1329,9 +1462,11 @@ export const SettingsAIView: React.FC = () => {
                         ? 'Key saved locally — never shown again'
                         : selectedProvider.id === 'opencode'
                           ? 'Console / Go key saved locally — never shown again'
-                          : selectedProvider.id === 'custom'
-                            ? 'Key saved locally — never shown again'
-                            : 'Device Authorization Flow (RFC 8628)'}
+                          : selectedProvider.id === 'custom' && editingEndpoint
+                            ? 'Configure your custom endpoint below.'
+                            : selectedProvider.id === 'custom'
+                              ? 'Key saved locally — never shown again'
+                              : 'Device Authorization Flow (RFC 8628)'}
                   </p>
                 </div>
               </div>
@@ -1376,146 +1511,316 @@ export const SettingsAIView: React.FC = () => {
               </div>
             )}
 
-            {/* Key-based providers: Gemini, OpenCode and Custom */}
-            {(selectedProvider.id === 'gemini' || selectedProvider.id === 'opencode' || selectedProvider.id === 'custom') && (
+            {/* Custom Endpoint: Edit Endpoint form */}
+            {selectedProvider.id === 'custom' && editingEndpoint && (
               <div className="space-y-4 py-2">
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
                   <div className="flex items-center gap-2 font-bold text-slate-800">
                     <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                    <span>Server-Side Key Handling</span>
+                    <span>Edit Endpoint</span>
                   </div>
                   <p className="text-slate-600 leading-relaxed">
-                    {selectedProvider.id === 'opencode'
-                      ? 'Create an API key in the OpenCode Console (console.opencode.ai) and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser. If you already use the OpenCode CLI on this machine, its stored key is used automatically.'
-                      : selectedProvider.id === 'custom'
-                        ? 'Enter your custom OpenAI-compatible endpoint details below. Base URL, Model ID and API Key are saved to your user data directory (.env, outside the repo) and are never displayed again or sent back to the browser.'
-                        : 'Create the key in Google AI Studio and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser.'}
+                    Configure a custom OpenAI-compatible endpoint. Saved to your user data directory (.env, outside the repo) and never displayed again or sent back to the browser.
                   </p>
                 </div>
 
-                {selectedProvider.id === 'custom' ? (
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-700 block">API Base URL</label>
-                    <input
-                      type="text"
-                      value={customBaseUrl}
-                      onChange={(e) => setCustomBaseUrl(e.target.value)}
-                      placeholder="https://api.openai.com/v1"
-                      className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
-                    />
-                    <div className="flex items-center gap-2">
-                      <label className="text-xs font-bold text-slate-700 block">Model ID</label>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-700 block">Name</label>
+                  <input
+                    type="text"
+                    value={editingEndpoint.name}
+                    onChange={(e) => setEditingEndpoint({ ...editingEndpoint, name: e.target.value })}
+                    placeholder="e.g. My Custom Endpoint"
+                    className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-700 block">Provider ID</label>
+                  <input
+                    type="text"
+                    value={editingEndpoint.providerId}
+                    onChange={(e) => setEditingEndpoint({ ...editingEndpoint, providerId: e.target.value })}
+                    placeholder="e.g. vyceai"
+                    className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-700 block">Endpoint URL</label>
+                  <input
+                    type="text"
+                    value={editingEndpoint.endpointUrl}
+                    onChange={(e) => setEditingEndpoint({ ...editingEndpoint, endpointUrl: e.target.value })}
+                    placeholder="https://api.example.com/v1"
+                    className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-700 block">API Mode</label>
+                  <div className="flex items-center gap-1 border border-slate-200 rounded-xl bg-slate-50 p-0.5">
+                    {['auto-detect', 'chat-completions', 'responses-api', 'anthropic-messages'].map((mode) => (
                       <button
-                        onClick={fetchCustomModels}
-                        disabled={customModelsBusy || !customBaseUrl.trim() || !keyInput.trim()}
-                        className={`text-xs font-bold px-3 py-1.5 rounded-xl border transition-colors ${
-                          customModelsBusy ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-[#0f8b8d] text-white border-[#0f8b8d] hover:bg-[#0f8b8d]/90'
+                        key={mode}
+                        onClick={() => setEditingEndpoint({ ...editingEndpoint, apiMode: mode })}
+                        className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-colors ${
+                          editingEndpoint.apiMode === mode
+                            ? 'bg-[#0f8b8d] text-white'
+                            : 'bg-transparent text-slate-600 hover:bg-slate-200'
                         }`}
                       >
-                        {customModelsBusy ? (
-                          <Activity className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <Search className="w-3 h-3" />
-                        )}
-                        {customModelsBusy ? ' Finding…' : ' Find Models'}
+                        {mode === 'auto-detect' ? 'Auto-detect'
+                         : mode === 'chat-completions' ? 'Chat Completions'
+                         : mode === 'responses-api' ? 'Responses API'
+                         : 'Anthropic Messages'}
                       </button>
-                    </div>
-                    {customModelsError && (
-                      <div className="p-2 bg-rose-50 border border-rose-200 text-rose-800 text-[10px] rounded-xl">
-                        {customModelsError}
-                      </div>
-                    )}
-                    {customModels.length > 0 ? (
-                      <div className="space-y-1">
-                        <label className="text-xs font-bold text-slate-700 block">Discovered Models</label>
-                        <select
-                          value={customModelId}
-                          onChange={(e) => setCustomModelId(e.target.value)}
-                          className="w-full text-xs font-mono p-2 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
-                        >
-                          <option value="">Select a model…</option>
-                          {customModels.map((m) => (
-                            <option key={m.id} value={m.id}>
-                              {m.id} {m.name ? `— ${m.name}` : ''}
-                            </option>
-                          ))}
-                        </select>
-                        <p className="text-[10px] text-slate-500">
-                          Or type a custom model ID below:
-                        </p>
-                        <input
-                          type="text"
-                          value={customModelId}
-                          onChange={(e) => setCustomModelId(e.target.value)}
-                          placeholder="e.g. gpt-4o-mini"
-                          className="w-full text-xs font-mono p-2 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
-                        />
-                      </div>
-                    ) : (
-                      <div className="space-y-1">
-                        <input
-                          type="text"
-                          value={customModelId}
-                          onChange={(e) => setCustomModelId(e.target.value)}
-                          placeholder="e.g. gpt-4o-mini"
-                          className="w-full text-xs font-mono p-2 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
-                        />
-                        <p className="text-[10px] text-slate-500">
-                          Enter a model ID manually, or click “Find Models” to discover models from your endpoint.
-                        </p>
-                      </div>
-                    )}
-                    <label className="text-xs font-bold text-slate-700 block">API Key</label>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-4">
+                  <div className="flex-1 space-y-2">
+                    <label className="text-xs font-bold text-slate-700 block">Default Model</label>
                     <input
-                      type="password"
-                      value={keyInput}
-                      onChange={(e) => setKeyInput(e.target.value)}
-                      placeholder="sk-… / your custom API key"
+                      type="text"
+                      value={editingEndpoint.defaultModel}
+                      onChange={(e) => setEditingEndpoint({ ...editingEndpoint, defaultModel: e.target.value })}
+                      placeholder="e.g. deepseek-v4.1"
                       className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
                     />
                   </div>
-                ) : (
                   <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-700 block">
-                      {selectedProvider.id === 'opencode' ? 'OpenCode API Key' : 'Gemini API Key'}
-                    </label>
-                    <input
-                      type="password"
-                      value={keyInput}
-                      onChange={(e) => setKeyInput(e.target.value)}
-                      placeholder={selectedProvider.id === 'opencode' ? 'sk-… / your OpenCode Console API key' : 'AIza… / your Gemini API key'}
+                    <label className="text-xs font-bold text-slate-700 block">Context</label>
+                    <select
+                      value={editingEndpoint.context}
+                      onChange={(e) => setEditingEndpoint({ ...editingEndpoint, context: e.target.value })}
                       className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                    >
+                      <option value="Auto">Auto</option>
+                      <option value="system">System</option>
+                      <option value="developer">Developer</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-700 block">API Key</label>
+                  <input
+                    type="password"
+                    value={editingEndpoint.apiKey}
+                    onChange={(e) => setEditingEndpoint({ ...editingEndpoint, apiKey: e.target.value })}
+                    placeholder="Leave blank to keep current key"
+                    className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                  />
+                </div>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <label className="flex items-center gap-1 text-xs cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={editingEndpoint.useForNewChats}
+                      onChange={(e) => setEditingEndpoint({ ...editingEndpoint, useForNewChats: e.target.checked })}
+                      className="w-4 h-4 rounded border-slate-300 text-[#0f8b8d] focus:ring-[#0f8b8d]"
                     />
+                    <span className="text-slate-600">Use for new chats</span>
+                  </label>
+                  <label className="flex items-center gap-1 text-xs cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={editingEndpoint.discoverModels}
+                      onChange={(e) => setEditingEndpoint({ ...editingEndpoint, discoverModels: e.target.checked })}
+                      className="w-4 h-4 rounded border-slate-300 text-[#0f8b8d] focus:ring-[#0f8b8d]"
+                    />
+                    <span className="text-slate-600">Discover models</span>
+                  </label>
+                </div>
+
+                {endpointError && (
+                  <div className="p-2 bg-rose-50 border border-rose-200 text-rose-800 text-[10px] rounded-xl flex items-center gap-2">
+                    <AlertCircle className="w-3 h-3 text-rose-600 shrink-0" />
+                    <span>{endpointError}</span>
                   </div>
                 )}
 
-                <div className="pt-2 flex items-center justify-end gap-2.5">
+                {endpointTestResult && (
+                  <div className={`p-2 rounded-xl text-[10px] flex items-center gap-2 ${
+                    endpointTestResult.ok ? 'bg-emerald-50 border border-emerald-200 text-emerald-800' : 'bg-rose-50 border border-rose-200 text-rose-800'
+                  }`}>
+                    {endpointTestResult.ok ? <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" /> : <AlertCircle className="w-3 h-3 text-rose-600 shrink-0" />}
+                    <span>{endpointTestResult.ok ? `✓ ${endpointTestResult.reply}` : `✗ ${endpointTestResult.error}`}</span>
+                  </div>
+                )}
+
+                <div className="pt-2 flex items-center justify-between gap-2">
                   <button
-                    onClick={handleCloseModal}
+                    onClick={cancelEditCustomEndpoint}
                     className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
                   >
                     Cancel
                   </button>
+                  {editingEndpoint.id ? (
+                    <button
+                      onClick={() => deleteCustomEndpoint(editingEndpoint.id)}
+                      disabled={isSavingEndpoint}
+                      className="px-4 py-2 text-xs font-semibold text-rose-600 hover:bg-rose-50 rounded-xl"
+                    >
+                      Delete
+                    </button>
+                  ) : null}
                   <button
-                    onClick={handleSaveKey}
-                    disabled={isSavingKey || !keyInput.trim() || (selectedProvider.id === 'custom' && !customBaseUrl.trim())}
-                    className="px-4 py-2 text-xs font-bold bg-[#001432] hover:bg-[#13294b] disabled:opacity-40 text-white rounded-xl flex items-center gap-1.5 transition-all"
+                    onClick={() => testingEndpoint === editingEndpoint.id ? null : testCustomEndpoint(editingEndpoint.id)}
+                    disabled={isSavingEndpoint || testingEndpoint === editingEndpoint.id}
+                    className="px-4 py-2 text-xs font-semibold border border-slate-300 rounded-xl hover:bg-slate-50"
                   >
-                    {isSavingKey ? (
-                      <>
-                        <Activity className="w-3.5 h-3.5 animate-spin" />
-                        <span>Saving…</span>
-                      </>
-                    ) : (
-                      <>
-                        <CheckCircle2 className="w-3.5 h-3.5 text-[#8ff3f4]" />
-                        <span>Save & Connect</span>
-                      </>
-                    )}
+                    {testingEndpoint === editingEndpoint.id ? <Activity className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}{testingEndpoint === editingEndpoint.id ? ' Testing…' : ' Test'}
+                  </button>
+                  <button
+                    onClick={saveCustomEndpoint}
+                    disabled={isSavingEndpoint || !editingEndpoint.name.trim() || !editingEndpoint.endpointUrl.trim() || !editingEndpoint.apiKey.trim()}
+                    className="px-4 py-2 text-xs font-bold bg-[#001432] hover:bg-[#13294b] disabled:opacity-40 text-white rounded-xl"
+                  >
+                    {isSavingEndpoint ? <Activity className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}{isSavingEndpoint ? ' Saving…' : ' Save'}
                   </button>
                 </div>
               </div>
             )}
+
+            {/* Custom Endpoint: Saved endpoints list */}
+            {selectedProvider.id === 'custom' && customEndpoints.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-bold text-slate-700">Saved Endpoints</span>
+                  <button
+                    onClick={addNewCustomEndpoint}
+                    className="text-xs font-bold text-[#0f8b8d] hover:underline"
+                  >
+                    + New endpoint
+                  </button>
+                </div>
+                <div className="space-y-1">
+                  {customEndpoints.map((ep) => (
+                    <div key={ep.id} className="p-2.5 rounded-xl border border-slate-200 bg-white flex items-center justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900 truncate">
+                          <span>{ep.name}</span>
+                          {ep.useForNewChats && <span className="px-1 py-0.5 rounded bg-emerald-50 text-emerald-700 text-[9px] font-bold border border-emerald-200">Active</span>}
+                        </div>
+                        <div className="flex items-center gap-1 text-[9px] text-slate-500">
+                          <span>{ep.providerId}</span>
+                          <span>•</span>
+                          <span>{ep.apiMode}</span>
+                          <span>•</span>
+                          <span>{ep.defaultModel || '—'}</span>
+                        </div>
+                        <div className="text-[9px] font-mono text-slate-400 truncate">{ep.endpointUrl}</div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => editCustomEndpoint(ep)}
+                          className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-700"
+                          title="Edit"
+                        >
+                          <Pencil className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => testCustomEndpoint(ep.id)}
+                          disabled={testingEndpoint === ep.id}
+                          className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-700"
+                          title="Test"
+                        >
+                          {testingEndpoint === ep.id ? <Activity className="w-2.5 h-2.5 animate-spin" /> : <Zap className="w-2.5 h-2.5" />}
+                        </button>
+                        <button
+                          onClick={() => deleteCustomEndpoint(ep.id)}
+                          className="p-1 hover:bg-rose-50 rounded text-rose-400 hover:text-rose-600"
+                          title="Delete"
+                        >
+                          <X className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Custom Endpoint: Saved endpoints list */}
+            {selectedProvider.id === 'custom' && !editingEndpoint && customEndpoints.length > 0 && (
+              <div className="space-y-4 py-2">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-bold text-slate-700">Saved Endpoints</span>
+                  <button
+                    onClick={addNewCustomEndpoint}
+                    className="text-xs font-bold text-[#0f8b8d] hover:underline"
+                  >
+                    + New endpoint
+                  </button>
+                </div>
+                <div className="space-y-1">
+                  {customEndpoints.map((ep) => (
+                    <div key={ep.id} className="p-2.5 rounded-xl border border-slate-200 bg-white flex items-center justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900 truncate">
+                          <span>{ep.name}</span>
+                          {ep.useForNewChats && <span className="px-1 py-0.5 rounded bg-emerald-50 text-emerald-700 text-[9px] font-bold border border-emerald-200">Active</span>}
+                        </div>
+                        <div className="flex items-center gap-1 text-[9px] text-slate-500">
+                          <span>{ep.providerId}</span>
+                          <span>•</span>
+                          <span>{ep.apiMode}</span>
+                          <span>•</span>
+                          <span>{ep.defaultModel || '—'}</span>
+                        </div>
+                        <div className="text-[9px] font-mono text-slate-400 truncate">{ep.endpointUrl}</div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => editCustomEndpoint(ep)}
+                          className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-700"
+                          title="Edit"
+                        >
+                          <Pencil className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => testCustomEndpoint(ep.id)}
+                          disabled={testingEndpoint === ep.id}
+                          className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-700"
+                          title="Test"
+                        >
+                          {testingEndpoint === ep.id ? <Activity className="w-2.5 h-2.5 animate-spin" /> : <Zap className="w-2.5 h-2.5" />}
+                        </button>
+                        <button
+                          onClick={() => deleteCustomEndpoint(ep.id)}
+                          className="p-1 hover:bg-rose-50 rounded text-rose-400 hover:text-rose-600"
+                          title="Delete"
+                        >
+                          <X className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Custom Endpoint: Empty state */}
+            {selectedProvider.id === 'custom' && !editingEndpoint && customEndpoints.length === 0 && (
+              <div className="space-y-4 py-2">
+                <button
+                  onClick={addNewCustomEndpoint}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 text-xs font-bold text-[#0f8b8d] hover:bg-slate-50 rounded-xl border border-slate-200"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Add Custom Endpoint</span>
+                </button>
+                <p className="text-[10px] text-slate-500">
+                  No custom endpoints configured. Click "+ New endpoint" to add one.
+                </p>
+              </div>
+            )}
+
+            {/* Device Code Flow for ChatGPT & Grok */}
 
             {/* Device Code Flow for ChatGPT & Grok */}
             {(selectedProvider.id === 'chatgpt' || selectedProvider.id === 'grok') && (

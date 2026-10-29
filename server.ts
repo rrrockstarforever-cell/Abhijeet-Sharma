@@ -78,17 +78,6 @@ function geminiKey(): string {
   return (process.env.GEMINI_API_KEY || '').trim();
 }
 
-// Custom provider env vars (stored in <PULSE_DATA_DIR>/.env via Settings).
-function customBaseUrl(): string {
-  return (process.env.CUSTOM_BASE_URL || '').trim();
-}
-function customApiKey(): string {
-  return (process.env.CUSTOM_API_KEY || '').trim();
-}
-function customModelId(): string {
-  return (process.env.CUSTOM_MODEL_ID || '').trim();
-}
-
 // Gemini client is created lazily and refreshed if the key changes, so a key pasted
 // in Settings takes effect immediately without restarting the server.
 let geminiClient: { key: string; client: GoogleGenAI } | null = null;
@@ -178,7 +167,7 @@ function providerErrorText(body: any, status: number): string {
 function isProviderConnected(providerId: string): boolean {
   if (providerId === 'gemini') return Boolean(geminiKey());
   if (providerId === 'opencode') return Boolean(opencodeKey());
-  if (providerId === 'custom') return Boolean(customBaseUrl() && customApiKey() && customModelId());
+  if (providerId === 'custom') return Boolean(getActiveCustomEndpoint());
   try {
     const s = oauthStatus();
     if (providerId === 'chatgpt') return Boolean(s.codex);
@@ -196,7 +185,7 @@ function notConnectedMessage(providerId: string): string {
     return 'OpenCode is not connected. Paste your OpenCode Console API key in Settings → AI Subscription Hub.';
   }
   if (providerId === 'custom') {
-    return 'Custom provider is not connected. Fill in API Base URL, Model ID and API Key in Settings → AI Subscription Hub.';
+    return 'Custom provider is not connected. Add a custom endpoint in Settings → AI Subscription Hub.';
   }
   return `${providerId.charAt(0).toUpperCase() + providerId.slice(1)} is not signed in. Connect an AI provider in Settings → AI Subscription Hub.`;
 }
@@ -318,41 +307,83 @@ async function runCompletion(opts: {
   }
 
   if (provider === 'custom') {
-    const baseUrl = customBaseUrl();
-    const key = customApiKey();
-    const model_ = model || customModelId() || DEFAULT_MODELS.custom;
+    const endpoint = getActiveCustomEndpoint();
+    if (!endpoint) throw new ApiError(notConnectedMessage('custom'), 401);
+    const baseUrl = endpoint.endpointUrl;
+    const key = endpoint.apiKey;
+    const model_ = model || endpoint.defaultModel || DEFAULT_MODELS.custom;
     if (!baseUrl || !key || !model_) throw new ApiError(notConnectedMessage('custom'), 401);
     const payloadMessages = [
       ...(system ? [{ role: 'system', content: system }] : []),
       ...messages.map((m) => ({ role: m.role, content: m.content })),
     ];
-    const payload = JSON.stringify({
-      model: model_,
-      messages: payloadMessages,
-      temperature: 0.7,
-      ...(json ? { response_format: { type: 'json_object' } } : {}),
-    });
-    const r = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
+    const apiMode = endpoint.apiMode || 'auto-detect';
+    const url =
+      apiMode === 'responses-api'
+        ? `${baseUrl.replace(/\/$/, '')}/responses`
+        : `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+    let payload: any;
+    if (apiMode === 'anthropic-messages') {
+      payload = {
+        model: model_,
+        messages: payloadMessages,
+        temperature: 0.7,
+        ...(json ? { response_format: { type: 'json_object' } } : {}),
+      };
+    } else {
+      payload = {
+        model: model_,
+        messages: payloadMessages,
+        temperature: 0.7,
+        ...(json ? { response_format: { type: 'json_object' } } : {}),
+      };
+    }
+    const r = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${key}`,
       },
-      body: payload,
+      body: JSON.stringify(payload),
       ...(signal ? { signal } : {}),
     });
     const raw = await r.text();
     let body: any = {};
     try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
     if (!r.ok) {
-      aiLog({ provider: 'custom', model: model_, status: r.status, error: true });
-      throw new ApiError(`Custom: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
+      aiLog({ provider: 'custom', model: model_, status: r.status, error: true, endpoint: endpoint.name });
+      throw new ApiError(`Custom (${endpoint.name}): ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
     }
-    const content = body?.choices?.[0]?.message?.content;
-    const text = typeof content === 'string' ? content : '';
-    aiLog({ provider: 'custom', model: model_, status: r.status, text_len: text.length, json: !!json });
+    let text = '';
+    if (apiMode === 'responses-api') {
+      // Responses API returns output array with content items
+      const output = body?.output;
+      if (Array.isArray(output)) {
+        for (const item of output) {
+          if (item.type === 'message' && Array.isArray(item.content)) {
+            for (const c of item.content) {
+              if (c.type === 'output_text' && typeof c.text === 'string') text += c.text;
+            }
+          }
+        }
+      } else if (typeof body?.output_text === 'string') {
+        text = body.output_text;
+      }
+    } else if (apiMode === 'anthropic-messages') {
+      // Anthropic-style: content is array of {type, text}
+      const content = body?.content;
+      if (Array.isArray(content)) {
+        text = content.map((c: any) => (c.type === 'text' ? c.text : '')).join('');
+      } else if (typeof body?.content === 'string') {
+        text = body.content;
+      }
+    } else {
+      const choice = body?.choices?.[0];
+      text = typeof choice?.message?.content === 'string' ? choice.message.content : '';
+    }
+    aiLog({ provider: 'custom', model: model_, status: r.status, text_len: text.length, json: !!json, endpoint: endpoint.name });
     if (!text.trim()) {
-      throw new ApiError(`Custom returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || 'unknown'}).`, 502);
+      throw new ApiError(`Custom (${endpoint.name}) returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || body?.output?.[0]?.finish_reason || 'unknown'}).`, 502);
     }
     return text;
   }
@@ -548,29 +579,219 @@ app.post('/api/settings/opencode-key', (req: Request, res: Response) => {
   }
 });
 
-// 6c. POST /api/settings/custom-api-key: save the Custom provider's base URL and API key.
-// NEVER echoes the key back. Model ID is optional — it can be discovered via GET /api/models/custom.
-app.post('/api/settings/custom-api-key', (req: Request, res: Response) => {
-  const { apiKey, baseUrl, modelId } = req.body || {};
-  const key = String(apiKey || '').trim();
-  const url = String(baseUrl || '').trim();
-  const model = String(modelId || '').trim();
-  if (!key || !url) {
-    return res.status(400).json({ error: 'API Base URL and API Key are required.' });
+// ==========================================
+// CUSTOM ENDPOINTS (user-configurable OpenAI-compatible endpoints)
+// ==========================================
+
+const CUSTOM_ENDPOINTS_FILE = path.join(DATA_DIR, 'custom-endpoints.json');
+
+interface CustomEndpoint {
+  id: string;
+  name: string;
+  providerId: string;
+  endpointUrl: string;
+  apiMode: 'auto-detect' | 'chat-completions' | 'responses-api' | 'anthropic-messages';
+  defaultModel: string;
+  context: string;
+  apiKey: string;
+  useForNewChats: boolean;
+  discoverModels: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function readCustomEndpoints(): CustomEndpoint[] {
+  try {
+    if (!fs.existsSync(CUSTOM_ENDPOINTS_FILE)) return [];
+    const raw = fs.readFileSync(CUSTOM_ENDPOINTS_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeCustomEndpoints(endpoints: CustomEndpoint[]): void {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(CUSTOM_ENDPOINTS_FILE, JSON.stringify(endpoints, null, 2), 'utf8');
+}
+
+function findCustomEndpoint(id: string): CustomEndpoint | undefined {
+  return readCustomEndpoints().find((e) => e.id === id);
+}
+
+// GET /api/settings/custom-endpoints: list all saved custom endpoints
+app.get('/api/settings/custom-endpoints', (_req: Request, res: Response) => {
+  const endpoints = readCustomEndpoints().map((e) => ({ ...e, apiKey: '***' })); // never return real keys
+  return res.json({ endpoints });
+});
+
+// POST /api/settings/custom-endpoints: create a new custom endpoint
+app.post('/api/settings/custom-endpoints', (req: Request, res: Response) => {
+  const { name, providerId, endpointUrl, apiMode, defaultModel, context, apiKey, useForNewChats, discoverModels } = req.body || {};
+  const now = new Date().toISOString();
+  const id = String(providerId || name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-') || `custom-${Date.now()}`;
+  if (!name || !endpointUrl || !apiKey) {
+    return res.status(400).json({ error: 'Name, Endpoint URL and API Key are required.' });
   }
   try {
-    writeEnvValue('CUSTOM_API_KEY', key);
-    writeEnvValue('CUSTOM_BASE_URL', url);
-    if (model) {
-      writeEnvValue('CUSTOM_MODEL_ID', model);
-    }
-    return res.json({ ok: true, connected: true });
+    const endpoints = readCustomEndpoints();
+    const endpoint: CustomEndpoint = {
+      id,
+      name: String(name),
+      providerId: String(providerId || name),
+      endpointUrl: String(endpointUrl).replace(/\/$/, ''),
+      apiMode: (apiMode as CustomEndpoint['apiMode']) || 'auto-detect',
+      defaultModel: String(defaultModel || ''),
+      context: String(context || 'Auto'),
+      apiKey: String(apiKey),
+      useForNewChats: Boolean(useForNewChats),
+      discoverModels: Boolean(discoverModels),
+      createdAt: now,
+      updatedAt: now,
+    };
+    const existing = endpoints.findIndex((e) => e.id === id);
+    if (existing >= 0) endpoints[existing] = { ...endpoints[existing], ...endpoint, updatedAt: now };
+    else endpoints.push(endpoint);
+    writeCustomEndpoints(endpoints);
+    return res.json({ ok: true, endpoint: { ...endpoint, apiKey: '***' } });
   } catch (err: any) {
-    return res.status(500).json({ error: err?.message || 'Could not save the custom provider settings.' });
+    return res.status(500).json({ error: err?.message || 'Could not save custom endpoint.' });
   }
 });
 
-// 6d. GET /api/models/custom: discover models from the custom OpenAI-compatible endpoint.
+// PUT /api/settings/custom-endpoints/:id: update an existing custom endpoint
+app.put('/api/settings/custom-endpoints/:id', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { name, providerId, endpointUrl, apiMode, defaultModel, context, apiKey, useForNewChats, discoverModels } = req.body || {};
+  try {
+    const endpoints = readCustomEndpoints();
+    const idx = endpoints.findIndex((e) => e.id === id);
+    if (idx < 0) return res.status(404).json({ error: 'Custom endpoint not found.' });
+    const existing = endpoints[idx];
+    const now = new Date().toISOString();
+    endpoints[idx] = {
+      ...existing,
+      name: name !== undefined ? String(name) : existing.name,
+      providerId: providerId !== undefined ? String(providerId) : existing.providerId,
+      endpointUrl: endpointUrl !== undefined ? String(endpointUrl).replace(/\/$/, '') : existing.endpointUrl,
+      apiMode: apiMode !== undefined ? (apiMode as CustomEndpoint['apiMode']) : existing.apiMode,
+      defaultModel: defaultModel !== undefined ? String(defaultModel) : existing.defaultModel,
+      context: context !== undefined ? String(context) : existing.context,
+      apiKey: apiKey !== undefined ? String(apiKey) : existing.apiKey,
+      useForNewChats: useForNewChats !== undefined ? Boolean(useForNewChats) : existing.useForNewChats,
+      discoverModels: discoverModels !== undefined ? Boolean(discoverModels) : existing.discoverModels,
+      updatedAt: now,
+    };
+    writeCustomEndpoints(endpoints);
+    return res.json({ ok: true, endpoint: { ...endpoints[idx], apiKey: '***' } });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Could not update custom endpoint.' });
+  }
+});
+
+// DELETE /api/settings/custom-endpoints/:id: delete a custom endpoint
+app.delete('/api/settings/custom-endpoints/:id', (req: Request, res: Response) => {
+  const { id } = req.params;
+  try {
+    const endpoints = readCustomEndpoints();
+    const filtered = endpoints.filter((e) => e.id !== id);
+    if (filtered.length === endpoints.length) return res.status(404).json({ error: 'Custom endpoint not found.' });
+    writeCustomEndpoints(filtered);
+    return res.json({ ok: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Could not delete custom endpoint.' });
+  }
+});
+
+// POST /api/settings/custom-endpoints/:id/test: test a custom endpoint connection
+app.post('/api/settings/custom-endpoints/:id/test', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const endpoint = findCustomEndpoint(id);
+  if (!endpoint) return res.status(404).json({ error: 'Custom endpoint not found.' });
+  try {
+    const model_ = endpoint.defaultModel || 'gpt-4o-mini';
+    const url = `${endpoint.endpointUrl}/chat/completions`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${endpoint.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: model_,
+        messages: [{ role: 'user', content: 'Name the first-line drug for anaphylaxis in one word.' }],
+        temperature: 0.7,
+      }),
+    });
+    const raw = await r.text();
+    let body: any = {};
+    try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+    if (!r.ok) {
+      return res.status(502).json({ error: `Test failed: ${providerErrorText(body, r.status)}` });
+    }
+    const content = body?.choices?.[0]?.message?.content;
+    const text = typeof content === 'string' ? content : '';
+    if (!text.trim()) {
+      return res.status(502).json({ error: 'Test failed: endpoint returned an empty reply.' });
+    }
+    return res.json({ ok: true, reply: text.slice(0, 200) });
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'Test failed: could not reach endpoint.' });
+  }
+});
+
+// GET /api/models/custom: discover models from a custom endpoint (uses active endpoint or first saved)
+app.get('/api/models/custom', async (_req: Request, res: Response) => {
+  const endpoints = readCustomEndpoints();
+  const activeEndpoint = endpoints.find((e) => e.useForNewChats) || endpoints[0];
+  if (!activeEndpoint) {
+    return res.status(401).json({ error: 'No custom endpoint configured. Add one in Settings → AI Subscription Hub.' });
+  }
+  try {
+    const modelsUrl = `${activeEndpoint.endpointUrl}/models`;
+    const r = await fetch(modelsUrl, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${activeEndpoint.apiKey}`,
+      },
+    });
+    const raw = await r.text();
+    let body: any = {};
+    try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+    if (!r.ok) {
+      return res.status(502).json({ error: `Model discovery failed: ${providerErrorText(body, r.status)}` });
+    }
+    const rows: any[] = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+    const models = rows
+      .map((m) => ({ id: String(m?.id ?? m?.name ?? ''), name: String(m?.name || m?.id || ''), source: 'custom' }))
+      .filter((m) => m.id);
+    return res.json({ models, fetchedAt: new Date().toISOString(), endpoint: activeEndpoint.name });
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'Could not discover models from custom endpoint.' });
+  }
+});
+
+// Helper: get the active custom endpoint (the one marked useForNewChats, or first)
+function getActiveCustomEndpoint(): CustomEndpoint | undefined {
+  const endpoints = readCustomEndpoints();
+  return endpoints.find((e) => e.useForNewChats) || endpoints[0];
+}
+
+// Backward-compatible helpers (for any remaining references)
+function customBaseUrl(): string {
+  const ep = getActiveCustomEndpoint();
+  return ep ? ep.endpointUrl : '';
+}
+function customApiKey(): string {
+  const ep = getActiveCustomEndpoint();
+  return ep ? ep.apiKey : '';
+}
+function customModelId(): string {
+  const ep = getActiveCustomEndpoint();
+  return ep ? ep.defaultModel : '';
+}
 // Fetches {CUSTOM_BASE_URL}/models and returns the model id list so the user can pick one.
 app.get('/api/models/custom', async (_req: Request, res: Response) => {
   const baseUrl = customBaseUrl();
@@ -1133,12 +1354,25 @@ app.post('/api/web/research', async (req: Request, res: Response) => {
 
 // Legacy provider list endpoint, now reporting ONLY real connection state (no latency fakes).
 app.get('/api/providers/status', (req: Request, res: Response) => {
+  const customEndpoints = readCustomEndpoints();
   res.json({
-    providers: (['gemini', 'chatgpt', 'claude', 'grok', 'opencode'] as string[]).map((id) => ({
-      id,
-      model: DEFAULT_MODELS[id],
-      connected: isProviderConnected(id),
-    })),
+    providers: [
+      ...(['gemini', 'chatgpt', 'claude', 'grok', 'opencode'] as string[]).map((id) => ({
+        id,
+        model: DEFAULT_MODELS[id],
+        connected: isProviderConnected(id),
+      })),
+      ...customEndpoints.map((e) => ({
+        id: `custom-${e.id}`,
+        name: e.name,
+        model: e.defaultModel,
+        connected: true,
+        type: 'custom',
+        endpointUrl: e.endpointUrl,
+        apiMode: e.apiMode,
+        useForNewChats: e.useForNewChats,
+      })),
+    ],
   });
 });
 
