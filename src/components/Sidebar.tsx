@@ -248,7 +248,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'ai-tutor' as AppView, label: 'Clinical AI Tutor', icon: Brain },
     { id: 'pdf-reader' as AppView, label: 'PDF Reader & OCR', icon: BookOpen },
     { id: 'research' as AppView, label: 'Clinical Evidence Browser', icon: Compass },
-    { id: 'qa' as AppView, label: 'QA & Review', icon: ShieldCheck },
     { id: 'settings' as AppView, label: 'AI Subscriptions & OCR', icon: Sliders },
   ];
 

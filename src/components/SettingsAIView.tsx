@@ -782,6 +782,7 @@ export const SettingsAIView: React.FC = () => {
       await fetchOAuthStatus();
       if (activeProviderId === providerId) {
         setActiveProviderId('gemini');
+        persistActiveProvider('gemini');
       }
     } catch (err) {
       console.error('Logout error:', err);

@@ -31,6 +31,12 @@ import {
   Highlighter,
   StickyNote,
   Trash2,
+  Sparkles,
+  Globe,
+  GraduationCap,
+  Send,
+  Type as TypeIcon,
+  Database,
   FileText,
   Trash,
   Maximize,
@@ -40,6 +46,13 @@ import {
   Square,
   Focus,
   LayoutGrid,
+  PanelRight,
+  Activity,
+  Ruler,
+  Contrast,
+  RotateCcw,
+  Stethoscope,
+  Zap,
 } from 'lucide-react';
 import { AppView } from '../types.ts';
 import {
@@ -60,6 +73,13 @@ import {
   highlightFromPdfSelection,
   type UserHighlight,
 } from '../utils/userHighlightsStore.ts';
+import {
+  aiComplete,
+  getActiveProvider,
+  getEffectiveModel,
+  NOT_CONNECTED_MESSAGE,
+  extractJson,
+} from '../lib/ai.ts';
 import { createOcrPool, ocrConcurrency, OcrWord } from '../utils/ocr.ts';
 import { startJob, stopJob, type JobControl } from '../utils/jobRegistry.ts';
 import { RevisionNote, downloadNotesPdf } from './RevisionNote.tsx';
@@ -167,8 +187,9 @@ function normalizeOcrWords(
 
 interface PDFReaderViewProps {
   onNavigate: (view: AppView, targetId?: string) => void;
+  darkMode?: boolean;
 }
-export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate }) => {
+export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMode = false }) => {
   const [docs, setDocs] = useState<PDFLibraryMeta[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const [libraryError, setLibraryError] = useState<string | null>(null);
@@ -208,6 +229,24 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate }) => {
   const notesCancelRef = useRef<boolean>(false);
   const [madeNotes, setMadeNotes] = useState<{ range: string; text: string }[]>([]);
   const [notesError, setNotesError] = useState<string | null>(null);
+
+  // ----- AI panel / MCQ state -----
+  const [askPanel, setAskPanel] = useState<boolean>(false);
+  const [askContext, setAskContext] = useState<string>('');
+  const [askContextLabel, setAskContextLabel] = useState<string>('current page');
+  const [askIncludeWeb, setAskIncludeWeb] = useState<boolean>(false);
+  const [askBusy, setAskBusy] = useState<boolean>(false);
+  const [askReply, setAskReply] = useState<string>('');
+  const [askQuestion, setAskQuestion] = useState<string>('');
+  const [askInput, setAskInput] = useState<string>('');
+  const [askCopied, setAskCopied] = useState<boolean>(false);
+  const [askCitations, setAskCitations] = useState<string[]>([]);
+  const [askError, setAskError] = useState<string | null>(null);
+  const [mcqs, setMcqs] = useState<{ question: string; options: string[]; answerIndex: number; explanation: string }[]>([]);
+  const [mcqBusy, setMcqBusy] = useState<boolean>(false);
+  const [showMcqAnswers, setShowMcqAnswers] = useState<Record<number, boolean>>({});
+  const [mcqIndex, setMcqIndex] = useState<number>(0);
+  const [mcqPicked, setMcqPicked] = useState<number | null>(null);
 
   const [viewMode, setViewMode] = useState<'page' | 'text'>('page');
   const [immersive, setImmersive] = useState<boolean>(false);
@@ -914,6 +953,190 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate }) => {
       ocrJobRef.current = null;
     }
   };
+
+  // ============================ Make notes from pages ============================
+
+  const makeNotesFromPages = async () => {
+    const provider = getActiveProvider();
+    if (!provider) { setNotesError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`); return; }
+    if (!activeDocId || numPages === 0) { setNotesError('Open a document first.'); return; }
+    const from = Math.max(1, Math.min(numPages, Math.floor(notesFrom) || 1));
+    const to = Math.max(from, Math.min(numPages, Math.floor(notesTo) || from));
+    const partSize = Math.max(1, Math.min(20, Math.floor(notesPartSize) || 5));
+    const doc = docs.find((d) => d.id === activeDocId);
+    const totalParts = Math.ceil((to - from + 1) / partSize);
+
+    notesCancelRef.current = false;
+    setNotesBusy(true);
+    setNotesError(null);
+    const job = startJob(`Notes from pages · ${doc?.title ?? 'document'}`, `pages ${from}–${to}`);
+    let saved = 0;
+    try {
+      for (let part = 0; part < totalParts; part++) {
+        if (notesCancelRef.current || job.isCancelled()) break;
+        const start = from + part * partSize;
+        const end = Math.min(to, start + partSize - 1);
+        job.update({ progress: Math.round((part / totalParts) * 100), detail: `reading pages ${start}–${end}` });
+        const parts: string[] = [];
+        for (let n = start; n <= end; n++) {
+          const text = await ensurePageText(n).catch(() => '');
+          if (text.trim()) parts.push(`[page ${n}]\n${text}`);
+        }
+        if (!parts.length) continue;
+        const raw = await aiComplete({
+          system:
+            'You are a high-yield medical revision writer. Turn the supplied book pages into a compact revision note. ' +
+            'Use short headings, bullets, and mark the key takeaway with a line starting "High-yield:" and any memory device with "Mnemonic:". ' +
+            'Cite the page numbers inline as "p. N". Plain text only.',
+          messages: [{
+            role: 'user',
+            content: `Book: ${doc?.title ?? 'document'}\nPages ${start}–${end}:\n\n${parts.join('\n\n').slice(0, 12000)}\n\nWrite the revision notes for these pages.`,
+          }],
+          provider,
+          model: getEffectiveModel(provider),
+        });
+        const text = raw.trim();
+        if (!text) continue;
+        setMadeNotes((prev) => [...prev, { range: `pp. ${start}–${end}`, text }]);
+        saved += 1;
+        job.update({ progress: Math.round(((part + 1) / totalParts) * 100), detail: `${saved} part${saved === 1 ? '' : 's'} saved` });
+      }
+      if (notesCancelRef.current || job.isCancelled()) {
+        job.done(`Stopped — ${saved} part${saved === 1 ? '' : 's'} saved`);
+      } else {
+        job.done(`${saved} note part${saved === 1 ? '' : 's'} saved`);
+      }
+    } catch (err: any) {
+      const message = err?.message || 'Could not make notes from these pages.';
+      job.fail(message);
+      setNotesError(message);
+    } finally {
+      setNotesBusy(false);
+    }
+  };
+
+  // ============================ Ask AI panel ============================
+
+  const openAskPanel = async (mode: 'selection' | 'page') => {
+    setAskPanel(true);
+    setAskError(null);
+    setMcqs([]);
+    if (mode === 'selection' && popup) {
+      setAskContext(popup.text);
+      setAskContextLabel(`selection (p. ${currentPageRef.current})`);
+      setPopup(null);
+    } else {
+      const text = await ensurePageText(currentPageRef.current).catch(() => '');
+      setAskContext(text.slice(0, 6000));
+      setAskContextLabel(`page ${currentPageRef.current}`);
+    }
+  };
+
+  const askAi = async (customQuestion?: string) => {
+    const provider = getActiveProvider();
+    if (!provider) { setAskError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`); return; }
+    if (!askContext.trim()) {
+      const text = await ensurePageText(currentPageRef.current).catch(() => '');
+      setAskContext(text.slice(0, 6000));
+      if (!text.trim()) { setAskError('No text available on this page (possibly a scanned image without OCR).'); return; }
+    }
+    setAskBusy(true);
+    setAskError(null);
+    setAskCitations([]);
+    setAskReply('');
+    const question = customQuestion?.trim() || `Explain the key clinical content clearly and completely, with mechanisms and any exam-relevant points.`;
+    setAskQuestion(question);
+    const contextText = askContext.trim();
+    try {
+      let webBlock = '';
+      let urls: string[] = [];
+      if (askIncludeWeb) {
+        try {
+          const res = await fetch('/api/web/research', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: contextText.split('\n')[0].slice(0, 120) || question }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && Array.isArray(data.sources)) {
+            webBlock = data.sources.map((s: any) => `[W${s.n}] ${s.title} (${s.url})\n${String(s.text).slice(0, 800)}`).join('\n\n');
+            setAskCitations(data.sources.map((s: any) => `- W${s.n}: ${s.url}`));
+          }
+        } catch { /* web optional — proceed without */ }
+      }
+
+      const raw = await aiComplete({
+        system:
+          'You are the Pulse Med clinical assistant answering STRICTLY from the provided book passage' +
+          (askIncludeWeb ? ' and the labelled web sources.' : ' only.') +
+          ' Explain accurately with mechanisms; if the passage does not cover something, say so. Cite the passage as [book p. N] and web sources as [Wn].',
+        messages: [{
+          role: 'user',
+          content:
+            `Book: ${docs.find((d) => d.id === activeDocId)?.title ?? 'PDF'} — context from ${askContextLabel}:\n\n${contextText}\n\n` +
+            (webBlock ? `Web sources:\n\n${webBlock}\n\n` : '') +
+            `Question: ${question}`,
+        }],
+        provider,
+        model: getEffectiveModel(provider),
+      });
+      setAskReply(raw);
+    } catch (err: any) {
+      setAskError(err?.message || 'AI request failed.');
+    } finally {
+      setAskBusy(false);
+    }
+  };
+
+  const generateMcqs = async () => {
+    const provider = getActiveProvider();
+    if (!provider) { setAskError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`); return; }
+    const contextText = ((askContextLabel === `page ${currentPageRef.current}` && askContext)
+      ? askContext
+      : await ensurePageText(currentPageRef.current).catch(() => '')).trim();
+    if (!contextText) { setAskError('No selectable text on this page.'); return; }
+    setMcqBusy(true);
+    setAskError(null);
+    try {
+      const raw = await aiComplete({
+        system: 'Write exam-style single-best-answer MCQs strictly from the provided passage. Respond with ONLY a JSON object: {"questions":[{"question","options":["A text",...],"answerIndex":0,"explanation"}]}.',
+        messages: [{
+          role: 'user',
+          content: `Passage (${askContextLabel}):\n\n${contextText.slice(0, 6000)}\n\nGenerate 3 MCQs with 4 options each, answerIndex pointing at the correct option, and a one-line explanation.`,
+        }],
+        json: true,
+        provider,
+        model: getEffectiveModel(provider),
+      });
+      const parsed = extractJson<{ questions?: any[] }>(raw);
+      const list = (Array.isArray(parsed) ? parsed : parsed?.questions) ?? [];
+      const clean = list
+        .filter((q: any) => q && typeof q.question === 'string' && Array.isArray(q.options) && q.options.length >= 2)
+        .map((q: any) => ({
+          question: String(q.question),
+          options: q.options.map((o: any) => String(o)),
+          answerIndex: typeof q.answerIndex === 'number' && q.answerIndex < q.options.length ? q.answerIndex : 0,
+          explanation: typeof q.explanation === 'string' ? q.explanation : '',
+        }))
+        .slice(0, 5);
+      if (!clean.length) throw new Error('The AI returned no valid MCQs. Try again.');
+      setMcqs(clean);
+      setShowMcqAnswers({});
+      setMcqIndex(0);
+      setMcqPicked(null);
+    } catch (err: any) {
+      setAskError(err?.message || 'MCQ generation failed.');
+    } finally {
+      setMcqBusy(false);
+    }
+  };
+
+  // A new page invalidates everything generated for the previous one.
+  useEffect(() => {
+    setMcqPicked(null);
+    setMcqIndex(0);
+  }, [currentPage, activeDocId]);
+
   const printDocument = async () => {
     if (!activeDocId) return;
     try {
@@ -1195,6 +1418,22 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate }) => {
                     <NotebookPen className="h-3 w-3" /> Page notes
                   </button>
                   <button
+                    onClick={() => generateMcqs()}
+                    disabled={mcqBusy || !getActiveProvider()}
+                    title={getActiveProvider() ? 'Generate MCQs from this page' : 'Connect an AI provider first'}
+                    className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-bold disabled:opacity-40 ${getActiveProvider() ? T.cta : T.chip} ${T.softHover}`}
+                  >
+                    {mcqBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <GraduationCap className="h-3 w-3" />}
+                    {mcqBusy ? 'Generating…' : mcqs.length ? 'Regenerate MCQs' : 'Generate MCQs'}
+                  </button>
+                  <button
+                    onClick={() => setAskPanel((v) => !v)}
+                    title="Ask AI about this page"
+                    className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-bold transition ${askPanel ? T.chipAccent : T.chip} ${T.softHover}`}
+                  >
+                    <Sparkles className="h-3 w-3" /> Ask AI
+                  </button>
+                  <button
                     onClick={() => onNavigate('research')}
                     title="Open the clinical evidence browser"
                     className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition ${T.chip} ${T.softHover}`}
@@ -1288,7 +1527,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate }) => {
                 className={`mt-0.5 block w-16 rounded-lg border px-2 py-1 text-[11px] ${T.input}`} />
             </label>
             <button
-              onClick={() => { /* AI note generation removed */ }}
+              onClick={makeNotesFromPages}
               disabled={notesBusy}
               className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.cta}`}
             >
@@ -1626,6 +1865,254 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate }) => {
                     )}
                   </div>
                 ))}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* ======================= Question Bank ======================= */}
+        {numPages > 0 && mcqs.length > 0 && (
+          <section className={`flex h-[220px] flex-col overflow-hidden rounded-xl border ${T.panel}`}>
+            <header className={`flex shrink-0 items-center justify-between gap-2 border-b px-2.5 py-1.5 ${T.divider}`}>
+              <div className="flex items-center gap-1.5">
+                <GraduationCap className="h-3 w-3" />
+                <span className={`font-mono text-[10px] font-bold ${T.accent}`}>Page question bank</span>
+              </div>
+              <div className="flex items-center gap-1">
+                {mcqs.length > 1 && (
+                  <div className={`flex items-center gap-0.5 rounded border px-1 py-0.5 ${T.chip}`}>
+                    <button
+                      onClick={() => { setMcqIndex((i) => Math.max(0, i - 1)); setMcqPicked(null); }}
+                      disabled={mcqIndex === 0}
+                      className="disabled:opacity-30"
+                      title="Previous question"
+                    >
+                      <ChevronLeft className="h-3 w-3" />
+                    </button>
+                    <span className="font-mono text-[9px]">{mcqIndex + 1}/{mcqs.length}</span>
+                    <button
+                      onClick={() => { setMcqIndex((i) => Math.min(mcqs.length - 1, i + 1)); setMcqPicked(null); }}
+                      disabled={mcqIndex >= mcqs.length - 1}
+                      className="disabled:opacity-30"
+                      title="Next question"
+                    >
+                      <ChevronRight className="h-3 w-3" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </header>
+            <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+              {askError && (
+                <div className="mb-1.5 flex items-start gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] leading-snug text-rose-800 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300">
+                  <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" /> <span>{askError}</span>
+                </div>
+              )}
+              {mcqs.length === 0 ? (
+                <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+                  <GraduationCap className={`h-7 w-7 ${T.dim}`} />
+                  <p className={`text-[11px] font-semibold ${T.strong}`}>No questions for page {currentPage} yet</p>
+                  <p className={`max-w-md text-[10px] leading-relaxed ${T.muted}`}>
+                    Generate single-best-answer MCQs from this page's text.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <p className={`text-[12px] font-medium leading-snug ${T.text}`}>{mcqs[mcqIndex].question}</p>
+                  <div className="mt-1.5 grid grid-cols-1 gap-1 md:grid-cols-2">
+                    {mcqs[mcqIndex].options.map((option, oi) => {
+                      const isCorrect = oi === mcqs[mcqIndex].answerIndex;
+                      const isPicked = mcqPicked === oi;
+                      const reveal = mcqPicked !== null || !!showMcqAnswers[mcqIndex];
+                      const state = !reveal
+                        ? `${T.panelSoft} ${T.border} ${T.softHover}`
+                        : isCorrect
+                          ? 'border-emerald-400/70 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200'
+                          : isPicked
+                            ? 'border-rose-400/70 bg-rose-500/10 text-rose-800 dark:text-rose-200'
+                            : `${T.border} opacity-60`;
+                      return (
+                        <button
+                          key={oi}
+                          onClick={() => {
+                            if (mcqPicked !== null) return;
+                            setMcqPicked(oi);
+                            setShowMcqAnswers((prev) => ({ ...prev, [mcqIndex]: true }));
+                          }}
+                          className={`flex items-start gap-1.5 rounded-lg border p-1.5 text-left text-[10px] leading-snug transition ${state}`}
+                        >
+                          <span className={`shrink-0 rounded px-1 font-mono text-[9px] font-bold ${T.chip}`}>{String.fromCharCode(65 + oi)}</span>
+                          <span className="min-w-0">{option}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {(mcqPicked !== null || showMcqAnswers[mcqIndex]) && (
+                    <div
+                      className={`mt-1.5 rounded-lg border px-2 py-1 text-[10px] leading-snug ${
+                        mcqPicked === null || mcqPicked === mcqs[mcqIndex].answerIndex
+                          ? T.chipGood
+                          : 'border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300'
+                      }`}
+                    >
+                      <b>
+                        {mcqPicked === null ? 'Answer' : mcqPicked === mcqs[mcqIndex].answerIndex ? 'Correct' : 'Not quite'} ┬À [{String.fromCharCode(65 + mcqs[mcqIndex].answerIndex)}]
+                      </b>{' '}
+                      {mcqs[mcqIndex].explanation}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* ======================= Ask AI Copilot ======================= */}
+        {askPanel && numPages > 0 && (
+          <section className={`flex h-[220px] flex-col overflow-hidden rounded-xl border ${T.panel}`}>
+            <header className={`flex shrink-0 items-center justify-between gap-2 border-b px-2.5 py-1.5 ${T.divider}`}>
+              <div className="flex items-center gap-1.5">
+                <Sparkles className="h-3 w-3" />
+                <span className={`font-mono text-[10px] font-bold ${T.accent}`}>Clinical copilot</span>
+              </div>
+              <span className={`max-w-[130px] truncate rounded border px-1.5 py-0.5 font-mono text-[8px] ${T.chip}`} title={(() => { const p = getActiveProvider(); return p ? `${p} · ${getEffectiveModel(p)}` : 'no provider'; })()}>
+                {(() => { const p = getActiveProvider(); return p ? `${p} · ${getEffectiveModel(p)}` : 'no provider'; })()}
+              </span>
+            </header>
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="flex shrink-0 flex-wrap items-center gap-1 px-2 pt-1.5">
+                <button
+                  onClick={() => { setAskPanel(true); askAi('Explain this passage clearly and completely, with mechanisms and clinical reasoning.'); }}
+                  disabled={askBusy}
+                  title="Explain this passage"
+                  className={`rounded-full border px-2 py-0.5 text-[9px] font-semibold transition disabled:opacity-40 ${T.chip} ${T.softHover}`}
+                >
+                  Explain
+                </button>
+                <button
+                  onClick={() => { setAskPanel(true); askAi('List the high-yield key points in this passage as short bullets.'); }}
+                  disabled={askBusy}
+                  title="Key points"
+                  className={`rounded-full border px-2 py-0.5 text-[9px] font-semibold transition disabled:opacity-40 ${T.chip} ${T.softHover}`}
+                >
+                  Key points
+                </button>
+                <button
+                  onClick={() => setAskIncludeWeb(!askIncludeWeb)}
+                  className={`ml-auto flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-semibold ${askIncludeWeb ? T.chipAccent : T.chip}`}
+                  title="Include live web sources"
+                >
+                  <Globe className="h-2.5 w-2.5" /> Web
+                </button>
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1.5">
+                {askQuestion && (askBusy || askReply || askError) && (
+                  <div className="mb-1 flex justify-end">
+                    <div className="max-w-[92%] rounded-lg rounded-br-sm bg-[#13294b] px-2 py-1 text-[9px] leading-snug text-white/90">{askQuestion}</div>
+                  </div>
+                )}
+                {askBusy ? (
+                  <div className={`space-y-1.5 rounded-lg border p-2 ${T.panelSoft} ${T.border}`}>
+                    <div className={`flex items-center gap-1.5 text-[9px] font-semibold ${T.accent}`}>
+                      <Loader2 className="h-3 w-3 animate-spin" /> Reading {askContextLabel}…
+                    </div>
+                    <div className="h-1.5 w-full animate-pulse rounded bg-slate-400/20" />
+                    <div className="h-1.5 w-5/6 animate-pulse rounded bg-slate-400/20" />
+                    <div className="h-1.5 w-2/3 animate-pulse rounded bg-slate-400/20" />
+                  </div>
+                ) : askReply ? (
+                  <div className={`rounded-lg border ${T.panelSoft} ${T.border}`}>
+                    <div className={`flex items-center justify-between border-b px-1.5 py-1 ${T.divider}`}>
+                      <span className={`font-mono text-[8px] font-bold uppercase tracking-wider ${T.accent}`}>Answer ┬À {askContextLabel}</span>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard?.writeText(askReply).then(() => {
+                            setAskCopied(true);
+                            setTimeout(() => setAskCopied(false), 1500);
+                          }).catch(() => {});
+                        }}
+                        title="Copy the answer"
+                        className={`${T.dim} hover:opacity-70`}
+                      >
+                        {askCopied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                      </button>
+                    </div>
+                    <div className={`whitespace-pre-wrap p-1.5 text-[10px] leading-relaxed ${T.text}`}>{askReply}</div>
+                  </div>
+                ) : !askError ? (
+                  <div className={`rounded-lg border border-dashed px-2 py-2.5 text-center ${T.border}`}>
+                    <p className={`text-[10px] font-semibold ${T.muted}`}>Ground the answer in page {currentPage}</p>
+                    <p className={`mt-0.5 text-[9px] leading-snug ${T.dim}`}>
+                      Select text for a focused answer, or use a quick prompt.
+                    </p>
+                  </div>
+                ) : null}
+
+                {askError && (
+                  <div className="mt-1 flex items-start gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 text-[9px] leading-snug text-rose-800 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300">
+                    <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" /> <span>{askError}</span>
+                  </div>
+                )}
+
+                {askCitations.length > 0 && (
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {askCitations.map((citation, i) => {
+                      const url = citation.match(/https?:\/\/\S+/)?.[0];
+                      const label = citation.replace(/^-?\s*W\d+:\s*/, '').replace(/https?:\/\/\S+/, '').replace(/[()]/g, '').trim();
+                      return url ? (
+                        <a
+                          key={i}
+                          href={url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={url}
+                          className={`max-w-full truncate rounded border px-1 py-0.5 font-mono text-[8px] ${T.chip} ${T.accent}`}
+                        >
+                          {label || `Source ${i + 1}`}
+                        </a>
+                      ) : (
+                        <span key={i} className={`rounded border px-1 py-0.5 font-mono text-[8px] ${T.chip}`}>{citation}</span>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className={`shrink-0 border-t p-1.5 ${T.divider}`}>
+                <div className={`flex items-end gap-1 rounded-lg border p-1 ${T.input}`}>
+                  <textarea
+                    value={askInput}
+                    onChange={(e) => setAskInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        const question = askInput.trim();
+                        if (!question || askBusy) return;
+                        setAskPanel(true);
+                        setAskInput('');
+                        askAi(question);
+                      }
+                    }}
+                    placeholder={`Ask copilot about page ${currentPage}…`}
+                    rows={1}
+                    className="max-h-14 min-h-[22px] flex-1 resize-none bg-transparent px-1 py-0.5 text-[10px] focus:outline-none"
+                  />
+                  <button
+                    onClick={() => {
+                      const question = askInput.trim();
+                      if (!question || askBusy) return;
+                      setAskPanel(true);
+                      setAskInput('');
+                      askAi(question);
+                    }}
+                    disabled={!askInput.trim() || askBusy}
+                    title="Send"
+                    className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md disabled:opacity-30 ${T.cta}`}
+                  >
+                    {askBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
+                  </button>
+                </div>
               </div>
             </div>
           </section>
