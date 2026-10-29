@@ -1364,6 +1364,23 @@ function serverDebugLog(hypothesis, message) {
   }
 }
 
+// src/lib/ai.ts
+function extractJson(raw) {
+  if (!raw) return null;
+  let text = raw.trim();
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) text = fence[1].trim();
+  const start = text.search(/[[{]/);
+  if (start > 0) text = text.slice(start);
+  const end = Math.max(text.lastIndexOf("}"), text.lastIndexOf("]"));
+  if (end > -1) text = text.slice(0, end + 1);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 // server.ts
 dotenv.config();
 var __filename = fileURLToPath(import.meta.url);
@@ -1383,7 +1400,9 @@ var DEFAULT_MODELS = {
   chatgpt: "gpt-6.1-sol",
   claude: "claude-sonnet-5-5",
   grok: "grok-4.7",
-  opencode: OPENCODE_DEFAULT_MODEL
+  opencode: OPENCODE_DEFAULT_MODEL,
+  custom: "gpt-4o-mini",
+  nvidia: "nvidia/nemotron-3.5-super-vl-120b-a12b"
 };
 var INTERNAL_PROVIDER = {
   chatgpt: "codex",
@@ -1398,6 +1417,9 @@ var ApiError = class extends Error {
 };
 function geminiKey() {
   return (process.env.GEMINI_API_KEY || "").trim();
+}
+function nvidiaKey() {
+  return (process.env.NVIDIA_API_KEY || "").trim();
 }
 var geminiClient = null;
 function getGemini() {
@@ -1464,6 +1486,8 @@ function providerErrorText(body, status2) {
 function isProviderConnected(providerId) {
   if (providerId === "gemini") return Boolean(geminiKey());
   if (providerId === "opencode") return Boolean(opencodeKey());
+  if (providerId === "nvidia") return Boolean(nvidiaKey());
+  if (providerId === "custom") return Boolean(getActiveCustomEndpoint());
   try {
     const s = status();
     if (providerId === "chatgpt") return Boolean(s.codex);
@@ -1479,6 +1503,12 @@ function notConnectedMessage(providerId) {
   }
   if (providerId === "opencode") {
     return "OpenCode is not connected. Paste your OpenCode Console API key in Settings \u2192 AI Subscription Hub.";
+  }
+  if (providerId === "nvidia") {
+    return "NVIDIA is not connected. Paste your NVIDIA API key in Settings \u2192 AI Subscription Hub.";
+  }
+  if (providerId === "custom") {
+    return "Custom provider is not connected. Add a custom endpoint in Settings \u2192 AI Subscription Hub.";
   }
   return `${providerId.charAt(0).toUpperCase() + providerId.slice(1)} is not signed in. Connect an AI provider in Settings \u2192 AI Subscription Hub.`;
 }
@@ -1574,6 +1604,126 @@ async function runCompletion(opts) {
     }
     return gText;
   }
+  if (provider === "custom") {
+    const endpoint = getActiveCustomEndpoint();
+    if (!endpoint) throw new ApiError(notConnectedMessage("custom"), 401);
+    const baseUrl = endpoint.endpointUrl;
+    const key = endpoint.apiKey;
+    const model_ = model || endpoint.defaultModel || DEFAULT_MODELS.custom;
+    if (!baseUrl || !key || !model_) throw new ApiError(notConnectedMessage("custom"), 401);
+    const payloadMessages = [
+      ...system ? [{ role: "system", content: system }] : [],
+      ...messages.map((m) => ({ role: m.role, content: m.content }))
+    ];
+    const apiMode = endpoint.apiMode || "auto-detect";
+    const url = apiMode === "responses-api" ? `${baseUrl.replace(/\/$/, "")}/responses` : `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+    let payload;
+    if (apiMode === "anthropic-messages") {
+      payload = {
+        model: model_,
+        messages: payloadMessages,
+        temperature: 0.7,
+        ...json ? { response_format: { type: "json_object" } } : {}
+      };
+    } else {
+      payload = {
+        model: model_,
+        messages: payloadMessages,
+        temperature: 0.7,
+        ...json ? { response_format: { type: "json_object" } } : {}
+      };
+    }
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`
+      },
+      body: JSON.stringify(payload),
+      ...signal ? { signal } : {}
+    });
+    const raw = await r.text();
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+    }
+    if (!r.ok) {
+      aiLog({ provider: "custom", model: model_, status: r.status, error: true, endpoint: endpoint.name });
+      throw new ApiError(`Custom (${endpoint.name}): ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
+    }
+    let text = "";
+    if (apiMode === "responses-api") {
+      const output = body?.output;
+      if (Array.isArray(output)) {
+        for (const item of output) {
+          if (item.type === "message" && Array.isArray(item.content)) {
+            for (const c of item.content) {
+              if (c.type === "output_text" && typeof c.text === "string") text += c.text;
+            }
+          }
+        }
+      } else if (typeof body?.output_text === "string") {
+        text = body.output_text;
+      }
+    } else if (apiMode === "anthropic-messages") {
+      const content = body?.content;
+      if (Array.isArray(content)) {
+        text = content.map((c) => c.type === "text" ? c.text : "").join("");
+      } else if (typeof body?.content === "string") {
+        text = body.content;
+      }
+    } else {
+      const choice = body?.choices?.[0];
+      text = typeof choice?.message?.content === "string" ? choice.message.content : "";
+    }
+    aiLog({ provider: "custom", model: model_, status: r.status, text_len: text.length, json: !!json, endpoint: endpoint.name });
+    if (!text.trim()) {
+      throw new ApiError(`Custom (${endpoint.name}) returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || body?.output?.[0]?.finish_reason || "unknown"}).`, 502);
+    }
+    return text;
+  }
+  if (provider === "nvidia") {
+    const key = nvidiaKey();
+    if (!key) throw new ApiError(notConnectedMessage("nvidia"), 401);
+    const model_ = model || DEFAULT_MODELS.nvidia;
+    const payloadMessages = [
+      ...system ? [{ role: "system", content: system }] : [],
+      ...messages.map((m) => ({ role: m.role, content: m.content }))
+    ];
+    const payload = JSON.stringify({
+      model: model_,
+      messages: payloadMessages,
+      temperature: 0.7,
+      ...json ? { response_format: { type: "json_object" } } : {}
+    });
+    const r = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`
+      },
+      body: payload,
+      ...signal ? { signal } : {}
+    });
+    const raw = await r.text();
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+    }
+    if (!r.ok) {
+      aiLog({ provider: "nvidia", model: model_, status: r.status, error: true });
+      throw new ApiError(`NVIDIA: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
+    }
+    const content = body?.choices?.[0]?.message?.content;
+    const text = typeof content === "string" ? content : "";
+    aiLog({ provider: "nvidia", model: model_, status: r.status, text_len: text.length, json: !!json });
+    if (!text.trim()) {
+      throw new ApiError(`NVIDIA returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || "unknown"}).`, 502);
+    }
+    return text;
+  }
   const internal = INTERNAL_PROVIDER[provider];
   if (!internal) throw new ApiError(`Unknown AI provider: ${provider}`, 400);
   try {
@@ -1609,10 +1759,81 @@ app.get("/api/oauth/status", (req, res) => {
       chatgpt: { connected: isProviderConnected("chatgpt") },
       claude: { connected: isProviderConnected("claude") },
       grok: { connected: isProviderConnected("grok") },
-      opencode: { connected: isProviderConnected("opencode") }
+      opencode: { connected: isProviderConnected("opencode") },
+      nvidia: { connected: isProviderConnected("nvidia") },
+      custom: { connected: isProviderConnected("custom") }
     },
     defaults: DEFAULT_MODELS
   });
+});
+app.post("/api/ai/plan-topics", async (req, res) => {
+  const { subjectSubtopics, count, difficultyTier, provider, model, exam, effort } = req.body || {};
+  if (!subjectSubtopics || !Array.isArray(subjectSubtopics) || subjectSubtopics.length === 0) {
+    return res.status(400).json({ error: "subjectSubtopics is required" });
+  }
+  const countN = Math.max(1, Math.min(parseInt(String(count || "20"), 10) || 20, 200));
+  const tier = difficultyTier || "MEDIUM";
+  const pool = [];
+  for (const s of subjectSubtopics) {
+    for (const sub of s.subtopics || []) {
+      if (sub && sub.trim()) pool.push({ subject: s.subject, subtopic: sub.trim() });
+    }
+  }
+  if (pool.length === 0) {
+    return res.status(400).json({ error: "No subtopics found in subjectSubtopics" });
+  }
+  try {
+    const planPrompt = [
+      `You are an expert medical exam item writer for ${exam || "NEET-PG"}.`,
+      `Given these allowed subjects and subtopics, rank them by exam importance (most-tested first):`,
+      ...subjectSubtopics.map((s) => `  ${s.subject}: ${(s.subtopics || []).join(", ")}`),
+      "",
+      `Return a JSON array of topic objects, each with "subject", "subtopic", and "priority" (1-10, where 10 = most important).`,
+      `Include approximately ${countN} entries total. If there are fewer unique pairs than ${countN}, repeat important ones.`,
+      `Output ONLY the JSON array.`
+    ].join("\n");
+    const raw = await runCompletion({
+      provider: provider || "gemini",
+      model: model || DEFAULT_MODELS.nvidia,
+      messages: [{ role: "user", content: planPrompt }],
+      json: true,
+      effort: effort || void 0
+    });
+    const parsed = extractJson(raw);
+    const ranked = Array.isArray(parsed) ? parsed : [];
+    const weighted = [];
+    for (const entry of ranked) {
+      const repeats = Math.max(1, Math.min(entry.priority || 5, 10));
+      for (let i = 0; i < repeats; i++) {
+        weighted.push({
+          subject: entry.subject,
+          subtopic: entry.subtopic,
+          difficultyTier: tier
+        });
+      }
+    }
+    if (weighted.length === 0) {
+      for (let i = 0; i < countN; i++) {
+        weighted.push({
+          subject: pool[i % pool.length].subject,
+          subtopic: pool[i % pool.length].subtopic,
+          difficultyTier: tier
+        });
+      }
+    }
+    const finalTopics = weighted.slice(0, countN);
+    return res.json({ topics: finalTopics, total: finalTopics.length });
+  } catch (err) {
+    const fallback = [];
+    for (let i = 0; i < countN; i++) {
+      fallback.push({
+        subject: pool[i % pool.length].subject,
+        subtopic: pool[i % pool.length].subtopic,
+        difficultyTier: tier
+      });
+    }
+    return res.json({ topics: fallback, total: fallback.length });
+  }
 });
 app.post("/api/oauth/start", async (req, res) => {
   const { provider } = req.body || {};
@@ -1736,6 +1957,254 @@ app.post("/api/settings/opencode-key", (req, res) => {
     return res.status(500).json({ error: err?.message || "Could not save the OpenCode API key." });
   }
 });
+app.post("/api/settings/nvidia-key", (req, res) => {
+  const key = String(req.body?.apiKey || "").trim();
+  if (!/^[A-Za-z0-9_\-]{10,}$/.test(key)) {
+    return res.status(400).json({ error: "That does not look like a valid NVIDIA API key." });
+  }
+  try {
+    writeEnvValue("NVIDIA_API_KEY", key);
+    return res.json({ ok: true, connected: true });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Could not save the NVIDIA API key." });
+  }
+});
+var CUSTOM_ENDPOINTS_FILE = path.join(DATA_DIR, "custom-endpoints.json");
+function readCustomEndpoints() {
+  try {
+    if (!fs.existsSync(CUSTOM_ENDPOINTS_FILE)) return [];
+    const raw = fs.readFileSync(CUSTOM_ENDPOINTS_FILE, "utf8");
+    const data = JSON.parse(raw);
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+function writeCustomEndpoints(endpoints) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(CUSTOM_ENDPOINTS_FILE, JSON.stringify(endpoints, null, 2), "utf8");
+}
+function findCustomEndpoint(id) {
+  return readCustomEndpoints().find((e) => e.id === id);
+}
+app.get("/api/settings/custom-endpoints", (_req, res) => {
+  const endpoints = readCustomEndpoints().map((e) => ({ ...e, apiKey: "***" }));
+  return res.json({ endpoints });
+});
+app.post("/api/settings/custom-endpoints", (req, res) => {
+  const { name, providerId, endpointUrl, apiMode, defaultModel, context, apiKey, useForNewChats, discoverModels } = req.body || {};
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const id = String(providerId || name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-") || `custom-${Date.now()}`;
+  if (!name || !endpointUrl || !apiKey) {
+    return res.status(400).json({ error: "Name, Endpoint URL and API Key are required." });
+  }
+  try {
+    const endpoints = readCustomEndpoints();
+    const endpoint = {
+      id,
+      name: String(name),
+      providerId: String(providerId || name),
+      endpointUrl: String(endpointUrl).replace(/\/$/, ""),
+      apiMode: apiMode || "auto-detect",
+      defaultModel: String(defaultModel || ""),
+      context: String(context || "Auto"),
+      apiKey: String(apiKey),
+      useForNewChats: Boolean(useForNewChats),
+      discoverModels: Boolean(discoverModels),
+      createdAt: now,
+      updatedAt: now
+    };
+    const existing = endpoints.findIndex((e) => e.id === id);
+    if (existing >= 0) endpoints[existing] = { ...endpoints[existing], ...endpoint, updatedAt: now };
+    else endpoints.push(endpoint);
+    writeCustomEndpoints(endpoints);
+    return res.json({ ok: true, endpoint: { ...endpoint, apiKey: "***" } });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Could not save custom endpoint." });
+  }
+});
+app.put("/api/settings/custom-endpoints/:id", (req, res) => {
+  const { id } = req.params;
+  const { name, providerId, endpointUrl, apiMode, defaultModel, context, apiKey, useForNewChats, discoverModels } = req.body || {};
+  try {
+    const endpoints = readCustomEndpoints();
+    const idx = endpoints.findIndex((e) => e.id === id);
+    if (idx < 0) return res.status(404).json({ error: "Custom endpoint not found." });
+    const existing = endpoints[idx];
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    endpoints[idx] = {
+      ...existing,
+      name: name !== void 0 ? String(name) : existing.name,
+      providerId: providerId !== void 0 ? String(providerId) : existing.providerId,
+      endpointUrl: endpointUrl !== void 0 ? String(endpointUrl).replace(/\/$/, "") : existing.endpointUrl,
+      apiMode: apiMode !== void 0 ? apiMode : existing.apiMode,
+      defaultModel: defaultModel !== void 0 ? String(defaultModel) : existing.defaultModel,
+      context: context !== void 0 ? String(context) : existing.context,
+      apiKey: apiKey !== void 0 ? String(apiKey) : existing.apiKey,
+      useForNewChats: useForNewChats !== void 0 ? Boolean(useForNewChats) : existing.useForNewChats,
+      discoverModels: discoverModels !== void 0 ? Boolean(discoverModels) : existing.discoverModels,
+      updatedAt: now
+    };
+    writeCustomEndpoints(endpoints);
+    return res.json({ ok: true, endpoint: { ...endpoints[idx], apiKey: "***" } });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Could not update custom endpoint." });
+  }
+});
+app.delete("/api/settings/custom-endpoints/:id", (req, res) => {
+  const { id } = req.params;
+  try {
+    const endpoints = readCustomEndpoints();
+    const filtered = endpoints.filter((e) => e.id !== id);
+    if (filtered.length === endpoints.length) return res.status(404).json({ error: "Custom endpoint not found." });
+    writeCustomEndpoints(filtered);
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Could not delete custom endpoint." });
+  }
+});
+app.post("/api/settings/custom-endpoints/:id/test", async (req, res) => {
+  const { id } = req.params;
+  const endpoint = findCustomEndpoint(id);
+  if (!endpoint) return res.status(404).json({ error: "Custom endpoint not found." });
+  try {
+    const model_ = endpoint.defaultModel || "gpt-4o-mini";
+    const url = `${endpoint.endpointUrl}/chat/completions`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${endpoint.apiKey}`
+      },
+      body: JSON.stringify({
+        model: model_,
+        messages: [{ role: "user", content: "Name the first-line drug for anaphylaxis in one word." }],
+        temperature: 0.7
+      })
+    });
+    const raw = await r.text();
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+    }
+    if (!r.ok) {
+      return res.status(502).json({ error: `Test failed: ${providerErrorText(body, r.status)}` });
+    }
+    const content = body?.choices?.[0]?.message?.content;
+    const text = typeof content === "string" ? content : "";
+    if (!text.trim()) {
+      return res.status(502).json({ error: "Test failed: endpoint returned an empty reply." });
+    }
+    return res.json({ ok: true, reply: text.slice(0, 200) });
+  } catch (err) {
+    return res.status(502).json({ error: err?.message || "Test failed: could not reach endpoint." });
+  }
+});
+app.get("/api/models/custom", async (_req, res) => {
+  const provider = String(_req.query.provider || "").trim();
+  if (provider === "nvidia") {
+    const key = nvidiaKey();
+    if (!key) {
+      return res.status(401).json({ error: "NVIDIA API key not configured. Add it in Settings \u2192 AI Subscription Hub." });
+    }
+    try {
+      const r = await fetch("https://integrate.api.nvidia.com/v1/models", {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`
+        }
+      });
+      const raw = await r.text();
+      let body = {};
+      try {
+        body = raw ? JSON.parse(raw) : {};
+      } catch {
+      }
+      if (!r.ok) {
+        return res.status(502).json({ error: `NVIDIA model discovery failed: ${providerErrorText(body, r.status)}` });
+      }
+      const rows = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+      const models = rows.map((m) => ({ id: String(m?.id ?? m?.name ?? ""), name: String(m?.name || m?.id || ""), source: "nvidia" })).filter((m) => m.id);
+      return res.json({ models, fetchedAt: (/* @__PURE__ */ new Date()).toISOString(), provider: "nvidia" });
+    } catch (err) {
+      return res.status(502).json({ error: err?.message || "Could not discover NVIDIA models." });
+    }
+  }
+  const endpoints = readCustomEndpoints();
+  const activeEndpoint = endpoints.find((e) => e.useForNewChats) || endpoints[0];
+  if (!activeEndpoint) {
+    return res.status(401).json({ error: "No custom endpoint configured. Add one in Settings \u2192 AI Subscription Hub." });
+  }
+  try {
+    const modelsUrl = `${activeEndpoint.endpointUrl}/models`;
+    const r = await fetch(modelsUrl, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${activeEndpoint.apiKey}`
+      }
+    });
+    const raw = await r.text();
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+    }
+    if (!r.ok) {
+      return res.status(502).json({ error: `Model discovery failed: ${providerErrorText(body, r.status)}` });
+    }
+    const rows = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+    const models = rows.map((m) => ({ id: String(m?.id ?? m?.name ?? ""), name: String(m?.name || m?.id || ""), source: "custom" })).filter((m) => m.id);
+    return res.json({ models, fetchedAt: (/* @__PURE__ */ new Date()).toISOString(), endpoint: activeEndpoint.name });
+  } catch (err) {
+    return res.status(502).json({ error: err?.message || "Could not discover models from custom endpoint." });
+  }
+});
+function getActiveCustomEndpoint() {
+  const endpoints = readCustomEndpoints();
+  return endpoints.find((e) => e.useForNewChats) || endpoints[0];
+}
+function customBaseUrl() {
+  const ep = getActiveCustomEndpoint();
+  return ep ? ep.endpointUrl : "";
+}
+function customApiKey() {
+  const ep = getActiveCustomEndpoint();
+  return ep ? ep.apiKey : "";
+}
+app.get("/api/models/custom", async (_req, res) => {
+  const baseUrl = customBaseUrl();
+  const apiKey = customApiKey();
+  if (!baseUrl || !apiKey) {
+    return res.status(401).json({ error: "Custom provider not configured. Save API Base URL, Model ID and API Key first." });
+  }
+  try {
+    const modelsUrl = baseUrl.replace(/\/$/, "") + "/models";
+    const r = await fetch(modelsUrl, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      }
+    });
+    const raw = await r.text();
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+    }
+    if (!r.ok) {
+      return res.status(502).json({ error: `Custom model discovery failed: ${providerErrorText(body, r.status)}` });
+    }
+    const rows = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+    const models = rows.map((m) => ({ id: String(m?.id ?? m?.name ?? ""), name: String(m?.name || m?.id || ""), source: "custom" })).filter((m) => m.id);
+    return res.json({ models, fetchedAt: (/* @__PURE__ */ new Date()).toISOString() });
+  } catch (err) {
+    return res.status(502).json({ error: err?.message || "Could not discover models from custom endpoint." });
+  }
+});
 var availableModelsCache = null;
 var modelVerdicts = /* @__PURE__ */ new Map();
 var VERDICT_TTL_MS = 6 * 60 * 60 * 1e3;
@@ -1814,11 +2283,41 @@ async function listGeminiModels() {
     return { models: [], error: e?.message || "Could not list Gemini models." };
   }
 }
+async function listNvidiaModels() {
+  if (!isProviderConnected("nvidia")) return { models: [], error: "No NVIDIA API key saved." };
+  try {
+    const key = nvidiaKey();
+    const r = await fetch("https://integrate.api.nvidia.com/v1/models", {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`
+      }
+    });
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(b?.error?.message || `HTTP ${r.status}`);
+    const rows = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
+    const verifiedModels = [
+      "nvidia/nemotron-3.5-super-vl-120b-a12b",
+      "nvidia/nemotron-3-ultra-550b-a55b",
+      "nvidia/nemotron-3.5-lightning-30b-a3b",
+      "nvidia/nemotron-3.5-bolt-e4b",
+      "nvidia/nemotron-3.5-content-safety",
+      "nvidia/nemotron-parse-2.0",
+      "meta/llama-guard-4-12b"
+    ];
+    return {
+      models: rows.map((m) => ({ id: String(m?.id ?? m?.name ?? ""), name: String(m?.name || m?.id || ""), source: "account" })).filter((m) => m.id && verifiedModels.includes(m.id))
+    };
+  } catch (e) {
+    return { models: [], error: e?.message || "Could not list NVIDIA models." };
+  }
+}
 app.get("/api/models/available", async (req, res) => {
   const refresh = req.query.refresh === "1" || req.query.refresh === "true";
   const probe = req.query.probe === "1" || req.query.probe === "true";
   const only = String(req.query.provider || "").trim();
-  if (only && !["gemini", "chatgpt", "claude", "grok", "opencode"].includes(only)) {
+  if (only && !["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "nvidia"].includes(only)) {
     return res.status(400).json({ error: `Unknown provider: ${only}` });
   }
   if (!only && !probe && !refresh && availableModelsCache && Date.now() - availableModelsCache.at < 3e5) {
@@ -1855,6 +2354,11 @@ app.get("/api/models/available", async (req, res) => {
     providers.opencode = oc.models;
     if (oc.error) errors.opencode = oc.error;
   }
+  if (!only || only === "nvidia") {
+    const nv = await listNvidiaModels();
+    providers.nvidia = nv.models;
+    if (nv.error) errors.nvidia = nv.error;
+  }
   const payload = {
     providers,
     errors,
@@ -1868,7 +2372,7 @@ app.get("/api/models/available", async (req, res) => {
 app.post("/api/models/probe", async (req, res) => {
   const provider = String(req.body?.provider || "").trim();
   const model = String(req.body?.model || "").trim();
-  if (!["gemini", "chatgpt", "claude", "grok", "opencode"].includes(provider)) {
+  if (!["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "nvidia"].includes(provider)) {
     return res.status(400).json({ error: "Choose a provider to test." });
   }
   if (!model || model.length > 200) {
@@ -2160,12 +2664,25 @@ app.post("/api/web/research", async (req, res) => {
   }
 });
 app.get("/api/providers/status", (req, res) => {
+  const customEndpoints = readCustomEndpoints();
   res.json({
-    providers: ["gemini", "chatgpt", "claude", "grok", "opencode"].map((id) => ({
-      id,
-      model: DEFAULT_MODELS[id],
-      connected: isProviderConnected(id)
-    }))
+    providers: [
+      ...["gemini", "chatgpt", "claude", "grok", "opencode", "nvidia"].map((id) => ({
+        id,
+        model: DEFAULT_MODELS[id],
+        connected: isProviderConnected(id)
+      })),
+      ...customEndpoints.map((e) => ({
+        id: `custom-${e.id}`,
+        name: e.name,
+        model: e.defaultModel,
+        connected: true,
+        type: "custom",
+        endpointUrl: e.endpointUrl,
+        apiMode: e.apiMode,
+        useForNewChats: e.useForNewChats
+      }))
+    ]
   });
 });
 app.post("/api/debug/log", (req, res) => {
