@@ -5,9 +5,9 @@ import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } f
 
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
-export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'opencode';
+export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'opencode' | 'nvidia';
 
-export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok', 'opencode'];
+export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia'];
 
 // Server defaults (mirrored in server.ts); models are user-selectable and persisted
 // in localStorage as `ai.model.<provider>` and sent with every request.
@@ -20,6 +20,8 @@ export const DEFAULT_MODELS: Record<string, string> = {
   opencode: 'deepseek-v4.1-flash',
   // Custom OpenAI-compatible endpoint — user supplies URL, model id and key.
   custom: 'gpt-4o-mini',
+  // NVIDIA NIM API — OpenAI-compatible endpoint at integrate.api.nvidia.com/v1.
+  nvidia: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
 };
 
 // Console-only model ids a previous version of the app offered for OpenCode. They are not

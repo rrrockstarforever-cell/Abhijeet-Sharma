@@ -57,6 +57,7 @@ const DEFAULT_MODELS: Record<string, string> = {
   grok: 'grok-4.7',
   opencode: OPENCODE_DEFAULT_MODEL,
   custom: 'gpt-4o-mini',
+  nvidia: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
 };
 
 // UI provider ids -> old oauth.mjs internal ids
@@ -76,6 +77,10 @@ class ApiError extends Error {
 
 function geminiKey(): string {
   return (process.env.GEMINI_API_KEY || '').trim();
+}
+
+function nvidiaKey(): string {
+  return (process.env.NVIDIA_API_KEY || '').trim();
 }
 
 // Gemini client is created lazily and refreshed if the key changes, so a key pasted
@@ -167,6 +172,7 @@ function providerErrorText(body: any, status: number): string {
 function isProviderConnected(providerId: string): boolean {
   if (providerId === 'gemini') return Boolean(geminiKey());
   if (providerId === 'opencode') return Boolean(opencodeKey());
+  if (providerId === 'nvidia') return Boolean(nvidiaKey());
   if (providerId === 'custom') return Boolean(getActiveCustomEndpoint());
   try {
     const s = oauthStatus();
@@ -183,6 +189,9 @@ function notConnectedMessage(providerId: string): string {
   }
   if (providerId === 'opencode') {
     return 'OpenCode is not connected. Paste your OpenCode Console API key in Settings → AI Subscription Hub.';
+  }
+  if (providerId === 'nvidia') {
+    return 'NVIDIA is not connected. Paste your NVIDIA API key in Settings → AI Subscription Hub.';
   }
   if (providerId === 'custom') {
     return 'Custom provider is not connected. Add a custom endpoint in Settings → AI Subscription Hub.';
@@ -388,6 +397,45 @@ async function runCompletion(opts: {
     return text;
   }
 
+  if (provider === 'nvidia') {
+    const key = nvidiaKey();
+    if (!key) throw new ApiError(notConnectedMessage('nvidia'), 401);
+    const model_ = model || DEFAULT_MODELS.nvidia;
+    const payloadMessages = [
+      ...(system ? [{ role: 'system', content: system }] : []),
+      ...messages.map((m) => ({ role: m.role, content: m.content })),
+    ];
+    const payload = JSON.stringify({
+      model: model_,
+      messages: payloadMessages,
+      temperature: 0.7,
+      ...(json ? { response_format: { type: 'json_object' } } : {}),
+    });
+    const r = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      body: payload,
+      ...(signal ? { signal } : {}),
+    });
+    const raw = await r.text();
+    let body: any = {};
+    try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+    if (!r.ok) {
+      aiLog({ provider: 'nvidia', model: model_, status: r.status, error: true });
+      throw new ApiError(`NVIDIA: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
+    }
+    const content = body?.choices?.[0]?.message?.content;
+    const text = typeof content === 'string' ? content : '';
+    aiLog({ provider: 'nvidia', model: model_, status: r.status, text_len: text.length, json: !!json });
+    if (!text.trim()) {
+      throw new ApiError(`NVIDIA returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || 'unknown'}).`, 502);
+    }
+    return text;
+  }
+
   const internal = INTERNAL_PROVIDER[provider];
   if (!internal) throw new ApiError(`Unknown AI provider: ${provider}`, 400);  try {
     return await oauthChat({
@@ -431,6 +479,7 @@ app.get('/api/oauth/status', (req: Request, res: Response) => {
       claude: { connected: isProviderConnected('claude') },
       grok: { connected: isProviderConnected('grok') },
       opencode: { connected: isProviderConnected('opencode') },
+      nvidia: { connected: isProviderConnected('nvidia') },
       custom: { connected: isProviderConnected('custom') },
     },
     defaults: DEFAULT_MODELS,
@@ -576,6 +625,21 @@ app.post('/api/settings/opencode-key', (req: Request, res: Response) => {
     return res.json({ ok: true, connected: true });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Could not save the OpenCode API key.' });
+  }
+});
+
+// 6c. POST /api/settings/nvidia-key: save the NVIDIA API key.
+// NEVER echoes the key back.
+app.post('/api/settings/nvidia-key', (req: Request, res: Response) => {
+  const key = String(req.body?.apiKey || '').trim();
+  if (!/^[A-Za-z0-9_\-]{10,}$/.test(key)) {
+    return res.status(400).json({ error: 'That does not look like a valid NVIDIA API key.' });
+  }
+  try {
+    writeEnvValue('NVIDIA_API_KEY', key);
+    return res.json({ ok: true, connected: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Could not save the NVIDIA API key.' });
   }
 });
 

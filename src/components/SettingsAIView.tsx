@@ -147,6 +147,23 @@ const REAL_PROVIDERS: AIProvider[] = [
       { id: 'gemini-4-argon', name: 'Gemini 4 Argon', description: 'Go-included (Google)', latencyEstimate: '—', contextWindow: '—' },
     ]
   },
+  {
+    id: 'nvidia',
+    name: 'NVIDIA NIM API',
+    brand: 'openai',
+    model: DEFAULT_MODELS.nvidia,
+    status: 'ready',
+    type: 'API Key (NVIDIA NIM)',
+    features: ['API Key in Settings', 'NVIDIA NIM models', 'OpenAI-compatible /chat/completions'],
+    isDefault: false,
+    isSignedIn: false,
+    hasTokenConfigured: false,
+    availableModels: [
+      { id: DEFAULT_MODELS.nvidia, name: 'Nemotron 3.5 Super VL 120B A12B', description: 'NVIDIA NIM default model', latencyEstimate: '—', contextWindow: '—' },
+      { id: 'nvidia/llama-3.1-nemotron-70b-instruct', name: 'Llama 3.1 Nemotron 70B Instruct', description: 'NVIDIA NIM', latencyEstimate: '—', contextWindow: '—' },
+      { id: 'nvidia/nemotron-4-340b-instruct', name: 'Nemotron 4 340B Instruct', description: 'NVIDIA NIM', latencyEstimate: '—', contextWindow: '—' },
+    ]
+  },
 ];
 
 function getClientSessionId(): string {
@@ -222,6 +239,9 @@ export const SettingsAIView: React.FC = () => {
   const [testingEndpoint, setTestingEndpoint] = useState<string | null>(null);
   const [endpointTestResult, setEndpointTestResult] = useState<{ ok: boolean; reply?: string; error?: string } | null>(null);
   const [endpointError, setEndpointError] = useState<string | null>(null);
+  const [discoveredModels, setDiscoveredModels] = useState<{ id: string; name: string }[]>([]);
+  const [isSearchingModels, setIsSearchingModels] = useState<boolean>(false);
+  const [modelsSearchError, setModelsSearchError] = useState<string | null>(null);
 
   // OCR worker pool (1–16) — persisted so whole-book OCR keeps the chosen parallelism.
   const [ocrWorkers, setOcrWorkersState] = useState<number>(() => getOcrWorkers());
@@ -384,7 +404,7 @@ export const SettingsAIView: React.FC = () => {
     setDeviceCodeData(null);
     setPkceData(null);
 
-    if (provider.id === 'gemini' || provider.id === 'opencode') {
+    if (provider.id === 'gemini' || provider.id === 'opencode' || provider.id === 'nvidia') {
       // Key-based providers: the pasted key is handled inside the modal.
       setIsLoadingFlow(false);
       return;
@@ -558,8 +578,11 @@ export const SettingsAIView: React.FC = () => {
     const key = keyInput.trim();
     if (!key || !selectedProvider) return;
     const endpoint = selectedProvider.id === 'opencode' ? '/api/settings/opencode-key'
+      : selectedProvider.id === 'nvidia' ? '/api/settings/nvidia-key'
       : '/api/settings/gemini-key';
-    const label = selectedProvider.id === 'opencode' ? 'OpenCode' : 'Gemini';
+    const label = selectedProvider.id === 'opencode' ? 'OpenCode'
+      : selectedProvider.id === 'nvidia' ? 'NVIDIA'
+      : 'Gemini';
     setIsSavingKey(true);
     setAuthError(null);
     try {
@@ -626,6 +649,33 @@ export const SettingsAIView: React.FC = () => {
       setEndpointError(err?.message || 'Could not save custom endpoint.');
     } finally {
       setIsSavingEndpoint(false);
+    }
+  };
+
+  // Search for available models from the custom endpoint.
+  const searchCustomModels = async () => {
+    if (!editingEndpoint?.endpointUrl.trim() || !editingEndpoint?.apiKey.trim()) {
+      setModelsSearchError('Enter Endpoint URL and API Key first.');
+      return;
+    }
+    setIsSearchingModels(true);
+    setModelsSearchError(null);
+    setDiscoveredModels([]);
+    try {
+      const res = await fetch('/api/models/custom', {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-session-id': getClientSessionId()
+        }
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || 'Model search failed.');
+      setDiscoveredModels(data.models || []);
+    } catch (err: any) {
+      setModelsSearchError(err?.message || 'Could not search for models.');
+    } finally {
+      setIsSearchingModels(false);
     }
   };
 
@@ -1451,11 +1501,13 @@ export const SettingsAIView: React.FC = () => {
                       ? 'Gemini API Key'
                       : selectedProvider.id === 'opencode'
                         ? 'OpenCode API Key'
-                        : selectedProvider.id === 'custom' && editingEndpoint
-                          ? 'Edit Endpoint'
-                          : selectedProvider.id === 'custom'
-                            ? 'Custom API Key'
-                            : `Sign in with ${selectedProvider.name}`}
+                        : selectedProvider.id === 'nvidia'
+                          ? 'NVIDIA API Key'
+                          : selectedProvider.id === 'custom' && editingEndpoint
+                            ? 'Edit Endpoint'
+                            : selectedProvider.id === 'custom'
+                              ? 'Custom API Key'
+                              : `Sign in with ${selectedProvider.name}`}
                   </h3>
                   <p className="text-xs text-slate-500">
                     {selectedProvider.id === 'claude' 
@@ -1464,11 +1516,13 @@ export const SettingsAIView: React.FC = () => {
                         ? 'Key saved locally — never shown again'
                         : selectedProvider.id === 'opencode'
                           ? 'Console / Go key saved locally — never shown again'
-                          : selectedProvider.id === 'custom' && editingEndpoint
-                            ? 'Configure your custom endpoint below.'
-                            : selectedProvider.id === 'custom'
-                              ? 'Key saved locally — never shown again'
-                              : 'Device Authorization Flow (RFC 8628)'}
+                          : selectedProvider.id === 'nvidia'
+                            ? 'Key saved locally — never shown again'
+                            : selectedProvider.id === 'custom' && editingEndpoint
+                              ? 'Configure your custom endpoint below.'
+                              : selectedProvider.id === 'custom'
+                                ? 'Key saved locally — never shown again'
+                                : 'Device Authorization Flow (RFC 8628)'}
                   </p>
                 </div>
               </div>
@@ -1581,29 +1635,70 @@ export const SettingsAIView: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-4">
-                  <div className="flex-1 space-y-2">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
                     <label className="text-xs font-bold text-slate-700 block">Default Model</label>
-                    <input
-                      type="text"
-                      value={editingEndpoint.defaultModel}
-                      onChange={(e) => setEditingEndpoint({ ...editingEndpoint, defaultModel: e.target.value })}
-                      placeholder="e.g. deepseek-v4.1"
-                      className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-700 block">Context</label>
-                    <select
-                      value={editingEndpoint.context}
-                      onChange={(e) => setEditingEndpoint({ ...editingEndpoint, context: e.target.value })}
-                      className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                    <button
+                      onClick={searchCustomModels}
+                      disabled={isSearchingModels || !editingEndpoint.endpointUrl.trim() || !editingEndpoint.apiKey.trim()}
+                      className={`text-xs font-bold px-3 py-1.5 rounded-xl border transition-colors ${
+                        isSearchingModels ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-[#0f8b8d] text-white border-[#0f8b8d] hover:bg-[#0f8b8d]/90'
+                      }`}
                     >
-                      <option value="Auto">Auto</option>
-                      <option value="system">System</option>
-                      <option value="developer">Developer</option>
-                    </select>
+                      {isSearchingModels ? (
+                        <Activity className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Search className="w-3 h-3" />
+                      )}
+                      {' '}
+                      {isSearchingModels ? 'Searching…' : 'Search Models'}
+                    </button>
                   </div>
+                  {modelsSearchError && (
+                    <div className="p-2 bg-rose-50 border border-rose-200 text-rose-800 text-[10px] rounded-xl">
+                      {modelsSearchError}
+                    </div>
+                  )}
+                  {discoveredModels.length > 0 && (
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-700 block">Discovered Models</label>
+                      <select
+                        value={editingEndpoint.defaultModel}
+                        onChange={(e) => setEditingEndpoint({ ...editingEndpoint, defaultModel: e.target.value })}
+                        className="w-full text-xs font-mono p-2 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                      >
+                        <option value="">Select a model…</option>
+                        {discoveredModels.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.id}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-[10px] text-slate-500">
+                        Or type a custom model ID below:
+                      </p>
+                    </div>
+                  )}
+                  <input
+                    type="text"
+                    value={editingEndpoint.defaultModel}
+                    onChange={(e) => setEditingEndpoint({ ...editingEndpoint, defaultModel: e.target.value })}
+                    placeholder="e.g. deepseek-v4.1"
+                    className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-700 block">Context</label>
+                  <select
+                    value={editingEndpoint.context}
+                    onChange={(e) => setEditingEndpoint({ ...editingEndpoint, context: e.target.value })}
+                    className="w-full text-xs font-mono p-2 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                  >
+                    <option value="Auto">Auto</option>
+                    <option value="system">System</option>
+                    <option value="developer">Developer</option>
+                  </select>
                 </div>
 
                 <div className="space-y-2">
@@ -1760,6 +1855,71 @@ export const SettingsAIView: React.FC = () => {
                 <p className="text-[10px] text-slate-500">
                   No custom endpoints configured. Click "+ New endpoint" to add one.
                 </p>
+              </div>
+            )}
+
+            {/* Key-based providers: Gemini, OpenCode, NVIDIA */}
+            {(selectedProvider.id === 'gemini' || selectedProvider.id === 'opencode' || selectedProvider.id === 'nvidia') && (
+              <div className="space-y-4 py-2">
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
+                  <div className="flex items-center gap-2 font-bold text-slate-800">
+                    <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                    <span>Server-Side Key Handling</span>
+                  </div>
+                  <p className="text-slate-600 leading-relaxed">
+                    {selectedProvider.id === 'opencode'
+                      ? 'Create an API key in the OpenCode Console (console.opencode.ai) and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser. If you already use the OpenCode CLI on this machine, its stored key is used automatically.'
+                      : selectedProvider.id === 'nvidia'
+                        ? 'Create an API key in the NVIDIA build portal (build.nvidia.com) and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser.'
+                        : 'Create the key in Google AI Studio and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser.'}
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-700 block">
+                    {selectedProvider.id === 'opencode'
+                      ? 'OpenCode API Key'
+                      : selectedProvider.id === 'nvidia'
+                        ? 'NVIDIA API Key'
+                        : 'Gemini API Key'}
+                  </label>
+                  <input
+                    type="password"
+                    value={keyInput}
+                    onChange={(e) => setKeyInput(e.target.value)}
+                    placeholder={selectedProvider.id === 'opencode' ? 'sk-… / your OpenCode Console API key'
+                      : selectedProvider.id === 'nvidia'
+                        ? 'nvapi-… / your NVIDIA API key'
+                        : 'AIza… / your Gemini API key'}
+                    className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                  />
+                </div>
+
+                <div className="pt-2 flex items-center justify-end gap-2.5">
+                  <button
+                    onClick={handleCloseModal}
+                    className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveKey}
+                    disabled={isSavingKey || !keyInput.trim()}
+                    className="px-4 py-2 text-xs font-bold bg-[#001432] hover:bg-[#13294b] disabled:opacity-40 text-white rounded-xl flex items-center gap-1.5 transition-all"
+                  >
+                    {isSavingKey ? (
+                      <>
+                        <Activity className="w-3.5 h-3.5 animate-spin" />
+                        <span>Saving…</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-3.5 h-3.5 text-[#8ff3f4]" />
+                        <span>Save & Connect</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             )}
 
