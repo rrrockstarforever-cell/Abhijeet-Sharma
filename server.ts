@@ -1021,11 +1021,35 @@ async function listGeminiModels(): Promise<{ models: { id: string; name: string;
   }
 }
 
+async function listNvidiaModels(): Promise<{ models: { id: string; name: string; source: string }[]; error?: string }> {
+  if (!isProviderConnected('nvidia')) return { models: [], error: 'No NVIDIA API key saved.' };
+  try {
+    const key = nvidiaKey();
+    const r = await fetch('https://integrate.api.nvidia.com/v1/models', {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+    });
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(b?.error?.message || `HTTP ${r.status}`);
+    const rows: any[] = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
+    return {
+      models: rows
+        .map((m) => ({ id: String(m?.id ?? m?.name ?? ''), name: String(m?.name || m?.id || ''), source: 'account' }))
+        .filter((m) => m.id),
+    };
+  } catch (e: any) {
+    return { models: [], error: e?.message || 'Could not list NVIDIA models.' };
+  }
+}
+
 app.get('/api/models/available', async (req: Request, res: Response) => {
   const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
   const probe = req.query.probe === '1' || req.query.probe === 'true';
   const only = String(req.query.provider || '').trim();
-  if (only && !['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom'].includes(only)) {
+  if (only && !['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'nvidia'].includes(only)) {
     return res.status(400).json({ error: `Unknown provider: ${only}` });
   }
   // The full, unprobed list is cacheable; targeted or probed requests are not.
@@ -1071,6 +1095,12 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
     if (oc.error) errors.opencode = oc.error;
   }
 
+  if (!only || only === 'nvidia') {
+    const nv = await listNvidiaModels();
+    providers.nvidia = nv.models;
+    if (nv.error) errors.nvidia = nv.error;
+  }
+
   const payload = {
     providers,
     errors,
@@ -1087,7 +1117,7 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
 app.post('/api/models/probe', async (req: Request, res: Response) => {
   const provider = String(req.body?.provider || '').trim();
   const model = String(req.body?.model || '').trim();
-  if (!['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom'].includes(provider)) {
+  if (!['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'nvidia'].includes(provider)) {
     return res.status(400).json({ error: 'Choose a provider to test.' });
   }
   if (!model || model.length > 200) {
@@ -1453,7 +1483,7 @@ app.get('/api/providers/status', (req: Request, res: Response) => {
   const customEndpoints = readCustomEndpoints();
   res.json({
     providers: [
-      ...(['gemini', 'chatgpt', 'claude', 'grok', 'opencode'] as string[]).map((id) => ({
+      ...(['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia'] as string[]).map((id) => ({
         id,
         model: DEFAULT_MODELS[id],
         connected: isProviderConnected(id),
