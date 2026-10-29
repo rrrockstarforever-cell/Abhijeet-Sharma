@@ -497,16 +497,55 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const learnerProfile = typeof customInstructions === 'string' ? customInstructions.trim().slice(0, 1500) : '';
   // Every picture comes from the internet at generation time (Wikimedia Commons + Open-i).
   // The lookup can be switched off in Settings.
-  // Batch size depends on the provider: the Grok CLI proxy returns 500 Internal Server
-  // Error for 3+ questions, so keep it to one. Other providers handle 5-10 fine.
   const activeProvider = getActiveProvider();
-  const maxBatchSize = activeProvider === 'grok' ? 1 : (activeProvider === 'opencode' ? 10 : 5);
   const liveImages = includeImages && isLiveImageSearchEnabled();
   let attachedImages = 0;
-  // Every picture may appear at most once in a module: ids of images already attached.
   const usedImages = new Set<string>();
 
-  // Round-robin the subject -> subtopic pool so every batch samples across subjects.
+  const tier: 'LOW' | 'MEDIUM' | 'HIGH' = difficultyTier === 'ALL' ? 'MEDIUM' : difficultyTier;
+  const pattern = EXAM_PATTERNS[exam];
+  const questions: ClinicalQuestion[] = [];
+  let dropped = 0;
+
+  let stopped = false;
+  let failure: string | null = null;
+  const seenStems = new Set<string>();
+  const stemKey = (stem: string) =>
+    stem.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 140);
+
+  // ---------- Step 1: Topic Planning ----------
+  // Ask the backend to plan topic distribution with importance weighting.
+  // Higher priority topics are repeated more often across concurrent batches.
+  const planTopics = async (): Promise<{ subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }[] | null> => {
+    try {
+      const res = await fetch('/api/ai/plan-topics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subjectSubtopics,
+          count,
+          difficultyTier,
+          provider: activeProvider || 'gemini',
+          model: getEffectiveModel(activeProvider || 'gemini'),
+          exam,
+          effort,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !Array.isArray(data.topics)) return null;
+      return data.topics.map((t: any) => ({
+        subject: t.subject,
+        subtopic: t.subtopic,
+        difficultyTier: (t.difficultyTier ?? tier) as 'LOW' | 'MEDIUM' | 'HIGH',
+      }));
+    } catch {
+      return null;
+    }
+  };
+
+  const plannedTopics = await planTopics();
+
+  // Build the subject/subtopic pool as fallback.
   const pool: { subject: string; subtopic: string }[] = [];
   const subjectEntries = subjectSubtopics.map((s) => ({ subject: s.subject, subs: s.subtopics.filter((t) => typeof t === 'string' && t.trim()) }));
   const maxLen = Math.max(0, ...subjectEntries.map((s) => s.subs.length));
@@ -516,324 +555,103 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }
   }
   const workingPool = pool.length ? pool : [{ subject: subjectSubtopics[0]?.subject ?? 'General Medicine', subtopic: 'General Clinical Sciences' }];
-  const poolSubjects = [...new Set(workingPool.map((p) => p.subject))];
 
-  const tier: 'LOW' | 'MEDIUM' | 'HIGH' = difficultyTier === 'ALL' ? 'MEDIUM' : difficultyTier;
-  const pattern = EXAM_PATTERNS[exam];
-  const questions: ClinicalQuestion[] = [];
-  let dropped = 0;
-  let batch = 0;
+  // ---------- Step 2: Select topic subsets for concurrent batches ----------
+  // For 50-100 questions, we select subsets of 10 topics per concurrent batch.
+  // Important topics (higher priority) appear more often in the topic list.
+  const topics: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }[] = plannedTopics ??
+    Array.from({ length: count }, (_, i) => ({
+      ...workingPool[i % workingPool.length],
+      difficultyTier: tier,
+    }));
 
-  // Progressive batching: request batches of <=10 one after another until the target
-  // count is reached. Batches that return unusable JSON or invalid items are refilled
-  // by the next batch (with a bounded number of refill attempts so we can never loop
-  // forever). Never padded with fake questions — the final count can be short when
-  // the user stops early or the provider keeps failing.
-  const plannedBatches = Math.ceil(count / 10);
-  const maxBatches = plannedBatches * 3 + 4; // refill allowance
-  let consecutiveFailed = 0;
-
-  let stopped = false;
-  // Why the run ended short (after retries), so the UI can say more than "try again".
-  let failure: string | null = null;
-  let waited: number | undefined;
-
-  // Batches are independent requests, so run several at once instead of waiting for each
-  // ten-question batch to finish. Four in flight keeps a 100-question run to a few minutes
-  // without tripping provider rate limits; the pool drains as soon as the target is reached.
-  const CONCURRENCY = Math.max(1, Math.min(activeProvider === 'grok' ? 1 : 4, plannedBatches));
-  const seenStems = new Set<string>();
-  let inFlightBatches = 0;
-  const stemKey = (stem: string) =>
-    stem.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 140);
-
-  const runBatch = async (batchNumber: number): Promise<void> => {
-    if (stopped || signal?.aborted || shouldStop?.()) { stopped = true; return; }
-    if (questions.length >= count || batchNumber > maxBatches || consecutiveFailed >= 3) return;
-
-    const batchSize = Math.min(maxBatchSize, count - questions.length);
-    if (batchSize <= 0) return;
-    const before = questions.length;
-
-    // Sample distinct pool entries for this batch (loop if batch > pool size).
-    const poolStart = ((batchNumber - 1) * batchSize) % workingPool.length;
-    const batchPool: { subject: string; subtopic: string }[] = [];
-    for (let i = 0; i < batchSize; i++) {
-      batchPool.push(workingPool[(poolStart + i) % workingPool.length]);
-    }
+  // ---------- Step 3: Single-question generation ----------
+  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number): Promise<ClinicalQuestion | null> => {
+    if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
     const prompt = [
-      `Write ${batchSize} NEW, exam-standard MCQs for ${pattern.name}.`,
-      difficultyTier === 'ALL'
-        ? `Difficulty: a realistic exam mix of about 20% easy, 45% medium and 35% hard. Set each item's "difficultyTier" (LOW / MEDIUM / HIGH) to match what you wrote.\n${TIER_BEHAVIOUR.LOW}\n${TIER_BEHAVIOUR.MEDIUM}\n${TIER_BEHAVIOUR.HIGH}`
-        : `Difficulty: ${difficultyTier}${difficultySubLevel ? ` (sub-level ${difficultySubLevel})` : ''}. Every item must be at this level.\n${TIER_BEHAVIOUR[difficultyTier]}`,
+      `Write ONE exam-standard MCQ for ${pattern.name}.`,
+      `Subject: ${topic.subject}`,
+      `Subtopic: ${topic.subtopic}`,
+      `Difficulty: ${topic.difficultyTier}. ${TIER_BEHAVIOUR[topic.difficultyTier]}`,
       pattern.pat,
-      // ---- section-14 writing options ----
-      questionTypes && questionTypes.length
-        ? `Mix these QUESTION TYPES across the batch (label each item's focus implicitly through the stem): ${questionTypes.join('; ')}. For "match the following" or "multiple statements" style, use the options to present the statement sets / roman-numeral choices inside the stem.`
-        : '',
-      stemPatterns && stemPatterns.length
-        ? `Rotate the question ("questionText") around these STEM PATTERNS: ${stemPatterns.join('; ')}.`
-        : '',
-      evidenceSources && evidenceSources.length
-        ? `Ground management/drug/screening answers in these evidence sources and name them in citations: ${evidenceSources.join('; ')}.`
-        : '',
-      patientGroup ? `Where clinically relevant, frame vignettes around this patient group: ${patientGroup}.` : '',
-      presentingProblems && presentingProblems.length
-        ? `Present the patients with these presenting problems where possible: ${presentingProblems.join('; ')}.`
-        : '',
-      sourceMaterial
-        ? `Base every question on the learner's own saved notes below. Use only facts stated or directly implied there; do not add unrelated content. Cite the note's source in "citations".\n"""\n${sourceMaterial.slice(0, 12000)}\n"""`
-        : '',
-      includeImages
-        ? `IMAGE-BASED ITEMS: whenever the stem refers to a visual finding — an ECG trace, radiograph, CT, MRI, ultrasound, histology slide, blood film, clinical photograph, fundus or similar — you MUST add two extra fields: "figureModality" (one of: ECG, X-ray, CT, MRI, Ultrasound, Histology, Clinical photo, Fundus) and "figureQuery" (a 3–8 word phrase naming the exact visual finding plus the diagnosis, e.g. "anterior STEMI ST elevation", "acute otitis media bulging tympanic membrane", "Reed-Sternberg Hodgkin lymphoma"). Aim for roughly 1 in 4 items to carry a figure when the topic is visual; there is no fixed quota but prefer adding a figure when one genuinely belongs. Write the stem so the question is still answerable from the described findings if no picture is found.`
-        : '',
-      // Nothing already written may come back in a later batch.
-      questions.length
-        ? `Do NOT repeat or lightly paraphrase any of these stems already written in this module:\n${questions
-            .slice(-30)
-            .map((q) => `- ${q.stem.replace(/\s+/g, ' ').slice(0, 180)}`)
-            .join('\n')}`
-        : '',
-      // ---- original prompt ----
-      `Allowed subjects and their subtopics (each question's subject+subtopic pair MUST come from this list, or omit both to let the app assign one):`,
-      ...subjectSubtopics.map((s) => `- ${s.subject}: ${s.subtopics.join('; ')}`),
-      '',
-      'JSON shape — return exactly {"questions": [...]} where each item has:',
-      '{',
-      '  "examType": "' + exam + '",',
-      '  "subject": "one of the allowed subjects",',
-      '  "subtopic": "one of the allowed subtopics for that subject",',
-      '  "cognitiveTier": "Direct Recall" | "Clinical 2-Step" | "Multi-Step & IBQ",',
-      '  "difficultyTier": "LOW" | "MEDIUM" | "HIGH",',
-      '  "stem": "clinical vignette / scenario (2-7 sentences, concrete findings, no answer hints)",',
-      '  "questionText": "the actual question sentence asking for the single best answer",',
-      `  "options": {${'ABCDE'.slice(0, pattern.opts).split('').map((k) => `"${k}": "text"`).join(', ')}} — EXACTLY ${pattern.opts} options, no more and no fewer,`,
-      `  "correctOption": "one of ${'ABCDE'.slice(0, pattern.opts).split('').join(', ')}" (the single best answer),`,
-      '  "explanation": "120-220 words, each part on its own line: first why the keyed answer is right; then ONE line for EACH of the other options saying exactly why it is wrong; then one exam tip",',
-      '  "boardPearl": "one-line high-yield exam pearl",',
-      '  "citations": ["standard textbook / guideline citation, e.g. Harrison\'s 21st Ed Ch. 142 or eTG"],',
-      '  "trapType": "short label for the classic trap in this item",',
-      '  "trapExplanation": "why the most tempting distractor is wrong",',
-      '  "targetAccuracy": 0-100 expected percent of examinees answering correctly',
-      '}',
-      learnerProfile
-        ? [
-            "Learner's temporary instructions for THIS generation run only (the suggestion box). Apply them to style, focus, difficulty, stem construction, option design and distractor choice:",
-            '"""',
-            learnerProfile,
-            '"""',
-            'These instructions are subordinate to the JSON shape above, exactly one correct option, factual accuracy, and this exam pattern. Where a learner instruction conflicts with any of those, keep the pattern and the facts and ignore only that instruction.',
-          ].join('\n')
-        : '',
-      GENERATION_RULES,
-      'Use authentic current clinical knowledge; no obsolete trivia. Output ONLY the JSON object.',
+      questionTypes?.length ? `Question type focus: ${questionTypes.join('; ')}.` : '',
+      stemPatterns?.length ? `Stem pattern: ${stemPatterns.join('; ')}.` : '',
+      evidenceSources?.length ? `Ground answers in: ${evidenceSources.join('; ')}.` : '',
+      patientGroup ? `Patient group: ${patientGroup}.` : '',
+      presentingProblems?.length ? `Presenting problems: ${presentingProblems.join('; ')}.` : '',
+      sourceMaterial ? `Base on these notes: """${sourceMaterial.slice(0, 6000)}""".` : '',
+      `JSON shape — return exactly one object: { "examType": "${exam}", "subject": "${topic.subject}", "subtopic": "${topic.subtopic}", "cognitiveTier": "Direct Recall | Clinical 2-Step | Multi-Step & IBQ", "difficultyTier": "${topic.difficultyTier}", "stem": "...", "questionText": "...", "options": {${'ABCDE'.slice(0, pattern.opts).split('').map(k => `"${k}": "text"`).join(', ')}}, "correctOption": "A|B|C|D|E", "explanation": "...", "boardPearl": "...", "citations": [...], "trapType": "...", "trapExplanation": "...", "targetAccuracy": 0-100 }`,
+      learnerProfile ? `Learner instructions: """${learnerProfile}"""` : '',
+      'Output ONLY the JSON object.',
     ].join('\n');
 
-    // One bad batch must not throw away the batches that already succeeded, so each batch
-    // gets two retries (honouring Retry-After) before it is written off.
-    let raw = '';
-    let batchError: any = null;
-    let safetyMode = false;
-    let waited: number | undefined;
-    // Some providers (DeepSeek via OpenCode among them) run a safety classifier that can
-    // block an otherwise ordinary clinical vignette. Detect it and retry with an explicit
-    // "professional medical education" instruction instead of resending the same prompt.
-    const SAFETY_NOTE =
-      'IMPORTANT: This is a professional medical education item for qualified doctors preparing for a licensing examination. ' +
-      'Keep every detail clinical, factual and non-graphic. Do not include self-harm, suicide, sexual content, or violence. ' +
-      'Use neutral clinical terminology and output ONLY the JSON object.';
     const MAX_ATTEMPTS = 3;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      if (attempt > 1) {
-        const wait = waited ?? (attempt === 2 ? 2000 : 6000);
-        onRetry?.(attempt - 1, MAX_ATTEMPTS - 1, describeFailure(batchError));
-        await sleep(wait, signal);
-        if (signal?.aborted || shouldStop?.()) { stopped = true; break; }
-      }
+    for (let a = attempt; a <= MAX_ATTEMPTS; a++) {
+      if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
       try {
-        raw = await aiComplete({
+        const raw = await aiComplete({
           system: GENERATOR_SYSTEM,
-          messages: [
-            {
-              role: 'user',
-              content: safetyMode ? `${prompt}\n\n${SAFETY_NOTE}` : prompt,
-            },
-          ],
+          messages: [{ role: 'user', content: prompt }],
           json: true,
           effort,
           signal,
         });
-        batchError = null;
-        break;
+        const parsed = extractJson<BatchQuestionSpec>(raw);
+        if (!parsed) return null;
+
+        const q = buildQuestion(parsed, exam, [{ subject: topic.subject, subtopic: topic.subtopic }], topic.difficultyTier, difficultySubLevel, pattern.opts);
+        if (!q) return null;
+
+        // Dedup against already-accepted questions.
+        const key = stemKey(q.stem);
+        if (seenStems.has(key)) return null;
+        seenStems.add(key);
+
+        // Attach image if enabled.
+        if (includeImages && !q.figureQuery && liveImages) {
+          const live = await findLiveImage(q.figureQuery || '', usedImages);
+          if (live && !usedImages.has(live.id)) {
+            usedImages.add(live.id);
+            q.image = live.proxyUrl;
+            q.imageSourceUrl = live.articleUrl;
+            q.imageCaption = liveImageCaption(live);
+            attachedImages += 1;
+          }
+        }
+
+        return q;
       } catch (err: any) {
-        // A stopped generation is not a failure: keep every question already written.
         if (signal?.aborted || (err instanceof AiError && err.kind === 'aborted') || err?.name === 'AbortError') {
           stopped = true;
-          batchError = null;
-          break;
+          return null;
         }
-        batchError = err;
-        if (/content[_ ]?filter|safety|blocked/i.test(String(err?.message || ''))) safetyMode = true;
-        waited = err instanceof AiError ? err.retryAfterMs : undefined;
-        // A missing login / cancelled run is not a "bad batch": stop at once instead of
-        // spending three more calls proving it.
         if (err instanceof AiError && err.kind === 'not_connected') throw err;
-        if (!isRetryable(err)) break; // a missing login cannot be fixed by retrying
+        if (!isRetryable(err)) break;
       }
     }
-    if (stopped) { onProgress?.(questions.length, count, batchNumber, Math.max(plannedBatches, batchNumber)); return; }
-    if (batchError) {
-      dropped += batchSize;
-      consecutiveFailed += 1;
-      failure = describeFailure(batchError);
-      onProgress?.(questions.length, count, batchNumber, Math.max(plannedBatches, batchNumber));
-      return;
-    }
-
-    const parsed = extractJson<{ questions?: BatchQuestionSpec[] } | BatchQuestionSpec[]>(raw);
-    let batchItems: BatchQuestionSpec[] | null = Array.isArray(parsed)
-      ? parsed
-      : parsed && Array.isArray((parsed as any).questions)
-        ? (parsed as any).questions
-        : null;
-    if (batchItems && batchItems.length) {
-      const first = batchItems[0];
-      const correctOption = first?.correctOption ?? null;
-      const options = first?.options;
-      const optionsType = Array.isArray(options) ? 'array' : typeof options;
-      const optionsKeys = options && !Array.isArray(options) ? Object.keys(options).join(',') : '';
-      // Cut-off reply: recover the complete questions that came before the cut.
-      const salvaged = salvageQuestionObjects(raw) as BatchQuestionSpec[];
-      if (salvaged.length) batchItems = salvaged;
-    }
-
-    if (!batchItems) {
-      dropped += batchSize; // entire batch unusable
-      consecutiveFailed += 1;
-      onProgress?.(questions.length, count, batchNumber, Math.max(plannedBatches, batchNumber));
-      return;
-    }
-
-    const batchQuestions: ClinicalQuestion[] = [];
-    for (const item of batchItems) {
-      if (questions.length >= count) break;
-      const tierForItem = difficultyTier === 'ALL'
-        ? (['LOW', 'MEDIUM', 'HIGH'] as const)[questions.length % 3]
-        : tier;
-      const q = buildQuestion(item, exam, batchPool, tierForItem, difficultySubLevel, pattern.opts);
-      if (!q) continue;
-      // Parallel batches cannot see each other's in-flight stems, so drop duplicates here.
-      const key = stemKey(q.stem);
-      if (seenStems.has(key)) continue;
-      seenStems.add(key);
-      // If the stem plainly describes a visual finding but the writer omitted the figure
-      // fields, derive them from the keyed answer so the item still gets a real picture.
-      if (includeImages && !q.figureQuery) {
-        const stemAndPrompt = `${q.stem} ${q.questionText}`;
-        // Modality keywords found in the stem itself.
-        let modality: string | null =
-          /\bECG\b|\belectrocardiogram\b|\bcardiogram\b/i.test(stemAndPrompt) ? 'ECG'
-          : /\bX-?ray\b|\bradiograph\b|\bchest film\b/i.test(stemAndPrompt) ? 'X-ray'
-          : /\bCT\b|\bcomputed tomography\b/i.test(stemAndPrompt) ? 'CT'
-          : /\bMRI\b|\bmagnetic resonance\b/i.test(stemAndPrompt) ? 'MRI'
-          : /\bultrasound\b|\bsonograph|\bechograph/i.test(stemAndPrompt) ? 'Ultrasound'
-          : /\bhistolog|\bbiopsy\b|\bsmear\b|\bmicroscop/i.test(stemAndPrompt) ? 'Histology'
-          : /\bfundus\b|\bretina\b|\bophthalmoscop/i.test(stemAndPrompt) ? 'Fundus'
-          : /\bphotograph|\brash\b|\blesion\b|\bskin\b/i.test(stemAndPrompt) ? 'Clinical photo'
-          : null;
-
-        // Fallback: only trust an explicit visual keyword in the subtopic. A broad
-        // subject→modality guess (cardiology→ECG) produced nonsense searches and
-        // unrelated pictures, which is worse than a text-only item.
-        if (!modality) {
-          const topic = String(q.subtopic || '').toLowerCase();
-          if (/\becg\b|\bekg\b|electrocardiogram|electrocardiograph/.test(topic)) modality = 'ECG';
-          else if (/x-?ray|radiograph/.test(topic)) modality = 'X-ray';
-          else if (/\bct\b|computed tomography/.test(topic)) modality = 'CT';
-          else if (/\bmri\b|magnetic resonance/.test(topic)) modality = 'MRI';
-          else if (/ultrasound|sonograph|echograph/.test(topic)) modality = 'Ultrasound';
-          else if (/histolog|micrograph|biopsy slide/.test(topic)) modality = 'Histology';
-          else if (/fundus|fundal/.test(topic)) modality = 'Fundus';
-        }
-
-        const topic = String(q.subtopic || q.subject || '')
-          .replace(/\(.*?\)/g, ' ')
-          // Only cut at a colon or a dash used as a separator — not inside hyphenated
-          // names like "Oto-Rhino-Laryngology".
-          .replace(/\s*[:—–]\s*.*$/, ' ')
-          // "Fluoroscopy & Barium Studies" -> "Fluoroscopy"; generic words add nothing.
-          .replace(/\s*&.*$/, ' ')
-          .replace(/\b(studies|study|disorders?|diseases?|general|miscellaneous|others|overview|introduction)\b/gi, ' ')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .split(' ')
-          .slice(0, 3)
-          .join(' ');
-        // Only derive a figureQuery when we have a modality — otherwise the query
-        // would be too vague and could attach an unrelated picture.
-        if (modality && topic) {
-          q.figureModality = modality;
-          // "Clinical photo" is never part of a Commons/Open-i title, so search the
-          // topic alone for those; every other modality is a real search keyword.
-          q.figureQuery = modality === 'Clinical photo' ? topic.slice(0, 48) : `${topic} ${modality}`.slice(0, 60);
-        }
-      }
-      questions.push(q);
-      batchQuestions.push(q);
-    }
-
-    // Every picture is fetched from the web at generation time (Commons + Open-i,
-    // licence-filtered). Capped per batch so a slow network cannot stall generation.
-    if (liveImages) {
-      const pending = batchQuestions.filter((q) => !q.image && q.figureQuery).slice(0, 10);
-      // Sequential, so two lookups can never reserve the same picture.
-      for (const q of pending) {
-        const live = await findLiveImage(q.figureQuery as string, usedImages);
-        if (!live) continue;
-        // Another worker may have claimed it while this lookup was in flight.
-        if (usedImages.has(live.id)) continue;
-        usedImages.add(live.id);
-        q.image = live.proxyUrl;
-        q.imageSourceUrl = live.articleUrl;
-        q.imageCaption = liveImageCaption(live);
-        attachedImages += 1;
-      }
-    }
-
-    // Hand the completed batch to the caller for refinement / bank save / QA while the
-    // remaining batches keep generating. Fire-and-forget: generation must not block on it.
-    if (onBatch && batchQuestions.length) {
-      const p = onBatch(batchQuestions);
-      if (p && batchPromises) batchPromises.push(Promise.resolve(p));
-    }
-
-    // Everything requested but not delivered (invalid items or missing) counts as dropped.
-    dropped += batchSize - (questions.length - before);
-    consecutiveFailed = questions.length === before ? consecutiveFailed + 1 : 0;
-    onProgress?.(questions.length, count, batchNumber, Math.max(plannedBatches, batchNumber));
+    return null;
   };
 
-  const workers = Array.from({ length: CONCURRENCY }, async () => {
-    // Pull the next batch number until the target is reached, the budget is exhausted,
-    // the provider keeps failing, or the learner stops the run. A new batch is only
-    // started when the batches already in flight cannot cover the remaining questions —
-    // otherwise the run waits for work it no longer needs.
-    while (!stopped && !signal?.aborted && !shouldStop?.() && questions.length < count) {
-      if (batch >= maxBatches || consecutiveFailed >= 3) break;
-      if (questions.length + inFlightBatches * 10 >= count) break;
-      batch += 1;
-      inFlightBatches += 1;
-      try {
-        await runBatch(batch);
-      } finally {
-        inFlightBatches -= 1;
-      }
-      if (consecutiveFailed >= 3) break;
+  // ---------- Step 4: Fire all question-generation requests in parallel ----------
+  const questionPromises = topics.map((topic, idx) => generateSingleQuestion(topic, 0));
+  const results = await Promise.all(questionPromises);
+
+  for (const q of results) {
+    if (q) {
+      questions.push(q);
+      if (questions.length >= count) break;
     }
-    if (signal?.aborted || shouldStop?.()) stopped = true;
-  });
-  await Promise.all(workers);
-  
-  return { questions, dropped, stopped, failure, imagesAttached: attachedImages };
+  }
+
+  // Count dropped (questions requested but not delivered).
+  dropped = count - questions.length;
+
+  // Fire onBatch for any completed questions (caller can save them incrementally).
+  if (onBatch && questions.length) {
+    const p = onBatch(questions);
+    if (p && batchPromises) batchPromises.push(Promise.resolve(p));
+  }
+
+  return { questions, dropped, stopped, failure: null, imagesAttached: attachedImages };
 }

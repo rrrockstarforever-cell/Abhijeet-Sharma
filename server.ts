@@ -26,6 +26,7 @@ import {
   type DupRecord,
 } from './server/qa/index.ts';
 import { serverDebugLog } from './server/utils/debugLog.ts';
+import { extractJson } from './src/lib/ai.ts';
 
 dotenv.config();
 
@@ -484,6 +485,92 @@ app.get('/api/oauth/status', (req: Request, res: Response) => {
     },
     defaults: DEFAULT_MODELS,
   });
+});
+
+// 1a-bis. POST /api/ai/plan-topics: plan topic distribution for MCQ generation.
+// Returns a ranked list of subject+subtopic pairs with importance weights,
+// so that important topics appear more often across concurrent batches.
+app.post('/api/ai/plan-topics', async (req: Request, res: Response) => {
+  const { subjectSubtopics, count, difficultyTier, provider, model, exam, effort } = req.body || {};
+  if (!subjectSubtopics || !Array.isArray(subjectSubtopics) || subjectSubtopics.length === 0) {
+    return res.status(400).json({ error: 'subjectSubtopics is required' });
+  }
+  const countN = Math.max(1, Math.min(parseInt(String(count || '20'), 10) || 20, 200));
+  const tier = difficultyTier || 'MEDIUM';
+
+  // Build the full pool of subject+subtopic pairs.
+  const pool: { subject: string; subtopic: string }[] = [];
+  for (const s of subjectSubtopics) {
+    for (const sub of (s.subtopics || [])) {
+      if (sub && sub.trim()) pool.push({ subject: s.subject, subtopic: sub.trim() });
+    }
+  }
+  if (pool.length === 0) {
+    return res.status(400).json({ error: 'No subtopics found in subjectSubtopics' });
+  }
+
+  try {
+    // Ask the AI provider to rank topics by importance for this exam.
+    const planPrompt = [
+      `You are an expert medical exam item writer for ${exam || 'NEET-PG'}.`,
+      `Given these allowed subjects and subtopics, rank them by exam importance (most-tested first):`,
+      ...subjectSubtopics.map((s: any) => `  ${s.subject}: ${(s.subtopics || []).join(', ')}`),
+      '',
+      `Return a JSON array of topic objects, each with "subject", "subtopic", and "priority" (1-10, where 10 = most important).`,
+      `Include approximately ${countN} entries total. If there are fewer unique pairs than ${countN}, repeat important ones.`,
+      `Output ONLY the JSON array.`,
+    ].join('\n');
+
+    const raw = await runCompletion({
+      provider: provider || 'gemini',
+      model: model || DEFAULT_MODELS.nvidia,
+      messages: [{ role: 'user', content: planPrompt }],
+      json: true,
+      effort: effort || undefined,
+    });
+
+    const parsed = extractJson<{ subject: string; subtopic: string; priority: number }[]>(raw);
+    const ranked = Array.isArray(parsed) ? parsed : [];
+
+    // Build weighted topic list: higher priority = more repetitions.
+    const weighted: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }[] = [];
+    for (const entry of ranked) {
+      const repeats = Math.max(1, Math.min(entry.priority || 5, 10));
+      for (let i = 0; i < repeats; i++) {
+        weighted.push({
+          subject: entry.subject,
+          subtopic: entry.subtopic,
+          difficultyTier: tier as 'LOW' | 'MEDIUM' | 'HIGH',
+        });
+      }
+    }
+
+    // If weighted list is empty (parse failed), fall back to round-robin.
+    if (weighted.length === 0) {
+      for (let i = 0; i < countN; i++) {
+        weighted.push({
+          subject: pool[i % pool.length].subject,
+          subtopic: pool[i % pool.length].subtopic,
+          difficultyTier: tier as 'LOW' | 'MEDIUM' | 'HIGH',
+        });
+      }
+    }
+
+    // Trim to countN, preserving order.
+    const finalTopics = weighted.slice(0, countN);
+    return res.json({ topics: finalTopics, total: finalTopics.length });
+  } catch (err: any) {
+    // Fallback: simple round-robin.
+    const fallback: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }[] = [];
+    for (let i = 0; i < countN; i++) {
+      fallback.push({
+        subject: pool[i % pool.length].subject,
+        subtopic: pool[i % pool.length].subtopic,
+        difficultyTier: tier as 'LOW' | 'MEDIUM' | 'HIGH',
+      });
+    }
+    return res.json({ topics: fallback, total: fallback.length });
+  }
 });
 
 // 2. POST /api/oauth/start: begin a real device-code / PKCE+paste-code flow
@@ -1035,10 +1122,19 @@ async function listNvidiaModels(): Promise<{ models: { id: string; name: string;
     const b = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(b?.error?.message || `HTTP ${r.status}`);
     const rows: any[] = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
+    const verifiedModels = [
+      'nvidia/nemotron-3.5-super-vl-120b-a12b',
+      'nvidia/nemotron-3-ultra-550b-a55b',
+      'nvidia/nemotron-3.5-lightning-30b-a3b',
+      'nvidia/nemotron-3.5-bolt-e4b',
+      'nvidia/nemotron-3.5-content-safety',
+      'nvidia/nemotron-parse-2.0',
+      'meta/llama-guard-4-12b',
+    ];
     return {
       models: rows
         .map((m) => ({ id: String(m?.id ?? m?.name ?? ''), name: String(m?.name || m?.id || ''), source: 'account' }))
-        .filter((m) => m.id),
+        .filter((m) => m.id && verifiedModels.includes(m.id)),
     };
   } catch (e: any) {
     return { models: [], error: e?.message || 'Could not list NVIDIA models.' };
