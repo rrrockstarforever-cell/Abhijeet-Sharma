@@ -47,7 +47,18 @@ export default function App() {
   const currentViewRef = useRef<AppView>(currentView);
   useEffect(() => { currentViewRef.current = currentView; }, [currentView]);
   const [readyNotice, setReadyNotice] = useState<{ count: number } | null>(null);
-  const [isDarkMode, setIsDarkMode] = useState<boolean>(false);
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('pulse-dark-mode');
+      return saved === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    localStorage.setItem('pulse-dark-mode', String(isDarkMode));
+  }, [isDarkMode]);
   // Bumped whenever a store writes, so the sidebar badges stay truthful.
   const [, setDataVersion] = useState(0);
   useEffect(() => subscribeDataChanged(() => setDataVersion((v) => v + 1)), []);
