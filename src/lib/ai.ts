@@ -634,23 +634,30 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   };
 
   // ---------- Step 4: Fire all question-generation requests in parallel ----------
-  const questionPromises = topics.map((topic, idx) => generateSingleQuestion(topic, 0));
+  // Use a completion counter that updates progress as each question finishes.
+  let completedCount = 0;
+  const questionPromises = topics.map((topic, idx) => {
+    return generateSingleQuestion(topic, 0).then((q) => {
+      // Update progress as each question completes (not after all finish).
+      completedCount += 1;
+      if (q) {
+        questions.push(q);
+      }
+      onProgress?.(questions.length, count, completedCount, topics.length);
+      // Fire onBatch periodically (every ~25% of completion).
+      if (onBatch && questions.length > 0 && completedCount % Math.max(1, Math.floor(topics.length / 4)) === 0) {
+        const p = onBatch(questions.slice());
+        if (p && batchPromises) batchPromises.push(Promise.resolve(p));
+      }
+      return q;
+    });
+  });
   const results = await Promise.all(questionPromises);
 
-  let completed = 0;
-  for (const q of results) {
-    if (q) {
-      questions.push(q);
-      completed += 1;
-      if (questions.length >= count) break;
-    }
-    // Fire progress update after each batch of results
-    onProgress?.(questions.length, count, Math.ceil(completed / Math.max(1, topics.length)), Math.ceil(topics.length / 10));
-    if (onBatch && questions.length && completed % Math.max(1, Math.floor(topics.length / 4)) === 0) {
-      const p = onBatch(questions.slice(-completed));
-      if (p && batchPromises) batchPromises.push(Promise.resolve(p));
-    }
-  }
+  // Dedup by stem (already done in generateSingleQuestion, but double-check).
+  const unique = questions.filter((q, i) => questions.findIndex((x) => x.stem === q.stem) === i);
+  questions.length = 0;
+  questions.push(...unique);
 
   // Count dropped (questions requested but not delivered).
   dropped = count - questions.length;
