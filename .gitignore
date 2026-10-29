@@ -1,0 +1,8 @@
+node_modules/
+dist/
+release*/
+.env*
+*.log
+*.err
+.aistudio/
+Debug Center data directories
