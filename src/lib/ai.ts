@@ -637,20 +637,42 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const questionPromises = topics.map((topic, idx) => generateSingleQuestion(topic, 0));
   const results = await Promise.all(questionPromises);
 
+  let completed = 0;
   for (const q of results) {
     if (q) {
       questions.push(q);
+      completed += 1;
       if (questions.length >= count) break;
+    }
+    // Fire progress update after each batch of results
+    onProgress?.(questions.length, count, Math.ceil(completed / Math.max(1, topics.length)), Math.ceil(topics.length / 10));
+    if (onBatch && questions.length && completed % Math.max(1, Math.floor(topics.length / 4)) === 0) {
+      const p = onBatch(questions.slice(-completed));
+      if (p && batchPromises) batchPromises.push(Promise.resolve(p));
     }
   }
 
   // Count dropped (questions requested but not delivered).
   dropped = count - questions.length;
 
-  // Fire onBatch for any completed questions (caller can save them incrementally).
-  if (onBatch && questions.length) {
-    const p = onBatch(questions);
-    if (p && batchPromises) batchPromises.push(Promise.resolve(p));
+  // ---------- Step 5: Attach images for all questions that need them ----------
+  if (includeImages && liveImages && questions.length > 0) {
+    // Process images sequentially to avoid rate limiting
+    for (const q of questions) {
+      if (signal?.aborted || shouldStop?.()) { stopped = true; break; }
+      if (q.image) continue; // already has an image
+
+      // Try to derive figureQuery from the stem if not set
+      const figureQuery = q.figureQuery || q.stem.slice(0, 48);
+      const live = await findLiveImage(figureQuery, usedImages);
+      if (live && !usedImages.has(live.id)) {
+        usedImages.add(live.id);
+        q.image = live.proxyUrl;
+        q.imageSourceUrl = live.articleUrl;
+        q.imageCaption = liveImageCaption(live);
+        attachedImages += 1;
+      }
+    }
   }
 
   return { questions, dropped, stopped, failure: null, imagesAttached: attachedImages };
