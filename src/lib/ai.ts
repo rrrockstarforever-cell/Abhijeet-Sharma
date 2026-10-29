@@ -11,13 +11,15 @@ export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', '
 
 // Server defaults (mirrored in server.ts); models are user-selectable and persisted
 // in localStorage as `ai.model.<provider>` and sent with every request.
-export const DEFAULT_MODELS: Record<AiProviderId, string> = {
+export const DEFAULT_MODELS: Record<string, string> = {
   gemini: 'gemini-3.8-flash',
   chatgpt: 'gpt-6.1-sol',
   claude: 'claude-sonnet-5-5',
   grok: 'grok-4.7',
   // OpenCode Console / Go (https://opencode.ai/inference) — any model id the account has.
   opencode: 'deepseek-v4.1-flash',
+  // Custom OpenAI-compatible endpoint — user supplies URL, model id and key.
+  custom: 'gpt-4o-mini',
 };
 
 // Console-only model ids a previous version of the app offered for OpenCode. They are not

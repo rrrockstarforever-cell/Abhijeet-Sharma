@@ -109,6 +109,21 @@ const REAL_PROVIDERS: AIProvider[] = [
     ]
   },
   {
+    id: 'custom',
+    name: 'Custom (OpenAI-Compatible)',
+    brand: 'openai',
+    model: DEFAULT_MODELS.custom,
+    status: 'ready',
+    type: 'API Key (custom endpoint)',
+    features: ['API Key in Settings', 'Custom base URL & model', 'OpenAI-compatible /chat/completions'],
+    isDefault: false,
+    isSignedIn: false,
+    hasTokenConfigured: false,
+    availableModels: [
+      { id: DEFAULT_MODELS.custom, name: 'Custom Model (Default)', description: 'Set your own model id in Settings', latencyEstimate: '—', contextWindow: '—' },
+    ]
+  },
+  {
     id: 'opencode',
     name: 'OpenCode (Console / Go)',
     brand: 'opencode',
@@ -169,8 +184,10 @@ export const SettingsAIView: React.FC = () => {
   const [authSuccess, setAuthSuccess] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
 
-  // Key-based providers (Gemini, OpenCode): the pasted key never leaves the local server.
+  // Key-based providers (Gemini, OpenCode, Custom): the pasted key never leaves the local server.
   const [keyInput, setKeyInput] = useState<string>('');
+  const [customBaseUrl, setCustomBaseUrl] = useState<string>('');
+  const [customModelId, setCustomModelId] = useState<string>('');
   const [isSavingKey, setIsSavingKey] = useState<boolean>(false);
   const [keySavedMsg, setKeySavedMsg] = useState<string | null>(null);
 
@@ -329,10 +346,12 @@ export const SettingsAIView: React.FC = () => {
     setCopied(false);
     setClaudeInputCode('');
     setKeyInput('');
+    setCustomBaseUrl('');
+    setCustomModelId('');
     setDeviceCodeData(null);
     setPkceData(null);
 
-    if (provider.id === 'gemini' || provider.id === 'opencode') {
+    if (provider.id === 'gemini' || provider.id === 'opencode' || provider.id === 'custom') {
       // Key-based providers: the pasted key is handled inside the modal.
       setIsLoadingFlow(false);
       return;
@@ -501,12 +520,25 @@ export const SettingsAIView: React.FC = () => {
     }
   };
 
-  // Save the pasted key (Gemini or OpenCode); the server stores it in the user's data dir.
+  // Save the pasted key (Gemini, OpenCode or Custom); the server stores it in the user's data dir.
   const handleSaveKey = async () => {
     const key = keyInput.trim();
     if (!key || !selectedProvider) return;
-    const endpoint = selectedProvider.id === 'opencode' ? '/api/settings/opencode-key' : '/api/settings/gemini-key';
-    const label = selectedProvider.id === 'opencode' ? 'OpenCode' : 'Gemini';
+    const endpoint = selectedProvider.id === 'opencode' ? '/api/settings/opencode-key'
+      : selectedProvider.id === 'custom' ? '/api/settings/custom-api-key'
+      : '/api/settings/gemini-key';
+    const label = selectedProvider.id === 'opencode' ? 'OpenCode'
+      : selectedProvider.id === 'custom' ? 'Custom'
+      : 'Gemini';
+    const body: any = { apiKey: key };
+    if (selectedProvider.id === 'custom') {
+      body.baseUrl = customBaseUrl.trim();
+      body.modelId = customModelId.trim();
+      if (!body.baseUrl || !body.modelId) {
+        setAuthError('API Base URL and Model ID are required for the custom provider.');
+        return;
+      }
+    }
     setIsSavingKey(true);
     setAuthError(null);
     try {
@@ -516,7 +548,7 @@ export const SettingsAIView: React.FC = () => {
           'Content-Type': 'application/json',
           'x-session-id': getClientSessionId()
         },
-        body: JSON.stringify({ apiKey: key })
+        body: JSON.stringify(body)
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || 'Could not save the API key.');
@@ -620,6 +652,8 @@ export const SettingsAIView: React.FC = () => {
     setIsPolling(false);
     setKeySavedMsg(null);
     setKeyInput('');
+    setCustomBaseUrl('');
+    setCustomModelId('');
     setSelectedProvider(null);
   };
 
@@ -979,6 +1013,8 @@ export const SettingsAIView: React.FC = () => {
                               ? 'bg-gradient-to-br from-emerald-600 to-teal-800 text-white'
                               : p.id === 'opencode'
                                 ? 'bg-gradient-to-br from-[#0f8b8d] to-[#001432] text-white'
+                              : p.id === 'custom'
+                                ? 'bg-gradient-to-br from-violet-600 to-purple-800 text-white'
                                 : 'bg-gradient-to-br from-slate-800 to-black text-white'
                       }`}>
                         {p.name.charAt(0)}
@@ -1121,7 +1157,7 @@ export const SettingsAIView: React.FC = () => {
 
                     {/* Controls: Sign In Button or Connected State + Set Active */}
                     <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
-                      {(p.id === 'gemini' || p.id === 'opencode') ? (
+                      {(p.id === 'gemini' || p.id === 'opencode' || p.id === 'custom') ? (
                         <div className="flex items-center gap-2">
                           <span className={`text-xs font-bold px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
                             isConnected
@@ -1253,7 +1289,9 @@ export const SettingsAIView: React.FC = () => {
                       ? 'Gemini API Key'
                       : selectedProvider.id === 'opencode'
                         ? 'OpenCode API Key'
-                        : `Sign in with ${selectedProvider.name}`}
+                        : selectedProvider.id === 'custom'
+                          ? 'Custom API Key'
+                          : `Sign in with ${selectedProvider.name}`}
                   </h3>
                   <p className="text-xs text-slate-500">
                     {selectedProvider.id === 'claude' 
@@ -1262,7 +1300,9 @@ export const SettingsAIView: React.FC = () => {
                         ? 'Key saved locally — never shown again'
                         : selectedProvider.id === 'opencode'
                           ? 'Console / Go key saved locally — never shown again'
-                          : 'Device Authorization Flow (RFC 8628)'}
+                          : selectedProvider.id === 'custom'
+                            ? 'Key saved locally — never shown again'
+                            : 'Device Authorization Flow (RFC 8628)'}
                   </p>
                 </div>
               </div>
@@ -1276,7 +1316,7 @@ export const SettingsAIView: React.FC = () => {
 
             {/* This is the real local flow, not a web demo: the code comes from the
                 provider right now and the token is stored on this computer only. */}
-            {selectedProvider.id !== 'gemini' && selectedProvider.id !== 'opencode' && (
+            {selectedProvider.id !== 'gemini' && selectedProvider.id !== 'opencode' && selectedProvider.id !== 'custom' && (
               <p className="text-[11px] leading-relaxed text-slate-600 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
                 {selectedProvider.id === 'claude'
                   ? 'Open the Claude approval page, sign in, then paste the code Claude shows you. The token stays on this computer.'
@@ -1307,8 +1347,8 @@ export const SettingsAIView: React.FC = () => {
               </div>
             )}
 
-            {/* Key-based providers: Gemini and OpenCode */}
-            {(selectedProvider.id === 'gemini' || selectedProvider.id === 'opencode') && (
+            {/* Key-based providers: Gemini, OpenCode and Custom */}
+            {(selectedProvider.id === 'gemini' || selectedProvider.id === 'opencode' || selectedProvider.id === 'custom') && (
               <div className="space-y-4 py-2">
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
                   <div className="flex items-center gap-2 font-bold text-slate-800">
@@ -1318,22 +1358,53 @@ export const SettingsAIView: React.FC = () => {
                   <p className="text-slate-600 leading-relaxed">
                     {selectedProvider.id === 'opencode'
                       ? 'Create an API key in the OpenCode Console (console.opencode.ai) and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser. If you already use the OpenCode CLI on this machine, its stored key is used automatically.'
-                      : 'Create the key in Google AI Studio and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser.'}
+                      : selectedProvider.id === 'custom'
+                        ? 'Enter your custom OpenAI-compatible endpoint details below. Base URL, Model ID and API Key are saved to your user data directory (.env, outside the repo) and are never displayed again or sent back to the browser.'
+                        : 'Create the key in Google AI Studio and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser.'}
                   </p>
                 </div>
 
-                <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-700 block">
-                    {selectedProvider.id === 'opencode' ? 'OpenCode API Key' : 'Gemini API Key'}
-                  </label>
-                  <input
-                    type="password"
-                    value={keyInput}
-                    onChange={(e) => setKeyInput(e.target.value)}
-                    placeholder={selectedProvider.id === 'opencode' ? 'sk-… / your OpenCode Console API key' : 'AIza… / your Gemini API key'}
-                    className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
-                  />
-                </div>
+                {selectedProvider.id === 'custom' ? (
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-700 block">API Base URL</label>
+                    <input
+                      type="text"
+                      value={customBaseUrl}
+                      onChange={(e) => setCustomBaseUrl(e.target.value)}
+                      placeholder="https://api.openai.com/v1"
+                      className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                    />
+                    <label className="text-xs font-bold text-slate-700 block">Model ID</label>
+                    <input
+                      type="text"
+                      value={customModelId}
+                      onChange={(e) => setCustomModelId(e.target.value)}
+                      placeholder="gpt-4o-mini"
+                      className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                    />
+                    <label className="text-xs font-bold text-slate-700 block">API Key</label>
+                    <input
+                      type="password"
+                      value={keyInput}
+                      onChange={(e) => setKeyInput(e.target.value)}
+                      placeholder="sk-… / your custom API key"
+                      className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                    />
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-700 block">
+                      {selectedProvider.id === 'opencode' ? 'OpenCode API Key' : 'Gemini API Key'}
+                    </label>
+                    <input
+                      type="password"
+                      value={keyInput}
+                      onChange={(e) => setKeyInput(e.target.value)}
+                      placeholder={selectedProvider.id === 'opencode' ? 'sk-… / your OpenCode Console API key' : 'AIza… / your Gemini API key'}
+                      className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                    />
+                  </div>
+                )}
 
                 <div className="pt-2 flex items-center justify-end gap-2.5">
                   <button
@@ -1344,7 +1415,7 @@ export const SettingsAIView: React.FC = () => {
                   </button>
                   <button
                     onClick={handleSaveKey}
-                    disabled={isSavingKey || !keyInput.trim()}
+                    disabled={isSavingKey || !keyInput.trim() || (selectedProvider.id === 'custom' && (!customBaseUrl.trim() || !customModelId.trim()))}
                     className="px-4 py-2 text-xs font-bold bg-[#001432] hover:bg-[#13294b] disabled:opacity-40 text-white rounded-xl flex items-center gap-1.5 transition-all"
                   >
                     {isSavingKey ? (

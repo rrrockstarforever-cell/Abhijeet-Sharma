@@ -56,6 +56,7 @@ const DEFAULT_MODELS: Record<string, string> = {
   claude: 'claude-sonnet-5-5',
   grok: 'grok-4.7',
   opencode: OPENCODE_DEFAULT_MODEL,
+  custom: 'gpt-4o-mini',
 };
 
 // UI provider ids -> old oauth.mjs internal ids
@@ -75,6 +76,17 @@ class ApiError extends Error {
 
 function geminiKey(): string {
   return (process.env.GEMINI_API_KEY || '').trim();
+}
+
+// Custom provider env vars (stored in <PULSE_DATA_DIR>/.env via Settings).
+function customBaseUrl(): string {
+  return (process.env.CUSTOM_BASE_URL || '').trim();
+}
+function customApiKey(): string {
+  return (process.env.CUSTOM_API_KEY || '').trim();
+}
+function customModelId(): string {
+  return (process.env.CUSTOM_MODEL_ID || '').trim();
 }
 
 // Gemini client is created lazily and refreshed if the key changes, so a key pasted
@@ -166,6 +178,7 @@ function providerErrorText(body: any, status: number): string {
 function isProviderConnected(providerId: string): boolean {
   if (providerId === 'gemini') return Boolean(geminiKey());
   if (providerId === 'opencode') return Boolean(opencodeKey());
+  if (providerId === 'custom') return Boolean(customBaseUrl() && customApiKey() && customModelId());
   try {
     const s = oauthStatus();
     if (providerId === 'chatgpt') return Boolean(s.codex);
@@ -181,6 +194,9 @@ function notConnectedMessage(providerId: string): string {
   }
   if (providerId === 'opencode') {
     return 'OpenCode is not connected. Paste your OpenCode Console API key in Settings → AI Subscription Hub.';
+  }
+  if (providerId === 'custom') {
+    return 'Custom provider is not connected. Fill in API Base URL, Model ID and API Key in Settings → AI Subscription Hub.';
   }
   return `${providerId.charAt(0).toUpperCase() + providerId.slice(1)} is not signed in. Connect an AI provider in Settings → AI Subscription Hub.`;
 }
@@ -301,6 +317,46 @@ async function runCompletion(opts: {
     return gText;
   }
 
+  if (provider === 'custom') {
+    const baseUrl = customBaseUrl();
+    const key = customApiKey();
+    const model_ = model || customModelId() || DEFAULT_MODELS.custom;
+    if (!baseUrl || !key || !model_) throw new ApiError(notConnectedMessage('custom'), 401);
+    const payloadMessages = [
+      ...(system ? [{ role: 'system', content: system }] : []),
+      ...messages.map((m) => ({ role: m.role, content: m.content })),
+    ];
+    const payload = JSON.stringify({
+      model: model_,
+      messages: payloadMessages,
+      temperature: 0.7,
+      ...(json ? { response_format: { type: 'json_object' } } : {}),
+    });
+    const r = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      body: payload,
+      ...(signal ? { signal } : {}),
+    });
+    const raw = await r.text();
+    let body: any = {};
+    try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+    if (!r.ok) {
+      aiLog({ provider: 'custom', model: model_, status: r.status, error: true });
+      throw new ApiError(`Custom: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
+    }
+    const content = body?.choices?.[0]?.message?.content;
+    const text = typeof content === 'string' ? content : '';
+    aiLog({ provider: 'custom', model: model_, status: r.status, text_len: text.length, json: !!json });
+    if (!text.trim()) {
+      throw new ApiError(`Custom returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || 'unknown'}).`, 502);
+    }
+    return text;
+  }
+
   const internal = INTERNAL_PROVIDER[provider];
   if (!internal) throw new ApiError(`Unknown AI provider: ${provider}`, 400);  try {
     return await oauthChat({
@@ -344,6 +400,7 @@ app.get('/api/oauth/status', (req: Request, res: Response) => {
       claude: { connected: isProviderConnected('claude') },
       grok: { connected: isProviderConnected('grok') },
       opencode: { connected: isProviderConnected('opencode') },
+      custom: { connected: isProviderConnected('custom') },
     },
     defaults: DEFAULT_MODELS,
   });
@@ -491,6 +548,26 @@ app.post('/api/settings/opencode-key', (req: Request, res: Response) => {
   }
 });
 
+// 6c. POST /api/settings/custom-api-key: save the Custom provider's base URL, model id and API key.
+// NEVER echoes the key back.
+app.post('/api/settings/custom-api-key', (req: Request, res: Response) => {
+  const { apiKey, baseUrl, modelId } = req.body || {};
+  const key = String(apiKey || '').trim();
+  const url = String(baseUrl || '').trim();
+  const model = String(modelId || '').trim();
+  if (!key || !url || !model) {
+    return res.status(400).json({ error: 'API Base URL, Model ID and API Key are all required.' });
+  }
+  try {
+    writeEnvValue('CUSTOM_API_KEY', key);
+    writeEnvValue('CUSTOM_BASE_URL', url);
+    writeEnvValue('CUSTOM_MODEL_ID', model);
+    return res.json({ ok: true, connected: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Could not save the custom provider settings.' });
+  }
+});
+
 // 6a. GET /api/models/available: the models THIS account may really use, asked of each
 // provider with its own stored token. The models.dev catalogue is not account-aware, so it
 // suggests ids a subscription login cannot call. Gemini has no OAuth here (API key), so it
@@ -596,7 +673,7 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
   const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
   const probe = req.query.probe === '1' || req.query.probe === 'true';
   const only = String(req.query.provider || '').trim();
-  if (only && !['gemini', 'chatgpt', 'claude', 'grok', 'opencode'].includes(only)) {
+  if (only && !['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom'].includes(only)) {
     return res.status(400).json({ error: `Unknown provider: ${only}` });
   }
   // The full, unprobed list is cacheable; targeted or probed requests are not.
@@ -658,7 +735,7 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
 app.post('/api/models/probe', async (req: Request, res: Response) => {
   const provider = String(req.body?.provider || '').trim();
   const model = String(req.body?.model || '').trim();
-  if (!['gemini', 'chatgpt', 'claude', 'grok', 'opencode'].includes(provider)) {
+  if (!['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom'].includes(provider)) {
     return res.status(400).json({ error: 'Choose a provider to test.' });
   }
   if (!model || model.length > 200) {
