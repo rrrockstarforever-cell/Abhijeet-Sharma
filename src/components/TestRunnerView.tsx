@@ -1,12 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   CheckCircle2,
-  Brain,
   BookOpen,
   Sparkles,
   ChevronLeft,
   ChevronRight,
-  Check,
   X,
   Activity,
   Zap,
