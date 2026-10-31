@@ -538,6 +538,20 @@ app.get('/api/oauth/status', (req: Request, res: Response) => {
   });
 });
 
+// Figures for imported question banks (eMedici). Read-only, from a folder set by
+// BANK_FIGURES_DIR (default ~/.pulse-med/bank-figures). The path is restricted to plain
+// folder/file names, so a request cannot read anything else on disk.
+const BANK_FIGURES_DIR = process.env.BANK_FIGURES_DIR || path.join(os.homedir(), '.pulse-med', 'bank-figures');
+app.get(/^\/api\/bank-figures\/(.+)$/, (req: Request, res: Response) => {
+  const rel = String(req.params[0] ?? '');
+  if (!/^[A-Za-z0-9_\-/]+\.(png|jpe?g|webp|gif)$/i.test(rel) || rel.split('/').includes('..')) {
+    return res.status(400).end();
+  }
+  const full = path.join(BANK_FIGURES_DIR, rel);
+  if (!fs.existsSync(full)) return res.status(404).end();
+  res.sendFile(full);
+});
+
 // 1a-bis. POST /api/ai/plan-topics: plan topic distribution for MCQ generation.
 // Returns a ranked list of subject+subtopic pairs with importance weights,
 // so that important topics appear more often across concurrent batches.
@@ -568,6 +582,7 @@ app.post('/api/ai/plan-topics', async (req: Request, res: Response) => {
       ...subjectSubtopics.map((s: any) => `  ${s.subject}: ${(s.subtopics || []).join(', ')}`),
       '',
       `Return a JSON array of topic objects, each with "subject", "subtopic", and "priority" (1-10, where 10 = most important).`,
+      `Use ONLY the subjects and subtopics listed above, copied exactly. Do not add any other subject or subtopic.`,
       `Include approximately ${countN} entries total. If there are fewer unique pairs than ${countN}, repeat important ones.`,
       `Output ONLY the JSON array.`,
     ].join('\n');
@@ -581,7 +596,15 @@ app.post('/api/ai/plan-topics', async (req: Request, res: Response) => {
     });
 
     const parsed = extractJson<{ subject: string; subtopic: string; priority: number }[]>(raw);
-    const ranked = Array.isArray(parsed) ? parsed : [];
+    // Keep only pairs the user actually selected. The model can return subjects it was
+    // not given, which would leak other specialties into a focused module.
+    const allowed = new Map<string, Set<string>>();
+    for (const s of subjectSubtopics) {
+      allowed.set(s.subject, new Set((s.subtopics || []).map((sub: string) => String(sub).trim())));
+    }
+    const ranked = (Array.isArray(parsed) ? parsed : []).filter(
+      (entry) => allowed.get(entry?.subject)?.has(String(entry?.subtopic ?? '').trim()),
+    );
 
     // Build weighted topic list: higher priority = more repetitions.
     const weighted: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }[] = [];
@@ -1423,6 +1446,8 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
     '{"reply": "your main markdown answer", "reasoningSteps": [{"step": "short step name", "detail": "one or two sentences"}], "pearl": "one-line high-yield board pearl or empty string", "citations": ["textbook / guideline citations"], "suggestedFollowups": ["2-3 probing follow-up questions the resident could ask next"]}',
     '- reasoningSteps: 2-5 steps when the answer involves reasoning; may be empty for simple facts.',
     '- "reply" must contain the complete answer itself, not a summary of the other fields.',
+    '- Start "reply" with one bold line giving the direct answer, for example "**Answer: C - voriconazole.**", then the explanation. A learner revising in a hurry should get the answer in the first line.',
+    '- Each citation must name the book with its edition and the chapter or guideline section, for example "Harrison\'s Principles of Internal Medicine, 21st Ed, Ch. 142 (Invasive aspergillosis)". Cite only sources you are confident exist; leave the list empty rather than guess a chapter.',
     // The reply is rendered as markdown. Without this the model often returns one unbroken
     // block of prose, which reads as a dense wall of text in the chat bubble.
     '- Format "reply" for readability: separate distinct topics or stages into their own paragraphs using \\n\\n, and use a short markdown heading or a "- " bullet list where the content is genuinely a list (e.g. investigations, differentials, management steps). Do not return one unbroken paragraph.',
@@ -2083,7 +2108,13 @@ async function startServer() {
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      // HMR's websocket uses port 24678 by default, which another local copy can hold; the
+      // page then connects to the wrong server and logs errors. DISABLE_HMR turns it off, and
+      // HMR_PORT moves it.
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : process.env.HMR_PORT ? { port: Number(process.env.HMR_PORT) } : undefined,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

@@ -48,6 +48,7 @@ import {
 } from '../utils/questionBankStorage.ts';
 import { TopicPickerModal } from './TopicPickerModal.tsx';
 import { reviewBatch, refineBatch, recordReviewBatch } from '../lib/qaClient.ts';
+import { normalizeSubject } from '../lib/benchmark.ts';
 
 interface PracticeModuleBuilderViewProps {
   currentExam: ExamType;
@@ -207,6 +208,9 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
 
   // NOTHING is pre-selected: the learner picks specialities (or chooses "All").
   const [specialtyAll, setSpecialtyAll] = useState(false);
+  // Free-text request ("lung carcinoma", "lung chapter"). When set, it replaces the specialty pick.
+  const [topicRequest, setTopicRequest] = useState('');
+  const customTopic = topicRequest.trim().slice(0, 120);
   const [selectedNeetSubjects, setSelectedNeetSubjects] = useState<string[]>([]);
   const [selectedIniSubjects, setSelectedIniSubjects] = useState<string[]>([]);
   const [selectedIniDomains, setSelectedIniDomains] = useState<string[]>([]);
@@ -227,6 +231,10 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     error: string | null;
   }>({ busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0, error: null });
   const stopEarlyRef = useRef(false);
+  // QA verdict per question id for the current run. Only questions with an APPROVED verdict
+  // reach the runner; anything rejected, sent to human review, or never reviewed is held back.
+  const qaStatusById = useRef(new Map<string, string>());
+  const [heldBackNote, setHeldBackNote] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   // Refinement → bank save → QA run after generation. Stop aborts this too.
   const processingRef = useRef<AbortController | null>(null);
@@ -419,18 +427,20 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
 
   const handleLaunch = async (countOverride?: number) => {
     if (genState.busy) return;
+    qaStatusById.current = new Map();
+    setHeldBackNote(null);
     const targetCount = Math.max(1, Math.min(100, Math.round(countOverride ?? questionCount)));
 
     const keys = resolveSubjects();
-    if (keys.length === 0) {
+    if (keys.length === 0 && !customTopic) {
       setGenState({
         busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0,
-        error: 'Pick at least one speciality (or choose All) before building a module.',
+        error: 'Pick at least one speciality (or request a topic) before building a module.',
       });
       return;
     }
-    const labels = labelsFor(keys);
-    const chosenSubtopics = topicsForKeys(keys);
+    const labels = customTopic ? [customTopic] : labelsFor(keys);
+    const chosenSubtopics = customTopic ? [customTopic] : topicsForKeys(keys);
 
     if (!getActiveProvider()) {
       setGenState({ busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0, error: `No AI provider is active. ${NOT_CONNECTED_MESSAGE}` });
@@ -538,6 +548,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
           try {
             const reviews = await reviewBatch(finalQuestions);
             recordReviewBatch(finalQuestions, reviews);
+            for (const r of reviews) if (r?.questionId) qaStatusById.current.set(r.questionId, r.status);
             for (const q of finalQuestions) {
               const review = reviews.find((r: any) => r.questionId === q.id);
               if (review) await updateQuestionStatus(q.id, review.status);
@@ -556,10 +567,12 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       const { questions, dropped, stopped, failure } = await generateExamQuestions({
         exam: selectedExam,
         count: targetCount,
-        subjectSubtopics: keys.map((key, i) => ({
-          subject: labels[i],
-          subtopics: selectedSubtopics[key] ?? (subjectList.find((r) => r.key === key)?.topics ?? SUBTOPICS[key] ?? []),
-        })),
+        subjectSubtopics: customTopic
+          ? [{ subject: customTopic, subtopics: [customTopic] }]
+          : keys.map((key, i) => ({
+            subject: labels[i],
+            subtopics: selectedSubtopics[key] ?? (subjectList.find((r) => r.key === key)?.topics ?? SUBTOPICS[key] ?? []),
+          })),
         difficultyTier,
         difficultySubLevel,
         onProgress: (generated, total, batch, totalBatches) => {
@@ -593,7 +606,11 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         try {
           const perSubject = Math.max(1, Math.round(targetCount / 5));
           const wantImages = Math.min(perSubject, 6); // cap vision cost per run
-          const subjects = ['Radiology', 'Dermatology', 'Ophthalmology', 'Pathology', 'Cardiology', 'Orthopaedics'];
+          // Only draw bank images from the specialties the user picked. An image from an
+          // unselected specialty would put an off-topic item into the module.
+          const pickedLabels = new Set(labels.map((l) => l.toLowerCase()));
+          const subjects = ['Radiology', 'Dermatology', 'Ophthalmology', 'Pathology', 'Cardiology', 'Orthopaedics']
+            .filter((s) => pickedLabels.has(s.toLowerCase()));
           const optionCount = selectedExam === 'AMC_CAT' ? 5 : 4;
           setProgressDetail((d) => ({ ...d, imageFirst: 'choosing bank images…' }));
 
@@ -732,6 +749,25 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   };
 
   const launchWith = (questions: ClinicalQuestion[], subjects: string[], chosenSubtopics: string[]) => {
+    // Gate the runner: QA must have approved the question, and it must belong to a selected
+    // subject. Everything else stays in the QA dashboard instead of being shown to the learner.
+    const selectedSubjects = new Set(subjects.map(normalizeSubject));
+    const passed: ClinicalQuestion[] = [];
+    const held: string[] = [];
+    for (const q of questions) {
+      const qa = qaStatusById.current.get(q.id);
+      const subjectOk = selectedSubjects.size === 0 || selectedSubjects.has(normalizeSubject(q.subject || ''));
+      if ((qa === 'APPROVED' || qa === 'PUBLISHED') && subjectOk) passed.push(q);
+      else held.push(!subjectOk ? `${q.subject} is not a selected subject` : qa ? `QA ${qa}` : 'not reviewed by QA');
+    }
+    setHeldBackNote(held.length
+      ? `${held.length} question${held.length === 1 ? '' : 's'} held back from the runner (${[...new Set(held)].join('; ')}). They remain in the QA dashboard.`
+      : null);
+    if (passed.length === 0) {
+      setGenState((st) => ({ ...st, error: 'No question passed QA for this module, so nothing was opened. See the QA dashboard.' }));
+      return;
+    }
+    questions = passed;
     onLaunchModule(
       selectedExam,
       questions.length,
@@ -775,8 +811,8 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   const handleLaunchPartial = () => {
     if (!partial || partial.length === 0) return;
     const keys = resolveSubjects();
-    const labels = labelsFor(keys);
-    const chosenSubtopics = topicsForKeys(keys);
+    const labels = customTopic ? [customTopic] : labelsFor(keys);
+    const chosenSubtopics = customTopic ? [customTopic] : topicsForKeys(keys);
     setPartial(null);
     launchWith(partial, labels, chosenSubtopics);
   };
@@ -862,6 +898,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
           'Return ONLY the instruction text — no preamble, no markdown fences, no explanation. ' +
           'Write second-person instructions to the generator (e.g. "Write …", "Avoid …"). ' +
           'Cover: stem style and length, option design, distractor strategy, reasoning steps, and exam-specific conventions. ' +
+          'If the user names a subject, topic or drug class, the profile must restrict the questions to it and say so explicitly. ' +
           'Keep it under 700 characters and make it specific enough to change the output.',
         messages: [{
           role: 'user',
@@ -870,7 +907,8 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             `Difficulty: ${difficultyTier}${difficultySubLevel ? ` (${difficultySubLevel})` : ''}\n` +
             `Subjects: ${subjects.slice(0, 8).join(', ') || 'mixed'}\n` +
             `Writing options: ${[...questionTypes, ...stemPatterns].join('; ') || 'standard'}\n` +
-            (appliedProfile ? `Build on this existing profile:\n"""\n${appliedProfile.slice(0, 600)}\n"""\n` : '') +
+            (profileDraft.trim() ? `The user's request, which the profile must follow exactly:\n"""\n${profileDraft.trim().slice(0, 600)}\n"""\n` : '') +
+            (appliedProfile ? `Build on this existing profile where it does not conflict with the request:\n"""\n${appliedProfile.slice(0, 600)}\n"""\n` : '') +
             'Write the reusable instruction profile now.',
         }],
       });
@@ -878,14 +916,14 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       if (!clean) throw new Error('The provider returned an empty profile.');
       const name = `${selectedExam.replace('_', '-')} · ${difficultyTier === 'ALL' ? 'mixed' : difficultyTier.toLowerCase()} · AI profile`;
       const created = createProfile({ name, text: clean, exam: selectedExam });
-      setProfileDraft(clean);
+      // The typed draft stays as the user wrote it; the generated text is applied and saved.
       setProfileName(created.name);
       setAppliedProfile(clean);
       setActiveProfileId(created.id);
       setActiveProfileIdState(created.id);
       setShowSaveRow(false);
       refreshProfiles();
-      setProfileNotice(`Generated and saved “${created.name}”. Applied to the next generation.`);
+      setProfileNotice(`Generated and saved “${created.name}” and applied to the next generation. Your typed draft is unchanged; press Apply to use it instead.`);
     } catch (err: any) {
       setProfileNotice(err?.message || 'Could not generate a profile.');
     } finally {
@@ -924,7 +962,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   };
 
   const subjectsChosen = effectiveKeys.length;
-  const canLaunch = subjectsChosen > 0;
+  const canLaunch = subjectsChosen > 0 || customTopic.length > 0;
   const activeModalRow = topicModal ? subjectList.find((r) => r.key === topicModal.key) ?? null : null;
   const durationMin = Math.max(1, Math.round(questionCount * 1.1));
 
@@ -1047,6 +1085,21 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 the note's citation is carried into the generated question.
               </p>
             )}
+          </Row>
+
+          <Row label="Request a topic" hint={customTopic ? 'overrides the speciality pick' : 'optional'}>
+            <input
+              type="text"
+              value={topicRequest}
+              onChange={(e) => { setTopicRequest(e.target.value); setGenState((st) => ({ ...st, error: null })); }}
+              disabled={genState.busy}
+              maxLength={120}
+              placeholder='e.g. "lung carcinoma", "lung chapter", "diabetic ketoacidosis"'
+              className="w-full rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-[#0f8b8d] disabled:opacity-50"
+            />
+            <p className="mt-1 text-[10px] text-slate-500">
+              Type any topic, chapter or condition and get MCQs on it without choosing a speciality. Clear the box to go back to speciality choices.
+            </p>
           </Row>
 
           <div id="speciality-picker">
@@ -1479,9 +1532,15 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                   : providerKnownDown
                     ? `${activeProvider} is signed out — reconnect it to generate.`
                     : canLaunch
-                      ? `${questionCount} questions across ${subjectsChosen} ${selectedExam === 'AMC_CAT' ? 'domains' : 'specialities'} and ${totalChosenSubtopicsCount} topics.`
+                      ? `${questionCount} questions across ${subjectsChosen} ${selectedExam === 'AMC_CAT' ? 'domains' : 'specialities'} and ${totalChosenSubtopicsCount} topics. Expect about ${Math.max(1, Math.round(questionCount * 0.15))} min (estimate: about 9 s per question, written in parallel).`
                       : 'Select at least one speciality (or choose All) to build a module.'}
               </p>
+            )}
+
+            {heldBackNote && (
+              <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[10px] leading-relaxed">
+                {heldBackNote}
+              </div>
             )}
 
             {genState.error && (

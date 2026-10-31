@@ -5,6 +5,30 @@ import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } f
 
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
+import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
+
+/**
+ * Shape of each item by its position in the set: mostly single best answer, one in four asks which
+ * option is incorrect or NOT true, and only one in eight is a numbered-statements item.
+ */
+const SINGLE_BEST_ANSWER = 'Use a single best answer lead-in (diagnosis, next step, drug of choice or investigation). Do not use a numbered statements list.';
+
+function itemShape(idx: number, exam: ExamType): string {
+  // NEET-PG and AMC CAT papers are single-best-answer throughout (recall papers, sample items);
+  // only INI-CET mixes in statement and incorrect-option items.
+  if (exam !== 'INI_CET') return SINGLE_BEST_ANSWER;
+  const slot = idx % 8;
+  if (slot === 2 || slot === 6) return 'Ask which option is INCORRECT, FALSE or NOT true; exactly one option is the answer.';
+  if (slot === 4) return 'Use a single best answer lead-in such as "Which is the most appropriate ...?". Do not use a numbered statements list.';
+  if (slot === 7) return 'This item may use a numbered statements list (1, 2, 3, 4) with "1 and 3 only"-style options.';
+  return 'Use a single best answer lead-in (diagnosis, next step, drug of choice or investigation). Do not use a numbered statements list.';
+}
+
+/** Splits a subtopic such as "Anticancer Chemotherapy: Alkylating Agents, Antimetabolites & MAbs" into its parts. */
+function focusParts(subtopic: string): string[] {
+  const after = subtopic.includes(':') ? subtopic.split(':').slice(1).join(':') : subtopic;
+  return after.split(/,|&| and /).map((s) => s.trim()).filter(Boolean);
+}
 export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'opencode' | 'nvidia';
 
 export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia'];
@@ -262,12 +286,12 @@ const EXAM_PATTERNS: Record<ExamType, { name: string; opts: number; pat: string 
   NEET_PG: {
     name: 'NEET PG',
     opts: 4,
-    pat: "NEET PG (NBEMS) pattern. Exactly 4 options (A-D), one correct; +4 for correct, -1 for wrong. Mostly 2-5 line clinical vignettes giving age, sex, presenting complaint, key examination findings and results, ending with ONE lead-in such as 'What is the most likely diagnosis?', 'What is the next best step in management?', 'What is the investigation of choice?', 'What is the drug of choice?' or 'Identify the structure/condition shown'. Mix in one-liner factual recall items, about one in five image-based items (describe the X-ray, CT, histology slide, instrument, ECG or clinical photo finding in words, then ask to identify it), integrated items linking two subjects, and PSM/biostatistics calculations where relevant. Options must be homogeneous and close; avoid 'all of the above', 'none of the above' and 'all except' wording.",
+    pat: "NEET PG (NBEMS) pattern. Exactly 4 options (A-D), one correct; +4 for correct, -1 for wrong. Mostly 2-5 line clinical vignettes giving age, sex, presenting complaint, key examination findings and results, ending with ONE lead-in such as 'What is the most likely diagnosis?', 'What is the next best step in management?', 'What is the investigation of choice?', 'What is the drug of choice?' or 'Identify the structure/condition shown'. Mix in one-liner factual recall items, about one in five image-based items (describe the X-ray, CT, histology slide, instrument, ECG or clinical photo finding in words, then ask to identify it), integrated items linking two subjects, and PSM/biostatistics calculations where relevant. Every item is single best answer: no numbered-statement, match-the-following or assertion-reason items. Options must be homogeneous and close; avoid 'all of the above', 'none of the above' and 'all except' wording.",
   },
   INI_CET: {
     name: 'INI-CET',
     opts: 4,
-    pat: "INI-CET (AIIMS) pattern. Exactly 4 options (A-D); +1 correct, -1/3 wrong. About half single-best-answer clinical vignettes and half analytical formats: multiple-statement items ('Which of the following statements is/are correct? 1. ... 2. ... 3. ... 4. ...' with options such as '1 and 3 only', '2, 3 and 4 only'), match-the-following (List I with List II, options as code combinations like 'A-2, B-4, C-1, D-3'), assertion-reason (Assertion A / Reason R with the four standard options), arrange-in-correct-sequence, and recent-advances or guideline facts. Image-heavy topics describe the image in words. Distractors must be very close; elimination should be hard.",
+    pat: "INI-CET (AIIMS) pattern. Exactly 4 options (A-D); +1 correct, -1/3 wrong. Most items (about seven in eight) are single-best-answer items: clinical vignettes, drug of choice, next step, or factual recall. About one item in five asks which option is INCORRECT, FALSE or NOT true (for example 'Which of the following is NOT a feature of ...?'). Numbered multiple-statement items ('Which of the following statements is/are correct? 1. ... 2. ... 3. ... 4. ...' with options such as '1 and 3 only', '2, 3 and 4 only') are rare, at most one item in eight. Match-the-following (List I with List II, options as code combinations like 'A-2, B-4, C-1, D-3'), assertion-reason (Assertion A / Reason R with the four standard options), arrange-in-correct-sequence, and recent-advances or guideline facts. Image-heavy topics describe the image in words. Distractors must be very close; elimination should be hard.",
   },
   AMC_CAT: {
     name: 'AMC CAT MCQ',
@@ -514,6 +538,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   let stopped = false;
   let failure: string | null = null;
   const seenStems = new Set<string>();
+  const acceptedStems: string[] = [];
   const stemKey = (stem: string) =>
     stem.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 140);
 
@@ -570,13 +595,18 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }));
 
   // ---------- Step 3: Single-question generation ----------
-  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number): Promise<ClinicalQuestion | null> => {
+  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string): Promise<ClinicalQuestion | null> => {
     if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
     const prompt = [
       `Write ONE exam-standard MCQ for ${pattern.name}.`,
       `Subject: ${topic.subject}`,
       `Subtopic: ${topic.subtopic}`,
+      // Rotate the set across the subtopic's parts (drug classes, systems) so one regimen
+      // is not written again and again.
+      focus ? `Focus this item on: ${focus}. Use a different drug, regimen or scenario from the usual textbook example.` : '',
+      shape ?? '',
+      'Make the four options similar in length and detail. The correct option must not be the longest or the most detailed.',
       `Difficulty: ${topic.difficultyTier}. ${TIER_BEHAVIOUR[topic.difficultyTier]}`,
       pattern.pat,
       questionTypes?.length ? `Question type focus: ${questionTypes.join('; ')}.` : '',
@@ -610,10 +640,14 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const q = buildQuestion(parsed, exam, [{ subject: topic.subject, subtopic: topic.subtopic }], topic.difficultyTier, difficultySubLevel, pattern.opts);
         if (!q) return null;
 
-        // Dedup against already-accepted questions.
+        // Dedup against already-accepted questions: exact stems, then near-identical scenarios
+        // (same patient and regimen with the words reshuffled).
         const key = stemKey(q.stem);
         if (seenStems.has(key)) return null;
+        const fullStem = toBenchItem(q).stem;
+        if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) return null;
         seenStems.add(key);
+        acceptedStems.push(fullStem);
 
         // Attach image if this item actually asked for one. Previously this read
         // `!q.figureQuery` and then searched with `q.figureQuery || ''` — an empty
@@ -653,7 +687,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // Use a completion counter that updates progress as each question finishes.
   let completedCount = 0;
   const questionPromises = topics.map((topic, idx) => {
-    return generateSingleQuestion(topic, 0).then((q) => {
+    const parts = focusParts(topic.subtopic);
+    const focus = parts.length > 1 ? parts[idx % parts.length] : undefined;
+    return generateSingleQuestion(topic, 0, focus, itemShape(idx, exam)).then((q) => {
       // Update progress as each question completes (not after all finish).
       completedCount += 1;
       if (q) {

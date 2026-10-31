@@ -622,11 +622,11 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                   />
                 </div>
                 <div className={`mt-1 flex justify-between font-mono text-[11px] ${t.dim}`}>
-                  <span>Question 1</span>
+                  <span>1</span>
                   <span className={`font-semibold ${t.accentCyan}`}>
                     Q {currentIndex + 1} · {answeredCount} of {totalQuestions} answered ({progressPct}%)
                   </span>
-                  <span>Question {totalQuestions}</span>
+                  <span>{totalQuestions}</span>
                 </div>
               </div>
             </div>
@@ -692,13 +692,15 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
 
               {/* Stem — deliberately smaller than the vignette */}
               <div>
-                <h2 className={`flex items-start gap-2 text-[13px] font-bold leading-snug tracking-tight sm:text-sm ${t.title}`}>
-                  <span className={`mt-0.5 font-mono text-xs ${t.accent}`}>Q{currentIndex + 1}.</span>
-                  <span>{questionPrompt}</span>
+                <h2 className={`flex items-start gap-3 text-[15px] font-semibold leading-relaxed sm:text-base ${t.title}`}>
+                  <span className={`mt-0.5 shrink-0 rounded-md border px-1.5 py-0.5 font-mono text-[11px] font-bold ${t.vignetteLabel}`}>
+                    Q{currentIndex + 1}
+                  </span>
+                  <span className="min-w-0">{questionPrompt}</span>
                 </h2>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className={`mt-1 block font-mono text-[10px] uppercase tracking-wider ${t.dim}`}>
-                    Select one option from below:
+                <div className="flex flex-wrap items-center justify-between gap-2 pl-0 sm:pl-12">
+                  <span className={`mt-2 block font-mono text-[10px] uppercase tracking-wider ${t.dim}`}>
+                    Select one option from below
                   </span>
                   {isFlagged && (
                     <span
@@ -711,7 +713,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
               </div>
 
               {/* Options */}
-              <div className="space-y-3">
+              <div className="space-y-2.5">
                 {currentQ.options.map((opt) => {
                   const picked = selectedAnswer === opt.id;
                   const correct = currentQ.correctOption === opt.id;
@@ -734,18 +736,18 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                       key={opt.id}
                       onClick={() => handleSelectOption(opt.id)}
                       disabled={isLocked}
-                      className={`group flex w-full flex-col gap-2 rounded-xl p-3.5 text-left transition ${shell} ${
+                      className={`group flex w-full flex-col gap-2 rounded-xl px-4 py-3.5 text-left transition ${shell} ${
                         isLocked ? 'cursor-default' : 'cursor-pointer'
                       }`}
                     >
                       <div className="flex items-center justify-between gap-3">
-                        <div className="flex min-w-0 items-center gap-3.5">
+                        <div className="flex min-w-0 items-center gap-4">
                           <div
-                            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg font-mono text-xs font-bold ${tile}`}
+                            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg font-mono text-sm font-bold ${tile}`}
                           >
                             {opt.id}
                           </div>
-                          <div className={`text-sm leading-snug ${label}`}>{opt.text}</div>
+                          <div className={`text-[15px] leading-relaxed ${label}`}>{opt.text}</div>
                         </div>
                         {showCorrect && (
                           <div className="flex shrink-0 items-center gap-1.5 pr-1">
