@@ -144,8 +144,10 @@ export const TopBar: React.FC<TopBarProps> = ({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && searchVal.trim()) {
+      // The header search is a clinical-disease search; it belongs to the Clinical
+      // Evidence Browser. (It previously also fired a navigation to the PDF Reader,
+      // which is now hidden — sending the user to a hidden screen.)
       onSearchSubmit(searchVal);
-      onNavigate('pdf-reader');
     }
   };
 

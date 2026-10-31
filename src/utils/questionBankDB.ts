@@ -198,13 +198,18 @@ export function validateAndParseBankJSON(jsonString: string, bankId: BankId): Pa
     }
     seenAlphanumeric.add(normalizedKey);
 
-    // 6. Image only if it starts with data:image/(jpeg|png|webp);base64, else ignore
+    // 6. Image: accept what this app actually produces. Image-first questions carry the
+    // local proxy path ("/api/images/proxy?u=…") — the previous rule only allowed
+    // data:image/…;base64, so it silently STRIPPED the image off every image-first
+    // question on import. Also accept absolute http(s) images and inline base64, while
+    // still rejecting anything that is not a usable image reference.
     let validImage: string | undefined = undefined;
-    if (
-      typeof item.image === 'string' &&
-      /^data:image\/(jpeg|png|webp);base64,/i.test(item.image)
-    ) {
-      validImage = item.image;
+    if (typeof item.image === 'string' && item.image.trim()) {
+      const img = item.image.trim();
+      const isProxyOrLocal = /^\/api\/images\/(proxy|bank)\?/i.test(img) || /^\/[^<>"]+\.(jpe?g|png|webp|gif)(\?|$)/i.test(img);
+      const isRemote = /^https?:\/\/[^<>"]+\.(jpe?g|png|webp|gif)(\?|$)/i.test(img);
+      const isInline = /^data:image\/(jpeg|png|webp|gif);base64,/i.test(img);
+      if (isProxyOrLocal || isRemote || isInline) validImage = img;
     }
 
     const cleanQuestion: BankQuestion = {

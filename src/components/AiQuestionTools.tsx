@@ -8,6 +8,15 @@ import type { ClinicalQuestion } from '../types.ts';
 import { aiComplete, getActiveProvider, getEffectiveModel, NOT_CONNECTED_MESSAGE } from '../lib/ai.ts';
 import { addUserHighlight, highlightFromAiReply } from '../utils/userHighlightsStore.ts';
 import { RevisionNote, downloadNotesPdf } from './RevisionNote.tsx';
+import {
+  type ExplanationImage,
+  extractImageCue,
+  stripImageCue,
+  resolveExplanationImage,
+  imageCueInstruction,
+  isExplanationImagesEnabled,
+} from '../utils/explanationImages.ts';
+import { ExplanationFigure } from './ExplanationFigure.tsx';
 
 export type AiToolLength = 'Brief' | 'Standard' | 'Detailed';
 
@@ -49,6 +58,10 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
   const [output, setOutput] = useState<{ kind: string; text: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [savedFlags, setSavedFlags] = useState<Partial<Record<'note' | 'topic', boolean>>>({});
+  // The explanation may carry one VERIFIED illustration. It is resolved separately from
+  // the text so a slow vision check never delays the explanation itself.
+  const [figure, setFigure] = useState<ExplanationImage | null>(null);
+  const [figureLoading, setFigureLoading] = useState(false);
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
@@ -63,12 +76,16 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
     setBusy(kind);
     setError(null);
     setSavedFlags({} as Partial<Record<'note' | 'topic', boolean>>);
+    setFigure(null);
+    setFigureLoading(false);
+    const wantImage = kind === 'explain' && isExplanationImagesEnabled();
     try {
       let prompt: string;
       let system: string;
       if (kind === 'explain') {
         system = 'You are a rigorous clinical exam tutor. Explain exactly what is asked; be accurate, cite standard textbooks/guidelines. Plain readable text (may use **bold** and short lists). No JSON.';
         prompt = buildExplanationPrompt(question, userChoice, length);
+        if (wantImage) prompt += imageCueInstruction();
       } else if (kind === 'note') {
         system = 'Write a compact revision note card for a postgraduate medical exam student. Start with a one-line bold title, then 3-6 high-yield bullet points (fact + mechanism/discriminator), then one "High-yield:" line, then a "Mnemonic:" line if natural, then a citation. Keep it dense, no JSON.';
         prompt = buildExplanationPrompt(question, undefined, 'Brief') + '\n\nDistill this into a revision NOTE CARD (not an explanation).';
@@ -84,10 +101,15 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
         model: getEffectiveModel(provider),
       });
 
+      // The model may end with an `IMAGE_CUE:` line describing a figure that would help.
+      // Strip it: it is a machine directive, never learner-facing content.
+      const cue = extractImageCue(text);
+      const shownText = stripImageCue(text);
+
       // question notes save immediately to the highlights store
       if (kind === 'note') {
         addUserHighlight(highlightFromAiReply({
-          quote: text,
+          quote: shownText,
           subject: question.subject,
           subtopic: question.subtopic,
           citation: `AI note · ${question.subtopic}`,
@@ -96,8 +118,18 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
       }
 
       if (mountedRef.current) {
-        setOutput({ kind, text });
+        setOutput({ kind, text: shownText });
         if (kind === 'note') setSavedFlags((prev) => ({ ...prev, note: true }));
+      }
+
+      // Resolve the illustration AFTER the explanation is already on screen.
+      if (kind === 'explain' && cue && wantImage) {
+        if (mountedRef.current) setFigureLoading(true);
+        const image = await resolveExplanationImage(cue, question.subject);
+        if (mountedRef.current) {
+          setFigure(image);
+          setFigureLoading(false);
+        }
       }
     } catch (err: any) {
       const message = err?.message || 'AI request failed.';
@@ -210,6 +242,9 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
               text={output.text}
               topic={`${question.subject} ${question.subtopic}`}
             />
+            {output.kind === 'explain' && (figure || figureLoading) && (
+              <ExplanationFigure image={figure} loading={figureLoading} dark={dark} />
+            )}
           </div>
           <div className={`flex items-center justify-between border-t px-2.5 py-1.5 ${dark ? 'border-slate-200 bg-slate-50' : 'border-slate-100'}`}>
             <span className="font-mono text-[9px] text-slate-400">

@@ -23,6 +23,7 @@ import { INITIAL_QUESTIONS } from '../data/mockClinicalData.ts';
 import { AiQuestionTools } from './AiQuestionTools.tsx';
 import { FlashcardReviewPanel } from './FlashcardReviewPanel.tsx';
 import { QuestionCaptureModal } from './QuestionCaptureModal.tsx';
+import { ZoomableImage } from './ZoomableImage.tsx';
 import {
   capturedToClinicalQuestion,
   listCapturedQuestions,
@@ -399,10 +400,12 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                     {/* Embedded clinical image if present */}
                     {q.image && (
                       <div className="mt-3 p-3 bg-slate-50 rounded-xl border border-slate-200 flex flex-col sm:flex-row items-center gap-4">
-                        <img 
-                          src={q.image} 
-                          alt={q.imageCaption || 'Clinical image'} 
+                        <ZoomableImage
+                          src={q.image}
+                          alt={q.imageCaption || 'Clinical image'}
                           className="w-32 h-24 object-contain bg-white rounded-lg border border-slate-300 shadow-sm"
+                          wrapperClassName="shrink-0"
+                          caption={q.imageCaption || undefined}
                         />
                         <div className="flex-1 text-left">
                           <span className="text-[11px] font-bold text-slate-800 block leading-snug">

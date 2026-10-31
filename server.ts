@@ -18,6 +18,8 @@ import {
 import { aiLog } from './server/oauth.mjs';
 import { research as webResearch } from './server/web.mjs';
 import { searchImages, fetchImage, REFERENCE_SOURCES } from './server/images.mjs';
+import { buildImageBank, loadImageBank, queryImageBank, getBankImage, bankStats, rejectImage, searchBankByText } from './server/imageBank.mjs';
+import { generateQuestionFromImage } from './server/visionQuestion.mjs';
 import {
   runQaPipeline,
   listExamProfiles,
@@ -82,6 +84,38 @@ function geminiKey(): string {
 
 function nvidiaKey(): string {
   return (process.env.NVIDIA_API_KEY || '').trim();
+}
+
+/**
+ * Map the app's effort levels onto NVIDIA's chat-template reasoning controls.
+ *
+ * This matters more than it looks. Both Nemotron 3.5 Super VL and the Ultra model are
+ * REASONING models: their hidden reasoning trace is billed against `max_tokens`, so a
+ * modest cap gets spent entirely on thinking and the request comes back with
+ * finish_reason:"length" and EMPTY content. The model cards expose the fix via
+ * chat_template_kwargs: `enable_thinking` toggles the trace and `medium_effort` trims it.
+ *
+ * Effort therefore maps to a real quality/latency/token trade-off instead of being
+ * accepted and silently ignored (which is what used to happen).
+ */
+function nvidiaReasoningKwargs(effort?: string): Record<string, unknown> {
+  const level = String(effort || '').trim().toLowerCase();
+  if (level === 'min' || level === 'minimal') return { enable_thinking: false };
+  if (level === 'low' || level === 'brief') return { enable_thinking: true, medium_effort: true };
+  if (level === 'high') return { enable_thinking: true };
+  if (level === 'ultra') return { enable_thinking: true };
+  // Medium / Standard / unset: a trace is still wanted, but not an unbounded one.
+  return { enable_thinking: true, medium_effort: true };
+}
+
+/** Settings that let a long answer finish instead of being truncated mid-thought. */
+function nvidiaTokenBudget(effort?: string): number {
+  const level = String(effort || '').trim().toLowerCase();
+  if (level === 'min' || level === 'minimal') return 2048;
+  if (level === 'low' || level === 'brief') return 4096;
+  if (level === 'high') return 16384;
+  if (level === 'ultra') return 24000;
+  return 8192;
 }
 
 // Gemini client is created lazily and refreshed if the key changes, so a key pasted
@@ -410,27 +444,44 @@ async function runCompletion(opts: {
       model: model_,
       messages: payloadMessages,
       temperature: 0.7,
+      // Let a long clinical answer finish rather than starving the reasoning trace.
+      max_tokens: nvidiaTokenBudget(effort),
+      chat_template_kwargs: nvidiaReasoningKwargs(effort),
       ...(json ? { response_format: { type: 'json_object' } } : {}),
     });
-    const r = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${key}`,
-      },
-      body: payload,
-      ...(signal ? { signal } : {}),
-    });
-    const raw = await r.text();
+    // NVIDIA's endpoint returns sporadic 500/503s that succeed on an immediate retry.
+    // Without this, one upstream blip surfaced to the learner as "AI request failed
+    // (HTTP 502)" and discarded an otherwise fine answer. Bounded, and never retries a
+    // 4xx (those are real: bad key, bad model, rate limit we should surface).
+    let httpRes: any = null;
+    let raw = '';
     let body: any = {};
-    try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
-    if (!r.ok) {
-      aiLog({ provider: 'nvidia', model: model_, status: r.status, error: true });
-      throw new ApiError(`NVIDIA: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      httpRes = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${key}`,
+        },
+        body: payload,
+        ...(signal ? { signal } : {}),
+      });
+      raw = await httpRes.text();
+      body = {};
+      try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+      if (httpRes.ok || httpRes.status === 429 || httpRes.status < 500 || attempt === maxAttempts) break;
+      aiLog({ provider: 'nvidia', model: model_, status: httpRes.status, error: true, retry: attempt });
+      await new Promise((resolve) => setTimeout(resolve, 1200 * attempt));
+    }
+    if (!httpRes || !httpRes.ok) {
+      const status = httpRes?.status ?? 502;
+      aiLog({ provider: 'nvidia', model: model_, status, error: true });
+      throw new ApiError(`NVIDIA: ${providerErrorText(body, status)}`, status === 401 ? 401 : 502);
     }
     const content = body?.choices?.[0]?.message?.content;
     const text = typeof content === 'string' ? content : '';
-    aiLog({ provider: 'nvidia', model: model_, status: r.status, text_len: text.length, json: !!json });
+    aiLog({ provider: 'nvidia', model: model_, status: httpRes.status, text_len: text.length, json: !!json });
     if (!text.trim()) {
       throw new ApiError(`NVIDIA returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || 'unknown'}).`, 502);
     }
@@ -1346,9 +1397,11 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
   // The client sends its ACTIVE provider/model; if absent, resolve any connected provider.
   let provider: string = typeof body.provider === 'string' ? body.provider : '';
   if (!provider) {
-    const candidates = ['chatgpt', 'claude', 'grok', 'opencode'];
-    provider =
-      candidates.find((p) => isProviderConnected(p)) || (isProviderConnected('gemini') ? 'gemini' : '');
+    // Include every provider the app actually supports — this list previously omitted
+    // `nvidia`, so a server-side fallback could never select the NVIDIA engine even when
+    // it was the only connected provider.
+    const candidates = ['nvidia', 'chatgpt', 'claude', 'grok', 'opencode', 'gemini'];
+    provider = candidates.find((p) => isProviderConnected(p)) || '';
   }
   if (!provider) {
     return res.status(401).json({ error: 'No AI provider is connected yet. Connect an AI provider in Settings → AI Subscription Hub.' });
@@ -1370,6 +1423,14 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
     '{"reply": "your main markdown answer", "reasoningSteps": [{"step": "short step name", "detail": "one or two sentences"}], "pearl": "one-line high-yield board pearl or empty string", "citations": ["textbook / guideline citations"], "suggestedFollowups": ["2-3 probing follow-up questions the resident could ask next"]}',
     '- reasoningSteps: 2-5 steps when the answer involves reasoning; may be empty for simple facts.',
     '- "reply" must contain the complete answer itself, not a summary of the other fields.',
+    // The reply is rendered as markdown. Without this the model often returns one unbroken
+    // block of prose, which reads as a dense wall of text in the chat bubble.
+    '- Format "reply" for readability: separate distinct topics or stages into their own paragraphs using \\n\\n, and use a short markdown heading or a "- " bullet list where the content is genuinely a list (e.g. investigations, differentials, management steps). Do not return one unbroken paragraph.',
+    // Optional illustration request. The model DESCRIBES the figure it wants; it must never
+    // choose or link an image, because the server has to vision-verify whatever is shown.
+    body.requestImage
+      ? '- If (and only if) a clinical figure would materially help, make the LAST line of "reply" exactly: IMAGE_CUE: <short description of the single most useful image, e.g. "chest X-ray of tension pneumothorax">. Describe only the finding and modality — never output a URL, filename or markdown image. If no figure would genuinely help, make the last line: IMAGE_CUE: NONE'
+      : '',
   ]
     .filter(Boolean)
     .join('\n');
@@ -1455,6 +1516,302 @@ app.get('/api/images/proxy', async (req: Request, res: Response) => {
     return res.send(buffer);
   } catch (err: any) {
     return res.status(502).json({ error: err?.message || 'Could not load that image.' });
+  }
+});
+
+// Vision check: does `imageUrl` actually show `claim`? Shared by the /verify route and
+// the bank harvest (so both use identical strictness). Fail-closed: any error, missing
+// key, unsupported type or non-answer yields pass=false — an unverified picture is NEVER
+// attached, the question stays text-only instead.
+async function visionVerify(
+  imageUrl: string,
+  claim: string,
+  modality: string,
+  key: string,
+  attempt = 0,
+): Promise<{ pass: boolean; reason: string; debug?: { raw: string; finish?: string } }> {
+  const { buffer, type } = await fetchImage(imageUrl);
+  // The vision API accepts JPEG/PNG/WebP. GIF (and anything else) is rejected with
+  // HTTP 415, so treat it as unverifiable rather than attaching it blind.
+  if (!/^image\/(jpeg|png|webp)$/i.test(type)) {
+    return { pass: false, reason: `Unsupported image type (${type}) — image skipped.` };
+  }
+  const dataUrl = `data:${type};base64,${buffer.toString('base64')}`;
+  const model_ = process.env.VISION_MODEL || DEFAULT_MODELS.nvidia;
+  const instruction = [
+    'One image is shown, attached to a medical exam question.',
+    `The question claims the image shows: "${claim}"${modality ? ` (modality: ${modality})` : ''}.`,
+    'Look ONLY at the pixels. Decide:',
+    '1. Does this image actually depict that finding / condition / diagnosis?',
+    '2. Is the modality consistent (an ECG is not a photo; a chest X-ray is not a histology slide)?',
+    'Set pass=true ONLY if you can actually see the claimed finding in THIS image. If the image is unrelated, a random photo, a chart, text, a different body part, or you are unsure, set pass=false.',
+    'Answer with ONLY this JSON object and nothing else: {"pass": true, "reason": "one short sentence"}',
+  ].join('\n');
+  const payload = JSON.stringify({
+    model: model_,
+    messages: [
+      { role: 'system', content: 'You are a strict medical-image verifier. Reply with only a JSON object.' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: instruction },
+          { type: 'image_url', image_url: { url: dataUrl } },
+        ],
+      },
+    ],
+    temperature: 0,
+    // This is a reasoning model: a small budget is spent entirely on hidden
+    // reasoning (finish_reason "length") and returns empty content. Give it room.
+    max_tokens: Number(process.env.VISION_MAX_TOKENS || 2048),
+    // A yes/no verification needs no deliberation at all, and the reasoning trace was
+    // what silently ate the budget and produced empty verdicts. Turn it off outright.
+    chat_template_kwargs: { enable_thinking: false },
+    stream: false,
+  });
+  const r = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+    body: payload,
+    // The reasoning model occasionally takes a very long time on a hard image; too
+    // short a timeout silently discards a perfectly good image. Overridable.
+    signal: AbortSignal.timeout(Number(process.env.VISION_TIMEOUT_MS || 180000)),
+  });
+  const raw = await r.text();
+  let body: any = {};
+  try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON */ }
+  if (!r.ok) {
+    // A 5xx here is an upstream blip, not a verdict on the image. Retry once so a good
+    // image is not discarded (and forced to text-only) because NVIDIA hiccuped.
+    if (r.status >= 500 && attempt < 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      return visionVerify(imageUrl, claim, modality, key, attempt + 1);
+    }
+    aiLog({ provider: 'nvidia', model: model_, status: r.status, error: true, route: 'images/verify' });
+    return { pass: false, reason: `Vision check failed (HTTP ${r.status}) — image skipped.` };
+  }
+  const msg = body?.choices?.[0]?.message;
+  const content = msg?.content;
+  let text = typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content.map((p: any) => (typeof p === 'string' ? p : p?.text || '')).join('')
+      : '';
+  // Some reasoning models put the answer (or everything) in reasoning_content.
+  if (!text.trim() && typeof msg?.reasoning_content === 'string') text = msg.reasoning_content;
+  const finish = body?.choices?.[0]?.finish_reason;
+  // Vision models sometimes emit almost-JSON (an unquoted string value, stray prose).
+  // This verdict is only a boolean + a short sentence, so extract both tolerantly
+  // rather than throwing away a real answer because of one missing quote.
+  const passMatch = text.match(/"pass"\s*:\s*(true|false)/i);
+  const reasonMatch = text.match(/"reason"\s*:\s*"?([^"}\n]+)"?/i);
+  const parsed = parseJsonBlock(text);
+  const pass = parsed?.pass === true || (!parsed && passMatch?.[1]?.toLowerCase() === 'true');
+  const parsedReason = typeof parsed?.reason === 'string' && parsed.reason.trim()
+    ? parsed.reason.trim()
+    : reasonMatch?.[1]?.trim();
+  const reason = parsedReason
+    ? parsedReason.slice(0, 240)
+    : pass
+      ? 'Verified.'
+      : finish === 'length'
+        ? 'Vision model ran out of tokens before answering — image skipped.'
+        : 'Model did not confirm the claimed finding.';
+  aiLog({ provider: 'nvidia', model: model_, status: r.status, route: 'images/verify', pass, finish, text_len: text.length });
+  return process.env.VISION_DEBUG
+    ? { pass, reason, debug: { raw: text.slice(0, 1500), finish } }
+    : { pass, reason };
+}
+
+// POST /api/images/verify -> vision check BEFORE an image may be attached.
+// The old pipeline matched a figure's *caption/title* words, so an unrelated picture
+// whose caption happened to reuse the right words (a tangerine for "hazy cornea")
+// still passed. This actually looks at the pixels with the connected NVIDIA vision
+// model and asks whether the image shows what the question claims.
+app.post('/api/images/verify', async (req: Request, res: Response) => {
+  const imageUrl = typeof req.body?.imageUrl === 'string' ? req.body.imageUrl : '';
+  const claim = typeof req.body?.claim === 'string' ? req.body.claim.trim().slice(0, 800) : '';
+  const modality = typeof req.body?.modality === 'string' ? req.body.modality.trim().slice(0, 40) : '';
+  if (!imageUrl || !claim) {
+    return res.status(400).json({ error: 'imageUrl and claim are required.' });
+  }
+  const key = nvidiaKey();
+  if (!key) {
+    return res.json({ pass: false, reason: 'No vision provider connected — image skipped.' });
+  }
+  try {
+    const verdict = await visionVerify(imageUrl, claim, modality, key);
+    return res.json(verdict);
+  } catch (err: any) {
+    return res.json({ pass: false, reason: err?.message || 'Vision check failed — image skipped.' });
+  }
+});
+
+// GET /api/images/bank -> curated bank statistics (for the settings/status panel).
+app.get('/api/images/bank', (_req: Request, res: Response) => {
+  try {
+    return res.json({ success: true, ...bankStats() });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Could not read the image bank.' });
+  }
+});
+
+// POST /api/images/bank/build -> harvest the curated seeds into the bank (idempotent).
+// Pass { verify: true } to vision-confirm each candidate at harvest time, so the bank
+// only ever holds images that genuinely show the claimed finding.
+app.post('/api/images/bank/build', async (req: Request, res: Response) => {
+  try {
+    const wantVerify = req.body?.verify === true;
+    const key = wantVerify ? nvidiaKey() : null;
+    const summary = await buildImageBank({
+      limitPerSeed: Number(req.body?.limitPerSeed) || 3,
+      verify: wantVerify && key
+        ? async (entry: any) => {
+            const claim = `${entry.ground_truth}${entry.modality ? ` (${entry.modality})` : ''}`;
+            try {
+              const verdict = await visionVerify(entry.imageUrl, claim, entry.modality, key);
+              return verdict.pass === true;
+            } catch {
+              return false;
+            }
+          }
+        : undefined,
+    });
+    return res.json({ success: true, ...summary, verified: Boolean(wantVerify && key) });
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'Image-bank build failed.' });
+  }
+});
+
+// GET /api/images/qa-results -> the last image-first verification RUN (tools/test-image-first.mjs).
+// Lets the Image Question Review page show a real end-to-end run: per-question image,
+// ground truth, verification verdict and the pass/fallback counts.
+app.get('/api/images/qa-results', (_req: Request, res: Response) => {
+  try {
+    const file = path.join(DATA_DIR, 'image-first-results.json');
+    if (!fs.existsSync(file)) return res.json({ success: true, available: false, run: null });
+    const run = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return res.json({ success: true, available: true, run });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Could not read the last image-first run.' });
+  }
+});
+
+// GET /api/images/bank/entry?id=... -> one bank entry (used by the review page).
+app.get('/api/images/bank/entry', (req: Request, res: Response) => {
+  const id = typeof req.query.id === 'string' ? req.query.id : '';
+  const entry = id ? getBankImage(id) : null;
+  if (!entry) return res.status(404).json({ error: 'No bank entry with that id.' });
+  return res.json({ success: true, entry });
+});
+
+// GET /api/images/bank/entries?subject=&modality=&limit= -> browse bank entries.
+app.get('/api/images/bank/entries', (req: Request, res: Response) => {
+  try {
+    const subject = typeof req.query.subject === 'string' ? req.query.subject : undefined;
+    const modality = typeof req.query.modality === 'string' ? req.query.modality : undefined;
+    const limit = Number(req.query.limit) || 6;
+    const rows = subject || modality ? queryImageBank({ subject, modality, limit }) : loadImageBank().slice(0, limit);
+    return res.json({ success: true, total: loadImageBank().length, results: rows });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Could not read the image bank.' });
+  }
+});
+
+// POST /api/images/find-for-explanation -> one VERIFIED illustration for an explanation.
+//
+// Flow (same safety rules as the question pipeline):
+//   1. the model supplies a text CUE only ("chest X-ray of a tension pneumothorax") — it
+//      never writes a URL, so it cannot fabricate or hotlink an image;
+//   2. the cue is matched against the curated bank's trusted metadata;
+//   3. the winner is vision-verified against its OWN ground truth before it is returned.
+// Fail-closed: no cue, no match, no vision provider, or a failed check all return
+// { found: false } and the explanation stays text-only — never an unverified picture.
+app.post('/api/images/find-for-explanation', async (req: Request, res: Response) => {
+  const body = req.body || {};
+  const cue = typeof body.cue === 'string' ? body.cue.trim().slice(0, 300) : '';
+  const subject = typeof body.subject === 'string' ? body.subject : '';
+  if (!cue) return res.json({ found: false, reason: 'No image cue was supplied.' });
+  try {
+    const candidates = searchBankByText(cue, { subject, limit: 4 });
+    if (!candidates.length) {
+      return res.json({ found: false, reason: 'No bank image matches that description.' });
+    }
+    const key = nvidiaKey();
+    if (!key) {
+      return res.json({ found: false, reason: 'No vision provider connected — image skipped.' });
+    }
+    // Try candidates in score order; the first that passes verification wins.
+    for (const entry of candidates) {
+      const claim = `${entry.ground_truth}${entry.modality ? ` (${entry.modality})` : ''}`;
+      let verdict: { pass: boolean; reason: string };
+      try {
+        verdict = await visionVerify(entry.imageUrl, claim, entry.modality, key);
+      } catch (err: any) {
+        verdict = { pass: false, reason: err?.message || 'Vision check failed.' };
+      }
+      if (verdict.pass) {
+        return res.json({
+          found: true,
+          imageId: entry.image_id,
+          // SECURITY/EXAM-INTEGRITY: the ground truth is Omitted from the response the
+          // UI renders up-front. Attribution + licence only; the finding is withheld
+          // because it can be the answer to the very question being explained.
+          imageUrl: entry.previewUrl || entry.imageUrl,
+          source: entry.source,
+          sourceUrl: entry.sourceUrl,
+          licence: entry.licence,
+          attribution: entry.attribution,
+          modality: entry.modality,
+          subject: entry.subject,
+          verification: verdict.reason,
+        });
+      }
+      aiLog({ provider: 'nvidia', route: 'images/find-for-explanation', pass: false, reason: verdict.reason.slice(0, 160), image_id: entry.image_id });
+    }
+    return res.json({ found: false, reason: 'No bank image passed verification for that description.' });
+  } catch (err: any) {
+    return res.json({ found: false, reason: err?.message || 'Image lookup failed.' });
+  }
+});
+
+// POST /api/images/generate-question -> image-first: write an MCQ FROM one bank image.
+// The ground truth comes from the bank (never from the model), so the diagnosis shown
+// by the image is authoritative and the question is built around it.
+app.post('/api/images/generate-question', async (req: Request, res: Response) => {
+  const body = req.body || {};
+  const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl : '';
+  const groundTruth = typeof body.groundTruth === 'string' ? body.groundTruth.trim() : '';
+  const imageId = typeof body.imageId === 'string' ? body.imageId : '';
+  if (!imageUrl || !groundTruth) {
+    return res.status(400).json({ error: 'imageUrl and groundTruth are required.' });
+  }
+  const key = nvidiaKey();
+  if (!key) {
+    return res.status(401).json({ error: notConnectedMessage('nvidia') });
+  }
+  try {
+    const question = await generateQuestionFromImage({
+      imageUrl,
+      groundTruth,
+      modality: typeof body.modality === 'string' ? body.modality : '',
+      subject: typeof body.subject === 'string' ? body.subject : '',
+      exam: typeof body.exam === 'string' ? body.exam : 'NEET_PG',
+      difficultyTier: typeof body.difficultyTier === 'string' ? body.difficultyTier : 'MEDIUM',
+      optionCount: Number(body.optionCount) === 5 ? 5 : 4,
+      apiKey: key,
+      model: typeof body.model === 'string' ? body.model : process.env.VISION_MODEL || DEFAULT_MODELS.nvidia,
+    });
+    return res.json({ success: true, question, model: process.env.VISION_MODEL || DEFAULT_MODELS.nvidia });
+  } catch (err: any) {
+    const msg = String(err?.message || 'Image-first generation failed.');
+    // A model-declared mismatch means this image genuinely does not show the claimed
+    // finding. Remember it, so future runs do not spend another slow vision call on it.
+    const status = msg === 'image_mismatch' ? 422 : 502;
+    if (msg === 'image_mismatch' && imageId) {
+      try { rejectImage(imageId, groundTruth, msg); } catch { /* bookkeeping only */ }
+    }
+    aiLog({ provider: 'nvidia', route: 'images/generate-question', error: true, status, reason: msg.slice(0, 200) });
+    return res.status(status).json({ error: msg });
   }
 });
 
@@ -1574,6 +1931,117 @@ app.post('/api/web/research', async (req: Request, res: Response) => {
   }
 });
 
+// POST /api/exams/dates {exam} -> look for the next sitting's date on the OFFICIAL body
+// only (NBEMS / AIIMS / AMC). Internet-backed, dependency-free.
+//
+// Deliberately conservative: coaching sites and aggregators routinely *guess* dates, and
+// a wrong countdown actively harms a student, so a source is only used if its hostname is
+// on the allowlist below. The route returns candidates WITH their source URL and a
+// confidence tag for the UI to confirm — it never silently decides the date.
+const OFFICIAL_EXAM_SOURCES: Record<string, { label: string; hosts: string[]; queries: string[] }> = {
+  NEET_PG: {
+    label: 'NBEMS (National Board of Examinations)',
+    hosts: ['natboard.edu.in', 'nbe.edu.in'],
+    queries: ['NBEMS NEET-PG exam date notification', 'NEET-PG 2027 information bulletin exam date'],
+  },
+  INI_CET: {
+    label: 'AIIMS (aiimsexams.ac.in)',
+    hosts: ['aiimsexams.ac.in', 'aiims.edu'],
+    queries: ['AIIMS INI-CET exam date notification', 'aiimsexams INI-CET 2027 schedule prospectus'],
+  },
+  AMC_CAT: {
+    label: 'Australian Medical Council (amc.org.au)',
+    hosts: ['amc.org.au'],
+    queries: ['AMC MCQ examination dates', 'AMC CAT MCQ exam dates 2027 schedule'],
+  },
+};
+
+app.post('/api/exams/dates', async (req: Request, res: Response) => {
+  const exam = String(req.body?.exam || '').trim().toUpperCase();
+  const spec = OFFICIAL_EXAM_SOURCES[exam];
+  if (!spec) {
+    return res.status(400).json({ error: 'Unknown exam. Use NEET_PG, INI_CET or AMC_CAT.' });
+  }
+  try {
+    const batches = await Promise.allSettled(spec.queries.map((q) => webResearch(q)));
+    const sources = batches.flatMap((b) => (b.status === 'fulfilled' ? b.value.sources : []));
+
+    // Only keep pages actually hosted by the official body.
+    const official = sources.filter((s: any) => {
+      try {
+        const host = new URL(String(s.url)).hostname.toLowerCase().replace(/^www\./, '');
+        return spec.hosts.some((h) => host === h || host.endsWith(`.${h}`));
+      } catch {
+        return false;
+      }
+    });
+
+    // Harvest date-like strings from the official pages that were reachable.
+    const seen = new Set<string>();
+    const candidates: { iso: string; sourceUrl: string; sourceTitle: string; context: string }[] = [];
+    for (const s of official) {
+      const text = String(s.text || '');
+      for (const m of text.matchAll(/\b(\d{1,2})[\s-](January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\s,-]+(\d{4})\b/g)) {
+        const day = Number(m[1]);
+        const monName = m[2].slice(0, 3).toLowerCase();
+        const months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+        const mi = months.indexOf(monName);
+        if (mi < 0 || day < 1 || day > 31) continue;
+        const d = new Date(Number(m[3]), mi, day, 9, 0);
+        if (Number.isNaN(d.getTime()) || d.getTime() < Date.now()) continue; // only future sittings
+        const iso = d.toISOString();
+        const key = iso.slice(0, 10);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push({
+          iso,
+          sourceUrl: String(s.url),
+          sourceTitle: String(s.title || '').slice(0, 120),
+          context: text.slice(Math.max(0, (m.index || 0) - 60), (m.index || 0) + 90).replace(/\s+/g, ' ').trim(),
+        });
+      }
+    }
+    candidates.sort((a, b) => a.iso.localeCompare(b.iso));
+
+    // The official sites load dates with JavaScript, so often nothing can be read. In
+    // that case the most useful thing we can return is a direct link to the official
+    // page, so the learner can check it in one click instead of hunting for it.
+    const officialLinks = [
+      ...new Map(
+        official
+          .map((s: any) => {
+            try {
+              const host = new URL(String(s.url)).hostname.replace(/^www\./, '');
+              return { host, url: String(s.url), title: String(s.title || '').slice(0, 120) };
+            } catch {
+              return null;
+            }
+          })
+          .filter(Boolean)
+          .map((l: any) => [l.host, l]),
+      ).values(),
+    ].slice(0, 4);
+
+    return res.json({
+      success: true,
+      exam,
+      officialBody: spec.label,
+      officialDomains: spec.hosts,
+      officialPagesFound: official.length,
+      officialLinks,
+      candidates: candidates.slice(0, 6),
+      checkedAt: new Date().toISOString(),
+      note: candidates.length
+        ? 'Dates were read from official pages that were reachable. Confirm before saving.'
+        : official.length
+          ? 'The official page was found, but its dates are loaded with JavaScript, so none could be read. Enter the date manually from the official notice.'
+          : 'No official page could be reached. Enter the date manually from the official notice.',
+    });
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'Could not check exam dates.' });
+  }
+});
+
 // Legacy provider list endpoint, now reporting ONLY real connection state (no latency fakes).
 app.get('/api/providers/status', (req: Request, res: Response) => {
   const customEndpoints = readCustomEndpoints();
@@ -1626,8 +2094,25 @@ async function startServer() {
     });
   }
 
-  const httpServer = app.listen(PORT, '127.0.0.1', () => {
-    console.log(`[Pulse Med Server] Running on http://127.0.0.1:${PORT}`);
+  // Bind to all interfaces so the app is reachable as BOTH http://localhost:PORT
+  // (which browsers may resolve to IPv6 ::1) and http://127.0.0.1:PORT. Binding to
+  // 127.0.0.1 alone made localhost requests fail with ECONNREFUSED / 502 Bad Gateway.
+  // Override with HOST when a specific interface is required.
+  const HOST = process.env.HOST ?? '::';
+  const httpServer = app.listen(PORT, HOST, () => {
+    console.log(`[Pulse Med Server] Running on http://localhost:${PORT} (host: ${HOST})`);
+  });
+  // Some Windows stacks only expose one family per socket; fall back to IPv4 if the
+  // IPv6/dual-stack bind fails outright.
+  httpServer.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EAFNOSUPPORT' || err.code === 'EADDRNOTAVAIL') {
+      console.warn(`[Pulse Med Server] Could not bind ${HOST}, retrying on 127.0.0.1`);
+      app.listen(PORT, '127.0.0.1', () => {
+        console.log(`[Pulse Med Server] Running on http://127.0.0.1:${PORT}`);
+      });
+    } else {
+      throw err;
+    }
   });
   // A 10-question JSON batch can legitimately take minutes. Node's default 300 s
   // requestTimeout would destroy the socket mid-answer (and the client saw that as a

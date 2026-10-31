@@ -13,6 +13,7 @@ import { QuestionBankPracticeView } from './components/QuestionBankPracticeView.
 import { TestRunnerView } from './components/TestRunnerView.tsx';
 import { AITutorView } from './components/AITutorView.tsx';
 import { PDFReaderView } from './components/PDFReaderView.tsx';
+import { ImageQuestionReviewView } from './components/ImageQuestionReviewView.tsx';
 import { JobsBanner } from './components/JobsBanner.tsx';
 import { dueCount } from './utils/flashcardStore.ts';
 import { listCapturedQuestions } from './utils/mistakeStore.ts';
@@ -213,6 +214,14 @@ export default function App() {
       case 'pdf-reader':
         return (
           <PDFReaderView onNavigate={handleNavigate} />
+        );
+      case 'image-review':
+        return (
+          <ImageQuestionReviewView
+            onNavigate={handleNavigate}
+            questions={activeTestQuestions?.filter((q) => Boolean(q.imageId) || Boolean(q.image))}
+            darkMode={isDarkMode}
+          />
         );
       case 'research':
         return (

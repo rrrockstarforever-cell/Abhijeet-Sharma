@@ -11,6 +11,7 @@ export type AppView =
   | 'pdf-reader'
   | 'research'
   | 'settings'
+  | 'image-review'
   | 'qa';
 
 export type DifficultyTier = 'ALL' | 'LOW' | 'MEDIUM' | 'HIGH';
@@ -50,6 +51,15 @@ export interface ClinicalQuestion {
   image?: string;
   imageCaption?: string;
   imageSourceUrl?: string;
+  /** Bank/source id of the attached figure (never an LLM-written URL). */
+  imageId?: string;
+  /** Licence of the attached figure, e.g. "CC BY" / "Public domain". */
+  imageLicence?: string;
+  /** Ground-truth finding the figure was verified to show (the claim checked by vision). */
+  imageGroundTruth?: string;
+  /** Result of the strict vision check that had to pass before this image was attached. */
+  imageVerified?: boolean;
+  imageVerifyReason?: string;
   /** What the model asked to illustrate, used to pick a verified library picture. */
   figureQuery?: string;
   figureModality?: string;

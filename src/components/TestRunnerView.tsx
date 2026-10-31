@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { ClinicalQuestion, AppView, ExamType } from '../types.ts';
 import { AiQuestionTools } from './AiQuestionTools.tsx';
+import { ZoomableImage } from './ZoomableImage.tsx';
 import { addAttempt } from '../utils/attemptStore.ts';
 import { loadRunSession, saveRunSession, signature } from '../utils/sessionStore.ts';
 
@@ -38,6 +39,54 @@ const EXAM_LABEL: Record<ExamType, string> = {
   INI_CET: 'INI-CET',
   AMC_CAT: 'AMC CAT',
 };
+
+/**
+ * EXAM-INTEGRITY: the subtopic is rendered in the runner header BEFORE the student
+ * answers, and for image-first questions it historically held the ground-truth dx (the
+ * answer). Suppress it pre-answer whenever it would give the diagnosis away — this also
+ * protects questions already saved to localStorage from before the fix. Once the answer
+ * is revealed the real subtopic is shown, where it becomes useful revision context.
+ */
+function safeSubtopic(q: ClinicalQuestion | undefined, revealed: boolean): string {
+  const sub = (q?.subtopic || '').trim();
+  if (revealed) return sub || 'Clinical image';
+  if (!sub) return 'Clinical image';
+  const answer = (q?.options?.find((o) => o.id === q.correctOption)?.text || '').trim().toLowerCase();
+  const hay = sub.toLowerCase();
+  // Leaks if the subtopic contains the correct option text, or vice versa.
+  if (answer && (answer.includes(hay) || hay.includes(answer))) return q?.figureModality ? `${q.figureModality} interpretation` : 'Image interpretation';
+  return sub;
+}
+
+/**
+ * EXAM-INTEGRITY: the image header must never name the diagnosis. Captions written by
+ * earlier versions of the app were stored as "PANCREATITIS — Hellerhoff", i.e. the answer
+ * itself, and they persist in localStorage — so a render-time guard is required, not just
+ * a safer producer. Any caption segment that overlaps the ground truth, the subtopic or
+ * the correct option is dropped, as is the licence (shown separately from the trusted
+ * field, which also stops the licence appearing twice).
+ */
+function safeImageCaption(q: ClinicalQuestion | undefined, revealed: boolean): string {
+  if (!q?.image) return 'Clinical image';
+  if (!revealed) return 'Clinical image';
+  const raw = (q?.imageCaption || '').trim();
+  if (!raw) return 'Clinical image';
+  const norm = (s: string) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const leaks = [q.imageGroundTruth, q.subtopic, q.options?.find((o) => o.id === q.correctOption)?.text]
+    .map((s) => norm(s ?? ''))
+    .filter((s) => s.length >= 4);
+  const kept = String(raw)
+    .split(/[·•|—–;]| - |,/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .filter((seg) => {
+      if (/^(cc0|cc\s|creative commons|public domain|pd|all rights|©|\d)/i.test(seg)) return false;
+      const n = norm(seg);
+      if (!n) return false;
+      return !leaks.some((l) => l.includes(n) || (n.length >= 4 && n.includes(l)));
+    });
+  return kept.join(' · ') || 'Clinical image';
+}
 
 /**
  * Every colour used by the runner lives here, once per theme. Keeping the two
@@ -393,7 +442,6 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
   const examLabel = EXAM_LABEL[(currentQ?.examType ?? 'NEET_PG') as ExamType] ?? 'NEET-PG';
   const bankLabel = (currentQ?.sourceType ?? 'ai-generator').replace(/-/g, ' ').toUpperCase();
   const reveal = isAnswered && showExplanation;
-
   const tabButton = (tab: MatrixTab, label: string, Icon: React.ComponentType<{ className?: string }>) => (
     <button
       key={tab}
@@ -488,7 +536,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
               </span>
             </div>
             <p className={`mt-0.5 max-w-xl truncate text-[11px] ${t.barSub}`}>
-              {currentQ?.subject} • {currentQ?.subtopic}
+              {currentQ?.subject} • {safeSubtopic(currentQ, reveal)}
             </p>
           </div>
         </div>
@@ -602,22 +650,41 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
               {currentQ?.image && (
                 <div className={`space-y-2 rounded-xl border p-3 ${t.swallow}`}>
                   <div className={`flex items-start justify-between gap-2 font-mono text-[10px] uppercase tracking-wider ${t.dim}`}>
-                    <span className="leading-snug">{currentQ.imageCaption || 'Clinical image'}</span>
-                    {currentQ.imageSourceUrl && (
-                      <a
-                        href={currentQ.imageSourceUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={`shrink-0 font-semibold hover:underline ${t.accentCyan}`}
-                        title="Open source"
-                      >
-                        Source ↗
-                      </a>
+                    <span className="leading-snug">
+                      {/* Pre-answer we show ONLY the neutral label: an image caption or
+                          attribution can name the diagnosis (which is the answer), so the
+                          descriptive caption is withheld until the answer is revealed.
+                          safeImageCaption() also scrubs legacy stored captions that
+                          contained the diagnosis outright. */}
+                      {safeImageCaption(currentQ, reveal)}
+                      {currentQ.imageVerified && (
+                        <span className="ml-1.5 rounded border border-emerald-500/40 bg-emerald-500/10 px-1 py-0.5 text-[9px] font-bold text-emerald-600 dark:text-emerald-400" title={currentQ.imageVerifyReason || 'Image verified against this question'}>
+                          ✓ Verified
+                        </span>
+                      )}
+                    </span>
+                    {reveal && (currentQ.imageLicence || currentQ.imageSourceUrl) && (
+                      <span className="flex shrink-0 items-center gap-2">
+                        {/* Licence is rendered once, from the trusted field — the caption
+                            used to repeat it, which is why it appeared twice. */}
+                        {currentQ.imageLicence && <span className="opacity-70">· {currentQ.imageLicence}</span>}
+                        {currentQ.imageSourceUrl && (
+                          <a
+                            href={currentQ.imageSourceUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className={`font-semibold hover:underline ${t.accentCyan}`}
+                            title="Open source"
+                          >
+                            Source ↗
+                          </a>
+                        )}
+                      </span>
                     )}
                   </div>
-                  <img
+                  <ZoomableImage
                     src={currentQ.image}
-                    alt={currentQ.imageCaption || 'Clinical image'}
+                    alt={safeImageCaption(currentQ, reveal)}
                     className={`max-h-80 w-full rounded-lg border bg-white object-contain ${t.divider}`}
                   />
                 </div>
@@ -885,14 +952,9 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
 
                 {(mode === 'TUTOR' || examSubmitted) && (
                   <button
-                    onClick={() => {
-                      setShowExplanation(true);
-                      setMatrixOpen(true);
-                      setMatrixTab('ai');
-                      requestAnimationFrame(() => {
-                        document.getElementById('reasoning-matrix')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                      });
-                    }}
+                    // Open the Clinical AI Tutor window with this question attached,
+                    // rather than only revealing the inline reasoning matrix.
+                    onClick={() => onNavigate('ai-tutor', currentQ?.id)}
                     className={`flex items-center gap-2 rounded-lg border px-4 py-2 text-xs font-bold transition active:scale-95 ${t.dissect}`}
                   >
                     <Stethoscope className="h-4 w-4" />

@@ -11,6 +11,7 @@ import { aiComplete, extractJson, getActiveProvider, getEffectiveModel, NOT_CONN
 import { addCapturedQuestion } from '../utils/mistakeStore.ts';
 import { ocrImage } from '../utils/ocr.ts';
 import { startJob, stopJob, type JobControl } from '../utils/jobRegistry.ts';
+import { ZoomableImage } from './ZoomableImage.tsx';
 
 interface QuestionCaptureModalProps {
   exam: ExamType;
@@ -300,7 +301,7 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
             >
               {image ? (
                 <div className="space-y-2 w-full">
-                  <img src={image} alt="Pasted question screenshot" className="max-h-56 w-full object-contain rounded-lg border border-slate-200 bg-white" />
+                  <ZoomableImage src={image} alt="Pasted question screenshot" className="max-h-56 w-full object-contain rounded-lg border border-slate-200 bg-white" />
                   <button
                     onClick={() => { setImage(null); setOcrText(''); setOcrConfidence(null); }}
                     className="text-[10px] text-slate-500 hover:text-rose-600 inline-flex items-center gap-1"

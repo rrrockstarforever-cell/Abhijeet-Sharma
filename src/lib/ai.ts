@@ -446,8 +446,12 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
   const correct = shuffled.correct;
 
   const requested = pool[Math.floor(Math.random() * pool.length)];
+  // The learner selected a specific topic; trust that over whatever subtopic string the
+  // model chose to put in its JSON. The model frequently "drifts" to a neighbouring
+  // subtopic (e.g. you ask for "Antifungal & Antiviral Drugs" and it returns "Antibiotics"),
+  // which is why question pools came out mixed. Subject is honoured the same way.
   const subject = typeof raw.subject === 'string' && raw.subject.trim() ? raw.subject.trim() : requested.subject;
-  const subtopic = typeof raw.subtopic === 'string' && raw.subtopic.trim() ? raw.subtopic.trim() : requested.subtopic;
+  const subtopic = requested.subtopic;
 
   const cogTier =
     validCogTiers.includes(raw.cognitiveTier) ? raw.cognitiveTier : tierToCog[tier];
@@ -581,7 +585,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       patientGroup ? `Patient group: ${patientGroup}.` : '',
       presentingProblems?.length ? `Presenting problems: ${presentingProblems.join('; ')}.` : '',
       sourceMaterial ? `Base on these notes: """${sourceMaterial.slice(0, 6000)}""".` : '',
-      `JSON shape — return exactly one object: { "examType": "${exam}", "subject": "${topic.subject}", "subtopic": "${topic.subtopic}", "cognitiveTier": "Direct Recall | Clinical 2-Step | Multi-Step & IBQ", "difficultyTier": "${topic.difficultyTier}", "stem": "...", "questionText": "...", "options": {${'ABCDE'.slice(0, pattern.opts).split('').map(k => `"${k}": "text"`).join(', ')}}, "correctOption": "A|B|C|D|E", "explanation": "...", "boardPearl": "...", "citations": [...], "trapType": "...", "trapExplanation": "...", "targetAccuracy": 0-100 }`,
+      includeImages
+        ? 'If this item is image-based (about one in five items must be), describe the finding in the stem AND set "figureModality" and "figureQuery" so a real picture can be fetched: "figureModality" is one of ECG | X-ray | CT | MRI | ultrasound | histology | fundus | clinical photo, and "figureQuery" is a 3-6 word English search phrase naming the diagnosis + modality (e.g. "atrial fibrillation ECG", "lobar pneumonia chest X-ray", "membranous nephropathy histology"). For items that are NOT image-based, set both to an empty string — never invent a picture.'
+        : '',
+      `JSON shape — return exactly one object: { "examType": "${exam}", "subject": "${topic.subject}", "subtopic": "${topic.subtopic}", "cognitiveTier": "Direct Recall | Clinical 2-Step | Multi-Step & IBQ", "difficultyTier": "${topic.difficultyTier}", "stem": "...", "questionText": "...", "options": {${'ABCDE'.slice(0, pattern.opts).split('').map(k => `"${k}": "text"`).join(', ')}}, "correctOption": "A|B|C|D|E", "explanation": "...", "boardPearl": "...", "citations": [...], "trapType": "...", "trapExplanation": "...", "targetAccuracy": 0-100${includeImages ? ', "figureModality": "", "figureQuery": ""' : ''} }`,
       learnerProfile ? `Learner instructions: """${learnerProfile}"""` : '',
       'Output ONLY the JSON object.',
     ].join('\n');
@@ -608,14 +615,23 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (seenStems.has(key)) return null;
         seenStems.add(key);
 
-        // Attach image if enabled.
-        if (includeImages && !q.figureQuery && liveImages) {
-          const live = await findLiveImage(q.figureQuery || '', usedImages);
+        // Attach image if this item actually asked for one. Previously this read
+        // `!q.figureQuery` and then searched with `q.figureQuery || ''` — an empty
+        // string — so it never matched anything. Now we only attach when the model
+        // flagged the item as image-based and supplied a search phrase, AND the figure
+        // passed the vision check (findLiveImage returns only verified figures).
+        if (includeImages && liveImages && q.figureQuery) {
+          const live = await findLiveImage(q.figureQuery, usedImages);
           if (live && !usedImages.has(live.id)) {
             usedImages.add(live.id);
             q.image = live.proxyUrl;
             q.imageSourceUrl = live.articleUrl;
             q.imageCaption = liveImageCaption(live);
+            q.imageId = live.id;
+            q.imageLicence = live.licence;
+            q.imageGroundTruth = q.figureQuery;
+            q.imageVerified = live.verified === true;
+            q.imageVerifyReason = live.verifyReason;
             attachedImages += 1;
           }
         }
@@ -662,21 +678,28 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // Count dropped (questions requested but not delivered).
   dropped = count - questions.length;
 
-  // ---------- Step 5: Attach images for all questions that need them ----------
+  // ---------- Step 5: Attach images for any remaining image-based items ----------
+  // Only items the model marked image-based (non-empty figureQuery) get a picture.
+  // The old code fell back to `stem.slice(0, 48)` and so attached a loosely-related
+  // (or irrelevant) figure to EVERY question — that is why images looked "messed up".
   if (includeImages && liveImages && questions.length > 0) {
-    // Process images sequentially to avoid rate limiting
+    // Process images sequentially to avoid rate limiting.
     for (const q of questions) {
       if (signal?.aborted || shouldStop?.()) { stopped = true; break; }
-      if (q.image) continue; // already has an image
+      if (q.image) continue;      // already has an image
+      if (!q.figureQuery) continue; // not an image-based item — leave it text-only
 
-      // Try to derive figureQuery from the stem if not set
-      const figureQuery = q.figureQuery || q.stem.slice(0, 48);
-      const live = await findLiveImage(figureQuery, usedImages);
+      const live = await findLiveImage(q.figureQuery, usedImages);
       if (live && !usedImages.has(live.id)) {
         usedImages.add(live.id);
         q.image = live.proxyUrl;
         q.imageSourceUrl = live.articleUrl;
         q.imageCaption = liveImageCaption(live);
+        q.imageId = live.id;
+        q.imageLicence = live.licence;
+        q.imageGroundTruth = q.figureQuery;
+        q.imageVerified = live.verified === true;
+        q.imageVerifyReason = live.verifyReason;
         attachedImages += 1;
       }
     }

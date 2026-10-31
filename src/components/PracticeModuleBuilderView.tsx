@@ -24,6 +24,7 @@ import {
 } from '../data/mockClinicalData.ts';
 import { SUBTOPICS } from '../data/subtopics.ts';
 import { generateExamQuestions, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel, aiComplete } from '../lib/ai.ts';
+import { generateImageFirstQuestion, type BankImage } from '../lib/imageFirst.ts';
 import { summarizeAttempts, attemptsToday, listAttempts } from '../utils/attemptStore.ts';
 import { listUserHighlights } from '../utils/userHighlightsStore.ts';
 import { debugLog } from '../utils/debugLog.ts';
@@ -197,8 +198,8 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   const [mode, setMode] = useState<'EXAM' | 'TUTOR'>('TUTOR');
   const [progressStep, setProgressStep] = useState<'idle' | 'generating' | 'refining' | 'qa' | 'saved' | 'integrity' | 'done'>('idle');
   // What the finished steps actually did, shown on the progress bar ("Refining · 9 rewritten").
-  const [progressDetail, setProgressDetail] = useState<{ refining: string | null; saved: string | null; qa: string | null }>({
-    refining: null, saved: null, qa: null,
+  const [progressDetail, setProgressDetail] = useState<{ refining: string | null; saved: string | null; qa: string | null; imageFirst: string | null }>({
+    refining: null, saved: null, qa: null, imageFirst: null,
   });
 
   const [difficultyTier, setDifficultyTier] = useState<DifficultyTier>('ALL');
@@ -456,7 +457,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
 
     setGenState({ busy: true, generated: 0, total: targetCount, batch: 0, totalBatches: Math.ceil(targetCount / 10), dropped: 0, error: null });
     setProgressStep('generating');
-    setProgressDetail({ refining: null, saved: null, qa: null });
+    setProgressDetail({ refining: null, saved: null, qa: null, imageFirst: null });
     stopEarlyRef.current = false;
     setStopping(false);
     setRetrying(null);
@@ -581,10 +582,98 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         sourceMaterial,
       });
 
+      // ---- Image-first pass -------------------------------------------------
+      // When images are enabled, upgrade a slice of the set to genuine image-based
+      // items: pick a curated bank image, write the question FROM it (vision), then
+      // VERIFY it. Anything that fails is simply dropped here and the text-only
+      // questions from above remain — the ratio of image to text items is therefore
+      // honest, and an unrelated picture can never be attached.
+      let imageQuestions: ClinicalQuestion[] = [];
+      if (includeImages && selectedExam) {
+        try {
+          const perSubject = Math.max(1, Math.round(targetCount / 5));
+          const wantImages = Math.min(perSubject, 6); // cap vision cost per run
+          const subjects = ['Radiology', 'Dermatology', 'Ophthalmology', 'Pathology', 'Cardiology', 'Orthopaedics'];
+          const optionCount = selectedExam === 'AMC_CAT' ? 5 : 4;
+          setProgressDetail((d) => ({ ...d, imageFirst: 'choosing bank images…' }));
+
+          // Each image-first question costs one slow vision call (~30–75s on the
+          // reasoning model), so running them one at a time made image generation the
+          // dominant wait. Instead we gather candidates up front and run several
+          // DIFFERENT images concurrently — same total work, far less wall-clock.
+          // (Retrying the same image would not help: a token exhaustion is a reply
+          // that was cut short, and image_mismatch is a stable verdict.)
+          const candidateLists = await Promise.all(
+            subjects.map(async (subject) => {
+              const res = await fetch(`/api/images/bank/entries?subject=${encodeURIComponent(subject)}&limit=2`);
+              const body: any = await res.json().catch(() => ({}));
+              return Array.isArray(body?.results) ? (body.results as BankImage[]) : [];
+            }),
+          );
+          // Interleave subjects so a run covers a spread of modalities, then take the
+          // first `wantImages` unique candidates. Dedupe by TOPIC as well as id: the bank
+          // holds two images per diagnosis, so an id-only check would spend two of the
+          // (slow, expensive) vision calls on the very same condition.
+          const candidates: BankImage[] = [];
+          const seenIds = new Set<string>();
+          const seenTopics = new Set<string>();
+          for (let col = 0; col < 2 && candidates.length < wantImages; col++) {
+            for (const list of candidateLists) {
+              const image = list[col];
+              if (!image || seenIds.has(image.image_id)) continue;
+              const topic = (image.ground_truth || '').trim().toLowerCase();
+              if (topic && seenTopics.has(topic)) continue;
+              seenIds.add(image.image_id);
+              if (topic) seenTopics.add(topic);
+              candidates.push(image);
+              if (candidates.length >= wantImages) break;
+            }
+          }
+
+          const CONCURRENCY = 3; // NVIDIA tolerates a few concurrent vision calls
+          let done = 0;
+          let cursor = 0;
+          const results: (ClinicalQuestion | null)[] = new Array(candidates.length).fill(null);
+          const worker = async () => {
+            while (!stopEarlyRef.current) {
+              const i = cursor++;
+              if (i >= candidates.length) return;
+              const image = candidates[i];
+              setProgressDetail((d) => ({ ...d, imageFirst: `${done}/${candidates.length} — ${image.ground_truth}` }));
+              try {
+                const made = await generateImageFirstQuestion({
+                  image,
+                  exam: selectedExam,
+                  difficultyTier,
+                  difficultySubLevel,
+                  optionCount,
+                  signal: controller.signal,
+                });
+                results[i] = made ? made.question : null;
+              } catch (e: any) {
+                // A provider error on one image must not sink the others or the run.
+                debugLog('H10', `image-first failed for ${image.image_id}: ${e?.message || e}`);
+              } finally {
+                done += 1;
+                setProgressDetail((d) => ({ ...d, imageFirst: `${done}/${candidates.length} images done` }));
+              }
+            }
+          };
+          await Promise.all(Array.from({ length: Math.min(CONCURRENCY, candidates.length) }, worker));
+          imageQuestions = results.filter((q): q is ClinicalQuestion => q !== null);
+          setProgressDetail((d) => ({ ...d, imageFirst: `${imageQuestions.length} image question(s), ${candidates.length - imageQuestions.length} fell back` }));
+        } catch (e: any) {
+          debugLog('H10', `image-first pass skipped: ${e?.message || e}`);
+        }
+      }
+
       // A Continue call appends to the questions kept from the previous run.
       const base = appendBaseRef.current;
       appendBaseRef.current = null;
-      const merged = base ? [...base, ...questions] : questions;
+      // Image-first items lead the batch so they are easy to review, then the
+      // text-only questions fill the rest of the requested count.
+      const combined = [...imageQuestions, ...questions];
+      const merged = base ? [...base, ...combined] : combined;
 
       if (questions.length === 0) {
         const wasStopped = stopEarlyRef.current;

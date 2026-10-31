@@ -18,7 +18,10 @@ import {
   FileText,
   UploadCloud,
   Calendar,
-  Database
+  Database,
+  Images,
+  Globe,
+  Loader2
 } from 'lucide-react';
 import { AppView, ExamType } from '../types.ts';
 
@@ -137,6 +140,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [draftSelected, setDraftSelected] = useState<string>('');
   const [pasteInput, setPasteInput] = useState<string>('');
   const [detectedNote, setDetectedNote] = useState<string | null>(null);
+  // Official-site date check (internet-backed, confirm-only).
+  const [checkingExam, setCheckingExam] = useState<ExamType | null>(null);
+  const [officialNote, setOfficialNote] = useState<string | null>(null);
+  const [officialLinks, setOfficialLinks] = useState<{ host: string; url: string; title: string }[]>([]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -152,7 +159,49 @@ export const Sidebar: React.FC<SidebarProps> = ({
     setTempDateInput('');
     setPasteInput('');
     setDetectedNote(null);
+    setOfficialNote(null);
+    setOfficialLinks([]);
     setEditingExam(exam.id);
+  };
+
+  /**
+   * Ask the backend to look for the announced date on the OFFICIAL exam body only
+   * (NBEMS / AIIMS / AMC). Anything found is added to the DRAFT list for the user to
+   * confirm — it is never saved automatically, because these sites are often
+   * JavaScript-rendered and a guessed date would be worse than none.
+   */
+  const checkOfficialDates = async (exam: (typeof EXAM_CARDS)[number]) => {
+    setCheckingExam(exam.id);
+    setOfficialNote(null);
+    try {
+      const res = await fetch('/api/exams/dates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ exam: exam.id }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setOfficialNote(body?.error || `Could not check ${exam.label} (HTTP ${res.status}).`);
+        return;
+      }
+      const found: { iso: string }[] = Array.isArray(body?.candidates) ? body.candidates : [];
+      const dates = found.map((c) => toLocalInputValue(c.iso)).filter(Boolean);
+      setOfficialLinks(Array.isArray(body?.officialLinks) ? body.officialLinks : []);
+      if (!dates.length) {
+        setOfficialNote(body?.note || `No official date found for ${exam.label}. Enter it manually.`);
+        return;
+      }
+      setDraftDates((prev) => Array.from(new Set([...prev, ...dates])).sort());
+      const future = dates.find((d) => new Date(d).getTime() > Date.now());
+      setDraftSelected((prev) => prev || future || dates[0]);
+      setOfficialNote(
+        `${body.officialBody}: ${dates.length} date${dates.length === 1 ? '' : 's'} found on the official site — tick the one you want, then Save.`,
+      );
+    } catch (e: any) {
+      setOfficialNote(`Could not reach the server (${e?.message || 'network error'}).`);
+    } finally {
+      setCheckingExam(null);
+    }
   };
 
   const addDraftDate = (value: string) => {
@@ -246,8 +295,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'mistakes' as AppView, label: 'Mistakes & Spaced Review', icon: AlertOctagon, badge: srsDueCount > 0 ? `${srsDueCount} due` : unresolvedMistakesCount > 0 ? String(unresolvedMistakesCount) : undefined },
     { id: 'highlights' as AppView, label: 'Highlights & Memory', icon: Bookmark },
     { id: 'ai-tutor' as AppView, label: 'Clinical AI Tutor', icon: Brain },
-    { id: 'pdf-reader' as AppView, label: 'PDF Reader & OCR', icon: BookOpen },
+    // PDF Reader & OCR is temporarily hidden from the sidebar (kept in the codebase and
+    // still routable) — re-add `{ id: 'pdf-reader', label: 'PDF Reader & OCR', icon: BookOpen }`
+    // here (and the BookOpen import) to bring it back into view.
     { id: 'research' as AppView, label: 'Clinical Evidence Browser', icon: Compass },
+    { id: 'image-review' as AppView, label: 'Image Question Review', icon: Images },
     { id: 'settings' as AppView, label: 'AI Subscriptions & OCR', icon: Sliders },
   ];
 
@@ -440,6 +492,48 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       placeholder="Paste dates or exam notice…"
                       className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-white placeholder:text-slate-500 focus:outline-none focus:border-[#0f8b8d]"
                     />
+
+                    {/* Internet check, restricted to the official exam body. Suggests only. */}
+                    <button
+                      type="button"
+                      onClick={() => checkOfficialDates(exam)}
+                      disabled={checkingExam === exam.id}
+                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-[10px] font-bold text-[#8ff3f4]"
+                      title="Search the official exam body for the announced date"
+                    >
+                      {checkingExam === exam.id ? (
+                        <>
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Checking official site…
+                        </>
+                      ) : (
+                        <>
+                          <Globe className="w-3 h-3" />
+                          Check official site
+                        </>
+                      )}
+                    </button>
+
+                    {officialNote && checkingExam !== exam.id && (
+                      <p className="text-[9px] text-slate-400 leading-snug">{officialNote}</p>
+                    )}
+
+                    {officialLinks.length > 0 && checkingExam !== exam.id && (
+                      <div className="space-y-0.5">
+                        {officialLinks.map((l) => (
+                          <a
+                            key={l.url}
+                            href={l.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="block truncate text-[9px] font-mono text-[#8ff3f4] hover:underline"
+                            title={l.title || l.url}
+                          >
+                            Open {l.host} ↗
+                          </a>
+                        ))}
+                      </div>
+                    )}
 
                     {draftDates.length > 0 && (
                       <div className="space-y-1">

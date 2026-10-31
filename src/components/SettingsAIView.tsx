@@ -38,7 +38,8 @@ import {
   setModel as persistModel,
   getEffectiveModel,
 } from '../lib/ai.ts';
-import { DataBackupPanel } from './DataBackupPanel.tsx';
+// Data & exports panel (DataBackupPanel) is intentionally not mounted — see the comment
+// near the OAuth modal. The component itself is kept in the codebase.
 import {
   MIN_OCR_WORKERS,
   MAX_OCR_WORKERS,
@@ -1500,10 +1501,9 @@ export const SettingsAIView: React.FC = () => {
         </div>
       </div>
 
-      {/* Data & exports — real stores, versioned backup, merge import */}
-      <div className="mt-6">
-        <DataBackupPanel />
-      </div>
+      {/* Data & exports panel removed — not used by this learner. The component and its
+          store helpers (backupToJson / importBackup / resetSchedules / clearAllStudyData)
+          are kept in the codebase: re-add <DataBackupPanel /> here to bring it back. */}
 
       {/* Interactive OAuth Sign-In Modal */}
       {selectedProvider && (
@@ -1703,7 +1703,7 @@ export const SettingsAIView: React.FC = () => {
                     type="text"
                     value={editingEndpoint.defaultModel}
                     onChange={(e) => setEditingEndpoint({ ...editingEndpoint, defaultModel: e.target.value })}
-                    placeholder="e.g. deepseek-v4.1"
+                    placeholder="e.g. meta/llama-3.3-70b-instruct"
                     className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
                   />
                 </div>
