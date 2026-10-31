@@ -64,24 +64,30 @@ async function pubmed(q) {
   }).filter((s) => s.text.length > 40);
 }
 
-async function pageText(url) {
+async function pageText(url, chars = 2500) {
   const r = await get(url);
   const type = r.headers.get('content-type') || '';
   if (!/text\/html|text\/plain|xml/.test(type)) throw new Error('not a web page');
-  return strip((await r.text()).slice(0, 1_500_000)).slice(0, 2500);
+  return strip((await r.text()).slice(0, 1_500_000)).slice(0, chars);
 }
 
-export async function research(query) {
+// pageChars: how much of each page to keep. The start of a page is often menus, so a fact check asks for more.
+export async function research(query, pageChars = 2500) {
   const q = String(query || '').trim().slice(0, 300);
   if (!q) throw new Error('Nothing to search for.');
   const [w, p] = await Promise.allSettled([ddg(q), pubmed(q)]);
   const web = (w.status === 'fulfilled' ? w.value : []).sort((a, b) => Number(TRUSTED.test(b.url)) - Number(TRUSTED.test(a.url))).slice(0, 3);
   const pm = p.status === 'fulfilled' ? p.value : [];
-  const pages = await Promise.allSettled(web.map((x) => pageText(x.url)));
+  const pages = await Promise.allSettled(web.map((x) => pageText(x.url, pageChars)));
   const sources = [
     ...web.map((x, i) => ({ title: x.title, url: x.url, text: (pages[i].status === 'fulfilled' && pages[i].value.length > 200 ? pages[i].value : x.snippet) || x.snippet, kind: 'web' })),
     ...pm.map((x) => ({ ...x, kind: 'pubmed' })),
   ].filter((s) => s.text).map((s, i) => ({ n: i + 1, ...s }));
   if (!sources.length) throw new Error('No sources found (check your internet connection, or try different wording).');
   return { sources, retrievedAt: new Date().toISOString().slice(0, 10) };
+}
+
+/** PubMed abstracts for a query (title, PubMed link and abstract text). Used by the answer-proof check. */
+export async function pubmedSearch(query) {
+  return pubmed(String(query || '').slice(0, 300));
 }

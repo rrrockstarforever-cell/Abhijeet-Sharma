@@ -1,9 +1,14 @@
 // Saved question banks: every generated module, kept whole, so it can be finished later.
 // Resuming reopens the same questions in the Test Runner, which restores the answers and position.
 import React, { useEffect, useState } from 'react';
-import { BookOpen, Play, Trash2, RefreshCw } from 'lucide-react';
+import { BookOpen, Play, Trash2, RefreshCw, Copy, ShieldCheck } from 'lucide-react';
+import { checkMany, proofOf } from '../lib/answerProof.ts';
+import { cleanQuestions } from '../lib/questionCleanup.ts';
 import type { ClinicalQuestion, ExamType } from '../types.ts';
-import { listModules, getModule, deleteModule, backfillModulesFromSessions, MODULES_CHANGED, type ModuleSummary } from '../utils/moduleStore.ts';
+import {
+  listModules, getModule, deleteModule, backfillModulesFromSessions, MODULES_CHANGED, type ModuleSummary,
+  storedQuestions, findDuplicates,
+} from '../utils/moduleStore.ts';
 
 const EXAM_LABEL: Record<string, string> = { NEET_PG: 'NEET-PG', INI_CET: 'INI-CET', AMC_CAT: 'AMC CAT' };
 
@@ -15,6 +20,40 @@ export const SavedModulesPanel: React.FC<SavedModulesPanelProps> = ({ onLaunchTe
   const [modules, setModules] = useState<ModuleSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [duplicates, setDuplicates] = useState<ReturnType<typeof findDuplicates> | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyProgress, setVerifyProgress] = useState('');
+
+  // Checks every stored question's answer with evidence. Results are kept, so this runs once per question.
+  const verifyStored = async () => {
+    setError(null);
+    setNotice(null);
+    setVerifying(true);
+    setVerifyProgress('Checking…');
+    try {
+      const items = await storedQuestions();
+      const proofs = await checkMany(items.map((i) => i.question), (done, total) => setVerifyProgress(`Checking ${done}/${total}…`));
+      const ids = [...new Set(items.map((i) => i.question.id))];
+      const tally = { VERIFIED: 0, UNVERIFIED: 0, CONTESTED: 0, 'NOT CHECKED': 0 } as Record<string, number>;
+      for (const id of ids) tally[proofs.get(id)?.proof ?? 'NOT CHECKED'] += 1;
+      setNotice(`Answer check on ${ids.length} questions: ${tally.VERIFIED} verified, ${tally.CONTESTED} contested, ${tally.UNVERIFIED} unverified, ${tally['NOT CHECKED']} not checked (retry later).`);
+      if (duplicates) setDuplicates(findDuplicates(items));
+    } catch (err: any) {
+      setError(err?.message || 'Answer check failed.');
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const findRepeats = async () => {
+    setError(null);
+    try {
+      setDuplicates(findDuplicates(await storedQuestions()));
+    } catch (err: any) {
+      setError(err?.message || 'Could not check for duplicates.');
+    }
+  };
 
   const load = () => {
     setError(null);
@@ -33,7 +72,15 @@ export const SavedModulesPanel: React.FC<SavedModulesPanelProps> = ({ onLaunchTe
     try {
       const saved = await getModule(id);
       if (!saved) throw new Error('This question bank is no longer stored.');
-      onLaunchTest(saved.questions, saved.mode, saved.exam);
+      // Only questions whose answer has proof are shown; the rest need a check first.
+      const proven = cleanQuestions(saved.questions).filter((q) => proofOf(q.id)?.proof === 'VERIFIED');
+      if (proven.length === 0) {
+        throw new Error('None of this bank’s answers has proof yet. Run "Verify answers" first.');
+      }
+      if (proven.length < saved.questions.length) {
+        setNotice(`${saved.questions.length - proven.length} question(s) without proof were left out.`);
+      }
+      onLaunchTest(proven, saved.mode, saved.exam);
     } catch (err: any) {
       setError(err?.message || 'Could not reopen this question bank.');
     } finally {
@@ -63,12 +110,50 @@ export const SavedModulesPanel: React.FC<SavedModulesPanelProps> = ({ onLaunchTe
             Every generated bank is kept as it was. Resume to continue where you stopped.
           </div>
         </div>
+        <button onClick={verifyStored} disabled={verifying} className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 disabled:opacity-40 flex items-center gap-1">
+          <ShieldCheck className="w-3 h-3" /> {verifying ? verifyProgress : 'Verify answers'}
+        </button>
+        <button onClick={findRepeats} className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 flex items-center gap-1">
+          <Copy className="w-3 h-3" /> Find duplicates
+        </button>
         <button onClick={load} className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 flex items-center gap-1">
           <RefreshCw className="w-3 h-3" /> Refresh
         </button>
       </div>
 
       {error && <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">{error}</div>}
+      {notice && <div className="text-xs text-teal-800 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2">{notice}</div>}
+
+      {duplicates && (
+        <div className="rounded-xl border border-slate-200 p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="text-xs font-bold text-slate-800">
+              {duplicates.length === 0 ? 'No repeated questions found.' : `${duplicates.length} repeated pair${duplicates.length === 1 ? '' : 's'} found`}
+            </div>
+            <button onClick={() => setDuplicates(null)} className="text-[10px] font-bold text-slate-500 hover:underline">Close</button>
+          </div>
+          {duplicates.slice(0, 30).map((d, i) => (
+            <div key={i} className={`rounded-lg border p-2 text-[11px] ${d.sameAnswer ? 'border-slate-200' : 'border-rose-300 bg-rose-50/50'}`}>
+              <div className={`font-bold mb-1 ${d.sameAnswer ? 'text-slate-600' : 'text-rose-700'}`}>
+                {d.sameAnswer ? 'Same question, same answer' : 'Same question, DIFFERENT answers'} · {Math.round(d.similarity * 100)}% overlap
+              </div>
+              {[d.a, d.b].map((side, k) => (
+                <div key={k} className="mb-1">
+                  <div className="text-slate-700">{(side.question.stem || side.question.questionText || '').slice(0, 160)}</div>
+                  <div className="text-slate-500">
+                    From <span className="font-semibold">{side.source}</span> · Key {side.question.correctOption}: {side.question.options.find((o) => o.id === side.question.correctOption)?.text ?? '—'}
+                    {' · '}
+                    <span className={`font-bold ${proofOf(side.question.id)?.proof === 'VERIFIED' ? 'text-emerald-700' : 'text-rose-700'}`}>
+                      {proofOf(side.question.id)?.proof ?? 'not checked'}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+          {duplicates.length > 30 && <div className="text-[10px] text-slate-400">Showing 30 of {duplicates.length}.</div>}
+        </div>
+      )}
 
       {modules && modules.length === 0 && (
         <div className="text-xs text-slate-500">No saved question banks yet. Build a module in the Practice Builder and it will be kept here.</div>

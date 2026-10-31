@@ -14,4 +14,11 @@ export interface ResearchResult {
   retrievedAt: string;
 }
 
-export declare function research(query: string): Promise<ResearchResult>;
+export declare function research(query: string, pageChars?: number): Promise<ResearchResult>;
+
+export interface PubmedAbstract {
+  title: string;
+  url: string;
+  text: string;
+}
+export declare function pubmedSearch(query: string): Promise<PubmedAbstract[]>;

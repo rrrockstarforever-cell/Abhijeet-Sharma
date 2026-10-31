@@ -16,7 +16,7 @@ import {
   type OAuthChatMessage,
 } from './server/oauth.mjs';
 import { aiLog } from './server/oauth.mjs';
-import { research as webResearch } from './server/web.mjs';
+import { research as webResearch, pubmedSearch } from './server/web.mjs';
 import { searchImages, fetchImage, REFERENCE_SOURCES } from './server/images.mjs';
 import { buildImageBank, loadImageBank, queryImageBank, getBankImage, bankStats, rejectImage, searchBankByText } from './server/imageBank.mjs';
 import { generateQuestionFromImage } from './server/visionQuestion.mjs';
@@ -44,6 +44,10 @@ const DATA_DIR = process.env.PULSE_DATA_DIR || path.join(os.homedir(), '.pulse-m
 const ENV_FILE = path.join(DATA_DIR, '.env');
 try { dotenv.config({ path: ENV_FILE }); } catch { /* dev: file may not exist */ }
 
+// Page images for notes are far larger than the default 100 KB body limit. Registered first so
+// this route is parsed here and the global parser below leaves it alone.
+app.use('/api/ai/complete-images', express.json({ limit: '30mb' }));
+app.use('/api/ocr/nemotron', express.json({ limit: '1mb' }));
 app.use(express.json());
 
 // ==========================================
@@ -246,8 +250,10 @@ async function runCompletion(opts: {
   signal?: AbortSignal;
   /** Stable conversation id for providers that route/cache per session (OpenCode Go). */
   session?: string;
+  /** Data URLs attached to the last message. Only the NVIDIA path sends them. */
+  images?: string[];
 }): Promise<string> {
-  const { provider, model, system, messages, json, effort, search, signal } = opts;
+  const { provider, model, system, messages, json, effort, search, signal, images } = opts;
 
   if (provider === 'opencode') {
     const key = opencodeKey();
@@ -438,12 +444,18 @@ async function runCompletion(opts: {
     const model_ = model || DEFAULT_MODELS.nvidia;
     const payloadMessages = [
       ...(system ? [{ role: 'system', content: system }] : []),
-      ...messages.map((m) => ({ role: m.role, content: m.content })),
+      ...messages.map((m, i) => ({
+        role: m.role,
+        content: images?.length && i === messages.length - 1
+          ? [{ type: 'text', text: m.content }, ...images.map((url) => ({ type: 'image_url', image_url: { url } }))]
+          : m.content,
+      })),
     ];
     const payload = JSON.stringify({
       model: model_,
       messages: payloadMessages,
-      temperature: 0.7,
+      // Reading pages is transcription as much as writing, so keep it close to the source.
+      temperature: images?.length ? 0.3 : 0.7,
       // Let a long clinical answer finish rather than starving the reasoning trace.
       max_tokens: nvidiaTokenBudget(effort),
       chat_template_kwargs: nvidiaReasoningKwargs(effort),
@@ -536,6 +548,95 @@ app.get('/api/oauth/status', (req: Request, res: Response) => {
     },
     defaults: DEFAULT_MODELS,
   });
+});
+
+// POST /api/qa/verify-answer: checks a question's keyed answer before it may be shown.
+// Two blind solves (the key is hidden), then a PubMed search for the key's claim and a judgement of
+// whether the retrieved abstracts support it. VERIFIED needs both solves to match the key and the
+// abstracts to support it, and only PubMed articles actually retrieved may be cited.
+app.post('/api/qa/verify-answer', async (req: Request, res: Response) => {
+  const { question, provider, model } = req.body || {};
+  if (!question || !Array.isArray(question.options) || !question.correctOption || !provider) {
+    return res.status(400).json({ error: 'question (with options and correctOption) and provider are required.' });
+  }
+  // The provider rate-limits parallel calls (HTTP 429). Wait and retry rather than failing the question.
+  const complete = async (system: string, content: string) => {
+    const waits = [3000, 8000, 15000, 30000];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return extractJson<any>(await runCompletion({
+          provider,
+          model: model || DEFAULT_MODELS[provider] || DEFAULT_MODELS.opencode,
+          system,
+          messages: [{ role: 'user', content }],
+          json: true,
+        }));
+      } catch (err: any) {
+        const rateLimited = /429|rate.?limit|too many requests/i.test(String(err?.message || err));
+        if (!rateLimited || attempt >= waits.length) throw err;
+        await new Promise((resolve) => setTimeout(resolve, waits[attempt]));
+      }
+    }
+  };
+  const keyed = String(question.correctOption).toUpperCase();
+  const keyedText = String((question.options.find((o: any) => String(o.id).toUpperCase() === keyed) || {}).text || '');
+  const stem = [question.stem, question.questionText].filter(Boolean).join('\n');
+  const optionLines = question.options.map((o: any) => `${o.id}. ${o.text}`).join('\n');
+  try {
+    // 1. Two blind solves: the model never sees the key.
+    const solveSystem = 'You are an expert exam examiner. Answer the multiple-choice question from medical knowledge alone. Return only JSON.';
+    const solveBody = `${stem}\n\n${optionLines}\n\nReturn JSON {"answer":"<option letter>","confidence":<0-100>,"reason":"<one sentence>"}.`;
+    const [s1, s2] = await Promise.all([complete(solveSystem, solveBody), complete(solveSystem, solveBody)]);
+    const solves = [s1?.answer, s2?.answer].map((a) => String(a || '').toUpperCase());
+    const solvesAgree = solves.every((a) => a === keyed);
+
+    // 2. A PubMed search for the claim the key makes.
+    const queryOut = await complete(
+      'You write PubMed search queries. Return only JSON.',
+      `Question: ${stem}\nCorrect option: ${keyed}. ${keyedText}\n\nWrite one PubMed search query of 6-12 words that would find evidence for the correct option. Return JSON {"query":"..."}.`,
+    );
+    const query = String(queryOut?.query || '').trim();
+    let sources: { title: string; url: string; text: string }[] = [];
+    if (query) {
+      try { sources = await pubmedSearch(query); } catch { sources = []; }
+    }
+
+    // 3. Does the retrieved evidence support the keyed answer? Only the retrieved sources may be cited.
+    let verdict = 'INSUFFICIENT';
+    let cited: { title: string; url: string }[] = [];
+    if (sources.length) {
+      const numbered = sources.map((s, i) => `[${i + 1}] ${s.title}\n${s.url}\n${s.text}`).join('\n\n');
+      const judged = await complete(
+        'You check whether medical evidence supports a exam answer. Use only the sources given. Return only JSON.',
+        `Question: ${stem}\nKeyed answer: ${keyed}. ${keyedText}\n\nSources:\n${numbered}\n\nReturn JSON {"verdict":"SUPPORTED|CONTRADICTED|INSUFFICIENT","citedSources":[<source numbers>],"reason":"<one sentence>"}. Use SUPPORTED only if a source directly supports the keyed answer.`,
+      );
+      verdict = ['SUPPORTED', 'CONTRADICTED', 'INSUFFICIENT'].includes(judged?.verdict) ? judged.verdict : 'INSUFFICIENT';
+      const nums: number[] = Array.isArray(judged?.citedSources) ? judged.citedSources : [];
+      cited = nums
+        .map((n) => sources[Number(n) - 1])
+        .filter((s): s is { title: string; url: string; text: string } => Boolean(s))
+        .map((s) => ({ title: s.title, url: s.url }));
+    }
+
+    // 4. Is the item itself sound? A key can be right and the item still broken.
+    const quality = await complete(
+      'You review exam questions for defects. Return only JSON.',
+      `${stem}\n\n${optionLines}\n\nKeyed answer: ${keyed}.\n\nCheck: (1) exactly one option is the single best answer; (2) if the question asks which is NOT / INCORRECT / FALSE / EXCEPT, exactly one option is that; (3) every number or result needed to answer is given in the stem; (4) no other option is also correct. Return JSON {"wellFormed":true|false,"issues":["<short issue>"]}.`,
+    );
+    const wellFormed = quality?.wellFormed === true;
+    const issues: string[] = Array.isArray(quality?.issues) ? quality.issues.map(String).slice(0, 5) : [];
+
+    // Verdict: VERIFIED needs agreement, supporting evidence, at least one cited source and a sound item.
+    const solvedAgainst = solves.every((a) => a && a !== keyed);
+    const proof = solvesAgree && verdict === 'SUPPORTED' && cited.length > 0 && wellFormed
+      ? 'VERIFIED'
+      : solvedAgainst && verdict === 'CONTRADICTED'
+        ? 'CONTESTED'
+        : 'UNVERIFIED';
+    return res.json({ proof, keyed, solves, query, evidence: { verdict, cited }, wellFormed, issues });
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'Answer check failed.' });
+  }
 });
 
 // Figures for imported question banks (eMedici). Read-only, from a folder set by
@@ -1383,6 +1484,112 @@ app.post('/api/ai/complete', async (req: Request, res: Response) => {
   }
 });
 
+// Words from an NVIDIA OCR response. The response shape is not fully documented, so this reads any
+// object that carries both a text string and a list of corner points, wherever it sits.
+export function nemotronWords(body: any): { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }[] {
+  const out: { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }[] = [];
+  const visit = (node: any) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    const text: unknown = typeof node.text === 'string' ? node.text : node.text_prediction?.text;
+    const shape = node.bounding_box ?? node.bbox ?? node.points ?? node.bounding_box?.points;
+    const pts: any[] | undefined = Array.isArray(shape) ? shape : Array.isArray(shape?.points) ? shape.points : undefined;
+    if (typeof text === 'string' && text.trim() && pts && pts.length) {
+      const xs: number[] = [];
+      const ys: number[] = [];
+      if (pts.every((v) => typeof v === 'number')) {
+        pts.forEach((v, i) => (i % 2 === 0 ? xs : ys).push(v));
+      } else {
+        for (const p of pts) {
+          const x = Array.isArray(p) ? p[0] : p?.x;
+          const y = Array.isArray(p) ? p[1] : p?.y;
+          if (typeof x === 'number' && typeof y === 'number') {
+            xs.push(x);
+            ys.push(y);
+          }
+        }
+      }
+      if (xs.length && ys.length) {
+        const conf = Number(node.confidence ?? node.text_prediction?.confidence);
+        out.push({
+          text: text.trim(),
+          confidence: Number.isFinite(conf) ? conf * (conf <= 1 ? 100 : 1) : 90,
+          bbox: { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) },
+        });
+      }
+      return;
+    }
+    Object.values(node).forEach(visit);
+  };
+  visit(body);
+  return out;
+}
+
+// POST /api/ocr/nemotron {image} -> {text, words}. One page image through NVIDIA's hosted nemotron-ocr-v2.
+// The image is a JPEG/PNG/WebP data URL; the client shrinks it first, because the API takes at most ~180k base64 characters.
+app.post('/api/ocr/nemotron', async (req: Request, res: Response) => {
+  const image = req.body?.image;
+  if (typeof image !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/.test(image)) {
+    return res.status(400).json({ error: 'image must be a JPEG, PNG or WebP data URL.' });
+  }
+  const key = nvidiaKey();
+  if (!key) return res.status(401).json({ error: notConnectedMessage('nvidia') });
+  if (image.split(',')[1].length > 180_000) {
+    return res.status(413).json({ error: 'The page image is too large for the NVIDIA OCR API. Use a smaller image.' });
+  }
+  try {
+    const r = await fetch('https://ai.api.nvidia.com/v1/cv/nvidia/nemotron-ocr-v2', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ input: [{ type: 'image_url', url: image }] }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const raw = await r.text();
+    let body: any = {};
+    try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+    if (!r.ok) return res.status(r.status === 429 ? 429 : 502).json({ error: `NVIDIA OCR: ${providerErrorText(body, r.status)}` });
+    const words = nemotronWords(body);
+    if (process.env.OCR_DEBUG) console.log('[ocr/nemotron] raw response:', raw.slice(0, 2000));
+    return res.json({ text: words.map((w) => w.text).join('\n'), words });
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'The NVIDIA OCR request failed.' });
+  }
+});
+
+// POST /api/ai/complete-images -> {text}. Same as /api/ai/complete, with page images attached.
+// Only NVIDIA sends images, so other providers get a clear 400 and the client uses text alone.
+app.post('/api/ai/complete-images', async (req: Request, res: Response) => {
+  const { provider, model, system, messages, json, effort, images } = req.body || {};
+  if (provider !== 'nvidia') {
+    return res.status(400).json({ error: `Reading page images is not available with ${provider || 'this provider'}.` });
+  }
+  if (!Array.isArray(messages) || messages.length === 0 || messages.some((m: any) => !m || typeof m.content !== 'string')) {
+    return res.status(400).json({ error: 'messages must be an array of {role, content}.' });
+  }
+  if (!Array.isArray(images) || images.length === 0 || images.some((u: any) => typeof u !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/.test(u))) {
+    return res.status(400).json({ error: 'images must be JPEG, PNG or WebP data URLs.' });
+  }
+  const controller = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) controller.abort();
+  });
+  try {
+    const text = await runCompletion({ provider, model, system, messages, json, effort, images, signal: controller.signal });
+    if (controller.signal.aborted) return;
+    if (!text || !text.trim()) {
+      return res.status(502).json({ error: 'The AI provider returned an empty response. Try again.' });
+    }
+    return res.json({ success: true, text });
+  } catch (err: any) {
+    if (controller.signal.aborted) return;
+    const status = err instanceof ApiError ? err.status : 502;
+    if (!res.headersSent) return res.status(status).json({ error: err?.message || 'AI request failed.' });
+  }
+});
+
 // ---------- tutor-chat (kept for AITutorView; backed by the same real completion path) ----------
 
 const PERSONA_PROMPTS: Record<string, string> = {
@@ -1949,7 +2156,8 @@ app.post('/api/qa/refine-batch', async (req: Request, res: Response) => {
 app.post('/api/web/research', async (req: Request, res: Response) => {
   const query = typeof req.body?.query === 'string' ? req.body.query : '';
   try {
-    const out = await webResearch(query);
+    const pageChars = Math.min(30000, Math.max(2500, Number(req.body?.pageChars) || 2500));
+    const out = await webResearch(query, pageChars);
     return res.json({ success: true, sources: out.sources, retrievedAt: out.retrievedAt });
   } catch (err: any) {
     return res.status(502).json({ error: err?.message || 'Web research failed.' });

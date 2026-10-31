@@ -216,6 +216,30 @@ export async function aiComplete(options: AiCompleteOptions): Promise<string> {
   return text;
 }
 
+/** Same as aiComplete, with images (data URLs) attached to the last message. Throws if they cannot be sent. */
+export async function aiCompleteWithImages(options: AiCompleteOptions, images: string[]): Promise<string> {
+  const provider = options.provider ?? getActiveProvider();
+  const res = await fetch('/api/ai/complete-images', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      provider,
+      model: options.model ?? (provider ? getEffectiveModel(provider) : undefined),
+      system: options.system,
+      messages: options.messages,
+      json: options.json,
+      effort: options.effort,
+      images,
+    }),
+    signal: options.signal,
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new AiError(typeof data?.error === 'string' ? data.error : `AI request failed (HTTP ${res.status}).`, 'api');
+  const text = typeof data?.text === 'string' ? data.text : '';
+  if (!text.trim()) throw new AiError('The AI provider returned an empty response. Try again.', 'api');
+  return text;
+}
+
 // ---------- JSON helpers ----------
 
 /** Extract the first JSON value from raw model output (tolerates markdown fences and surrounding prose). */
@@ -678,6 +702,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         }
         if (err instanceof AiError && err.kind === 'not_connected') throw err;
         if (!isRetryable(err)) break;
+        // Rate limited by the provider: wait longer before the next attempt.
+        if (/429|rate.?limit|too many requests/i.test(String(err?.message || err))) {
+          await new Promise((resolve) => setTimeout(resolve, 4000 * (a + 1)));
+        }
       }
     }
     return null;
@@ -686,10 +714,25 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // ---------- Step 4: Fire all question-generation requests in parallel ----------
   // Use a completion counter that updates progress as each question finishes.
   let completedCount = 0;
+  // At most GENERATION_CONCURRENCY question requests run at once, so the provider does not rate-limit them.
+  const GENERATION_CONCURRENCY = 3;
+  let inFlight = 0;
+  const waiting: (() => void)[] = [];
+  const limited = <T,>(task: () => Promise<T>): Promise<T> => new Promise<T>((resolve, reject) => {
+    const start = () => {
+      inFlight += 1;
+      task().then(resolve, reject).finally(() => {
+        inFlight -= 1;
+        waiting.shift()?.();
+      });
+    };
+    if (inFlight < GENERATION_CONCURRENCY) start();
+    else waiting.push(start);
+  });
   const questionPromises = topics.map((topic, idx) => {
     const parts = focusParts(topic.subtopic);
     const focus = parts.length > 1 ? parts[idx % parts.length] : undefined;
-    return generateSingleQuestion(topic, 0, focus, itemShape(idx, exam)).then((q) => {
+    return limited(() => generateSingleQuestion(topic, 0, focus, itemShape(idx, exam))).then((q) => {
       // Update progress as each question completes (not after all finish).
       completedCount += 1;
       if (q) {

@@ -3,6 +3,7 @@
 // Test Runner already saves answers, flags and position under runSession-<signature>, and the
 // signature is the module's id, so reopening a module restores where the learner stopped.
 import type { ClinicalQuestion, ExamType } from '../types.ts';
+import { DUPLICATE_SIMILARITY, stemSimilarity } from '../lib/benchmark.ts';
 
 const DB_NAME = 'PulseMedModules';
 const STORE = 'modules';
@@ -36,7 +37,8 @@ function notifyModulesChanged(): void {
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
+    // Version 2 makes the upgrade create the store even on a database that was opened empty at version 1.
+    const request = indexedDB.open(DB_NAME, 2);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(STORE)) request.result.createObjectStore(STORE, { keyPath: 'id' });
     };
@@ -133,4 +135,63 @@ export async function backfillModulesFromSessions(): Promise<number> {
   }
   localStorage.setItem('pulse.modules.backfilled', 'v1');
   return saved;
+}
+
+/** Every stored question, from saved banks and from the QA review list, with where it came from. */
+export async function storedQuestions(): Promise<{ source: string; question: ClinicalQuestion }[]> {
+  const all = (await withStore('readonly', (store) => store.getAll())) as SavedModule[];
+  const out: { source: string; question: ClinicalQuestion }[] = [];
+  for (const m of all) for (const q of m.questions) out.push({ source: m.title, question: q });
+  try {
+    const reviewed = JSON.parse(localStorage.getItem('pulse.qa.bank') || '[]') as { question?: ClinicalQuestion }[];
+    for (const entry of reviewed) if (entry?.question) out.push({ source: 'QA review list', question: entry.question });
+  } catch { /* unreadable QA list: saved banks only */ }
+  return out;
+}
+
+const questionText = (q: ClinicalQuestion) => `${q.stem ?? ''} ${q.questionText ?? ''}`.trim();
+const correctAnswerText = (q: ClinicalQuestion) =>
+  (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim().toLowerCase();
+
+/** The stored answer text for a question, so answers are compared by content, not by letter. */
+export { correctAnswerText };
+
+/** Pairs of questions whose stems overlap strongly, marked when their correct answers differ. */
+export function findDuplicates(items: { source: string; question: ClinicalQuestion }[]): {
+  a: { source: string; question: ClinicalQuestion };
+  b: { source: string; question: ClinicalQuestion };
+  similarity: number;
+  sameAnswer: boolean;
+}[] {
+  const pairs: ReturnType<typeof findDuplicates> = [];
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      const similarity = stemSimilarity(questionText(items[i].question), questionText(items[j].question));
+      if (similarity >= DUPLICATE_SIMILARITY) {
+        pairs.push({
+          a: items[i],
+          b: items[j],
+          similarity,
+          sameAnswer: correctAnswerText(items[i].question) === correctAnswerText(items[j].question),
+        });
+      }
+    }
+  }
+  return pairs.sort((x, y) => Number(x.sameAnswer) - Number(y.sameAnswer) || y.similarity - x.similarity);
+}
+
+/** Removes questions that repeat a stored question. The stored one is kept as it is. */
+export function withoutStoredDuplicates(
+  questions: ClinicalQuestion[],
+  stored: { question: ClinicalQuestion }[],
+): { kept: ClinicalQuestion[]; dropped: number } {
+  // The same question id is the same item (for example, one just added to the QA list by this run),
+  // not a repeat; only a different id with a near-identical stem counts as a repeat.
+  const others = stored.filter((s) => !questions.some((q) => q.id === s.question.id));
+  const storedTexts = others.map((s) => questionText(s.question));
+  const kept = questions.filter((q) => {
+    const text = questionText(q);
+    return !storedTexts.some((t) => stemSimilarity(text, t) >= DUPLICATE_SIMILARITY);
+  });
+  return { kept, dropped: questions.length - kept.length };
 }

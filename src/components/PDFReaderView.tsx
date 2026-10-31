@@ -71,18 +71,23 @@ import {
   addUserHighlight,
   removeUserHighlight,
   highlightFromPdfSelection,
+  highlightFromAiReply,
   type UserHighlight,
 } from '../utils/userHighlightsStore.ts';
 import {
   aiComplete,
+  aiCompleteWithImages,
   getActiveProvider,
   getEffectiveModel,
   NOT_CONNECTED_MESSAGE,
   extractJson,
 } from '../lib/ai.ts';
 import { createOcrPool, ocrConcurrency, OcrWord } from '../utils/ocr.ts';
+import { recognizeWithNemotron } from '../utils/nemotronOcr.ts';
 import { startJob, stopJob, type JobControl } from '../utils/jobRegistry.ts';
-import { RevisionNote, downloadNotesPdf } from './RevisionNote.tsx';
+import { downloadNotesPdf } from './RevisionNote.tsx';
+import { runWebCheck, webCheckToText } from '../lib/noteWebCheck.ts';
+import { StructuredNote, PAGE_TRANSCRIBE_SYSTEM, TEACHING_NOTE_SYSTEM, readSavedNotes, teachingNoteToText, toTeachingNote, writeSavedNotes, type SavedNote, type TeachingNote } from './StructuredNote.tsx';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -159,6 +164,142 @@ function splitDocxIntoPages(raw: string): string[] {
 
 interface SelectionPopup { x: number; y: number; text: string; }
 
+type ContentLevel = 'unit' | 'chapter' | 'section' | 'topic';
+
+/** One line of the book's contents: a unit, chapter, section or topic, and the page it starts on. */
+interface ContentEntry {
+  id: string;
+  level: ContentLevel;
+  title: string;
+  page: number;
+  /** true when the entry came from scanning the book; manual entries are kept on a rescan */
+  auto?: boolean;
+}
+
+interface ContentNode {
+  entry: ContentEntry;
+  children: ContentNode[];
+}
+
+const LEVEL_ORDER: Record<ContentLevel, number> = { unit: 0, chapter: 1, section: 2, topic: 3 };
+const LEVEL_LABEL: Record<ContentLevel, string> = { unit: 'Unit', chapter: 'Chapter', section: 'Section', topic: 'Topic' };
+
+const contentsKey = (docId: string) => `pulse.contents.v1.${docId}`;
+
+const newEntryId = () => Math.random().toString(36).slice(2, 10);
+
+const sameText = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+function readContents(docId: string): ContentEntry[] {
+  try {
+    const raw = localStorage.getItem(contentsKey(docId));
+    return raw ? (JSON.parse(raw) as ContentEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Book order: by page, and a parent comes before its children when they start on the same page. */
+function sortContents(entries: ContentEntry[]): ContentEntry[] {
+  return [...entries].sort((a, b) => a.page - b.page || LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level]);
+}
+
+/** Nests the sorted entries: each topic sits under its section, each section under its chapter, and so on. */
+function contentTree(entries: ContentEntry[]): ContentNode[] {
+  const roots: ContentNode[] = [];
+  const stack: ContentNode[] = [];
+  for (const entry of sortContents(entries)) {
+    const node: ContentNode = { entry, children: [] };
+    while (stack.length && LEVEL_ORDER[stack[stack.length - 1].entry.level] >= LEVEL_ORDER[entry.level]) stack.pop();
+    (stack.length ? stack[stack.length - 1].children : roots).push(node);
+    stack.push(node);
+  }
+  return roots;
+}
+
+/** Every line of a PDF page, top to bottom, with the largest font size on that line. */
+async function scanLines(page: any): Promise<{ text: string; size: number; top: number }[]> {
+  const [, y0, , y1] = page.view;
+  const height = y1 - y0 || 1;
+  const tc = await page.getTextContent();
+  const items = (tc.items as any[])
+    .filter((it) => typeof it.str === 'string' && it.str.trim())
+    .map((it) => ({ y: Math.round(it.transform[5]), x: it.transform[4], str: it.str as string, size: Math.abs(it.transform[3]) || it.height || 0 }))
+    .sort((a, b) => b.y - a.y || a.x - b.x);
+  const lines: { text: string; size: number; top: number }[] = [];
+  let lineY: number | null = null;
+  let current = { text: '', size: 0, y: 0 };
+  const close = () => {
+    const text = current.text.replace(/\s+/g, ' ').trim();
+    // top: how far down the page the line is, 0 at the top edge and 1 at the bottom
+    if (text) lines.push({ text, size: Math.round(current.size), top: (y1 - current.y) / height });
+  };
+  for (const item of items) {
+    if (lineY === null || Math.abs(item.y - lineY) > 2) {
+      close();
+      current = { text: item.str, size: item.size, y: item.y };
+      lineY = item.y;
+    } else {
+      current = { text: `${current.text} ${item.str}`, size: Math.max(current.size, item.size), y: current.y };
+    }
+  }
+  close();
+  return lines;
+}
+
+/** A printed contents page: which line is a unit heading and which is a chapter with its page. */
+function parsePrintedContents(lines: string[]): { level: ContentLevel; title: string; page: number }[] {
+  // A line ending in a connecting word is a title that wraps onto the next line.
+  const WRAPS_ON = /(\band|\bor|\bof|\bwith|\bfor|\bthe|\bin|\bto|,|:|-)$/i;
+  const rows: { level: ContentLevel; title: string; page: number | null }[] = [];
+  let pending = '';
+  const flushPending = () => {
+    if (pending) rows.push({ level: 'unit', title: pending, page: null });
+    pending = '';
+  };
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || /medicalstudyzone/i.test(line) || /^contents$/i.test(line)) continue;
+    // "Title 12" or "Title12": the last number is the page. A title may end in a number ("Part 1 12").
+    const spaced = line.match(/^(.+)\s+(\d{1,3})$/);
+    const glued = line.match(/^(.*\D)(\d{1,3})$/);
+    const numbered = spaced ?? glued;
+    if (numbered) {
+      let title = numbered[1].replace(/[\s.·…-]+$/, '').trim();
+      if (pending && WRAPS_ON.test(pending)) {
+        title = `${pending} ${title}`;
+        pending = '';
+      } else {
+        flushPending();
+      }
+      rows.push({ level: 'chapter', title, page: Number(numbered[2]) });
+      continue;
+    }
+    if (/^\d{1,3}$/.test(line)) {
+      // a page number that wrapped onto its own line
+      if (pending) {
+        rows.push({ level: 'chapter', title: pending, page: Number(line) });
+        pending = '';
+      }
+      continue;
+    }
+    if (pending && WRAPS_ON.test(pending)) pending = `${pending} ${line}`;
+    else {
+      flushPending();
+      pending = line;
+    }
+  }
+  flushPending();
+
+  // A unit has no page of its own: it starts where the next chapter starts.
+  let nextPage: number | null = null;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i].page !== null) nextPage = rows[i].page;
+    else if (nextPage !== null) rows[i].page = nextPage;
+  }
+  return rows.filter((r): r is { level: ContentLevel; title: string; page: number } => r.page !== null);
+}
+
 function normalizeOcrWords(
   words: OcrWord[] | undefined,
   srcW: number,
@@ -185,6 +326,18 @@ function normalizeOcrWords(
   });
 }
 
+// How the copilot answers: a teacher working through the passage with the student, not a summary.
+const TEACHER_SYSTEM =
+  'You are a patient senior doctor teaching a medical student for an exam. Teach; do not just state facts. ' +
+  'Work through the passage the way a good teacher does at a whiteboard: ' +
+  '(1) the big idea in one plain sentence; ' +
+  '(2) the reasoning step by step, saying why each step follows from the one before and naming the mechanism; ' +
+  '(3) one concrete analogy or clinical picture that makes it stick; ' +
+  '(4) the trap students usually fall into and how to tell the two apart; ' +
+  '(5) one short question for the student to answer in their head, then its answer on the next line. ' +
+  'Do not repeat the passage word for word. Use short paragraphs and numbered steps, no filler. ' +
+  'Stay grounded in the passage and cite it as [book p. N]. If the passage does not cover a step, say so and label that step as general knowledge.';
+
 interface PDFReaderViewProps {
   onNavigate: (view: AppView, targetId?: string) => void;
   darkMode?: boolean;
@@ -192,6 +345,8 @@ interface PDFReaderViewProps {
 export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMode = false }) => {
   const [docs, setDocs] = useState<PDFLibraryMeta[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
+  const activeDocIdRef = useRef<string | null>(null);
+  activeDocIdRef.current = activeDocId;
   const [libraryError, setLibraryError] = useState<string | null>(null);
 
   const [numPages, setNumPages] = useState<number>(0);
@@ -216,22 +371,39 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
 
   const [showThumbs, setShowThumbs] = useState<boolean>(false);
   const [ocrForce, setOcrForce] = useState<boolean>(false);
-  const [ocrOpen, setOcrOpen] = useState<boolean>(false);
   const [ocrBusy, setOcrBusy] = useState<boolean>(false);
+  // Which engine reads the pages: on-device Tesseract, or NVIDIA's hosted nemotron-ocr-v2.
+  const [ocrEngine, setOcrEngine] = useState<'tesseract' | 'nemotron'>(() => {
+    try {
+      return localStorage.getItem('pulse.ocrEngine') === 'nemotron' ? 'nemotron' : 'tesseract';
+    } catch {
+      return 'tesseract';
+    }
+  });
+  const [ocrTask, setOcrTask] = useState<{ done: number; total: number; detail: string } | null>(null);
   const [ocrNote, setOcrNote] = useState<string | null>(null);
   const [wordsVersion, setWordsVersion] = useState(0);
 
-  const [notesOpen, setNotesOpen] = useState<boolean>(false);
+  const [rightTab, setRightTab] = useState<'copilot' | 'highlights' | 'notes' | 'index'>('copilot');
+  // The library shelf is the opening page; a book opens the reader, and "Library" returns here.
+  const [showShelf, setShowShelf] = useState<boolean>(true);
+
+  // ----- Book contents: units, chapters and sections with their start pages -----
+  const [bookContents, setBookContents] = useState<ContentEntry[]>([]);
+  const [newEntry, setNewEntry] = useState<{ level: ContentLevel; title: string; page: string }>({ level: 'chapter', title: '', page: '' });
+  const [contentsNote, setContentsNote] = useState<string | null>(null);
+  const [scanning, setScanning] = useState<{ done: number; total: number } | null>(null);
   const [notesFrom, setNotesFrom] = useState<number>(1);
   const [notesTo, setNotesTo] = useState<number>(5);
   const [notesPartSize, setNotesPartSize] = useState<number>(5);
   const [notesBusy, setNotesBusy] = useState<boolean>(false);
   const notesCancelRef = useRef<boolean>(false);
-  const [madeNotes, setMadeNotes] = useState<{ range: string; text: string }[]>([]);
+  const pageTranscriptsRef = useRef<Map<string, string>>(new Map());
+  const [madeNotes, setMadeNotes] = useState<SavedNote[]>([]);
+  const [checkingNotes, setCheckingNotes] = useState<Set<string>>(new Set());
   const [notesError, setNotesError] = useState<string | null>(null);
 
   // ----- AI panel / MCQ state -----
-  const [askPanel, setAskPanel] = useState<boolean>(false);
   const [askContext, setAskContext] = useState<string>('');
   const [askContextLabel, setAskContextLabel] = useState<string>('current page');
   const [askIncludeWeb, setAskIncludeWeb] = useState<boolean>(false);
@@ -312,7 +484,10 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
       pdfRef.current = null;
     }
     clearRenderedPages();
+    // A notes run reads pages from the open PDF, so it must not carry on into another book.
+    if (id !== activeDocIdRef.current) notesCancelRef.current = true;
     setActiveDocId(id);
+    setShowShelf(false);
     setDocOpenError(null);
     setPageErrors({});
     setMatches([]);
@@ -337,7 +512,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
         return;
       }
       const buf = await rec.blob.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+      // wasmUrl: JPEG 2000 and JBIG2 images in scanned books need these decoders, or the page stays white.
+      const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf), wasmUrl: '/pdfjs-wasm/' }).promise;
       pdfRef.current = pdf;
       setNumPages(pdf.numPages);
       setViewMode('page');
@@ -423,6 +599,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   const handleDeleteDoc = async (id: string) => {
     try {
       await removeLibraryDocument(id);
+      writeSavedNotes(id, []);
       const all = await refreshLibrary();
       if (id === activeDocId) {
         clearRenderedPages();
@@ -430,6 +607,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
         setActiveDocId(null);
         setNumPages(0);
         if (all.length) await openDoc(all[0].id);
+        else setShowShelf(true);
       }
     } catch (err: any) {
       setLibraryError(err?.message || 'Could not delete the document.');
@@ -809,7 +987,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
     const rowRect = row.getBoundingClientRect();
     const above = range.top - rowRect.top - 44;
     setPopup({
-      x: Math.min(Math.max(range.left - rowRect.left, 12), Math.max(12, row.clientWidth - 190)),
+      x: Math.min(Math.max(range.left - rowRect.left, 12), Math.max(12, row.clientWidth - 360)),
       y: above >= 8 ? above : Math.min(range.bottom - rowRect.top + 8, Math.max(8, row.clientHeight - 60)),
       text: text.slice(0, 4000),
     });
@@ -870,16 +1048,19 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
       : Array.from({ length: numPages }, (_, i) => i + 1);
     setOcrBusy(true);
     setOcrNote(null);
+    setOcrTask({ done: 0, total: pages.length, detail: 'starting' });
     const job = startJob(`OCR · ${doc?.title ?? 'document'}`, scope === 'current' ? `page ${pages[0]}` : 'scanning pages…');
     ocrJobRef.current = job;
     let processed = 0;
     let skipped = 0;
     let pool: Awaited<ReturnType<typeof createOcrPool>> | null = null;
     const failures: string[] = [];
-    const K = scope === 'current' ? 1 : Math.max(1, ocrConcurrency());
+    // One page after another for the whole document: pages are recognised in order, and only one
+    // OCR engine is busy at a time, so memory stays low on large scans.
+    const K = 1;
     const measure = document.createElement('canvas').getContext('2d')!;
     try {
-      pool = await createOcrPool(K);
+      if (ocrEngine === 'tesseract') pool = await createOcrPool(K);
       let next = 0;
       const runOne = async () => {
         for (;;) {
@@ -888,8 +1069,10 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
           const n = pages[index];
           try {
             if (scope === 'missing' && !ocrForce) {
+              // A page counts as "has text" only with real body text: a running header or a watermark
+              // alone (a few dozen characters) must not stop a scanned page from being recognised.
               const existing = await ensurePageText(n).catch(() => '');
-              if (existing.trim()) { skipped += 1; return; }
+              if (existing.replace(/\s+/g, '').length >= 200) { skipped += 1; return; }
             }
             job.update({ detail: `page ${n} · rendering` });
             const page = await pdfRef.current.getPage(n);
@@ -900,12 +1083,15 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
             canvas.width = Math.floor(viewport.width);
             canvas.height = Math.floor(viewport.height);
             await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise;
-            const result = await pool!.recognize(canvas, (p) => {
-              job.update({
-                progress: Math.round(((processed + p.progress) / pages.length) * 100),
-                detail: `page ${n} · ${p.status}`,
+            const result = ocrEngine === 'nemotron'
+              ? await recognizeWithNemotron(canvas)
+              : await pool!.recognize(canvas, (p) => {
+                job.update({
+                  progress: Math.round(((processed + p.progress) / pages.length) * 100),
+                  detail: `page ${n} · ${p.status}`,
+                });
+                setOcrTask({ done: processed, total: pages.length, detail: `page ${n} · ${p.status}` });
               });
-            });
             const words = normalizeOcrWords(result.words, canvas.width, canvas.height, measure);
             if (result.text.trim()) {
               await savePageText(activeDocId, n, result.text, words);
@@ -922,6 +1108,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               progress: Math.min(100, Math.round((processed / pages.length) * 100)),
               detail: `page ${n} done · ${processed}/${pages.length}`,
             });
+            setOcrTask({ done: processed, total: pages.length, detail: `page ${n} done` });
           } catch (err: any) {
             failures.push(`p.${n}: ${err?.message || 'failed'}`);
           }
@@ -950,20 +1137,248 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
     } finally {
       try { await pool?.terminate(); } catch { /* already gone */ }
       setOcrBusy(false);
+      setOcrTask(null);
       ocrJobRef.current = null;
     }
   };
 
+  // ============================ Book contents ============================
+
+  // The book's own structure, laid out like the contents page at the front of a printed book:
+  // units, chapters and sections, each with the page it starts on. It comes from the PDF's
+  // bookmarks when there are any, and can always be typed in by hand.
+  const saveContents = (docId: string, entries: ContentEntry[]) => {
+    const sorted = sortContents(entries);
+    setBookContents(sorted);
+    try {
+      localStorage.setItem(contentsKey(docId), JSON.stringify(sorted));
+    } catch {
+      /* storage full: the contents stay for this session only */
+    }
+  };
+
+  // Bookmarks at the top level become chapters, and bookmarks nested under them become sections.
+  // Units are not in the bookmarks, so the units already typed in are kept.
+  const importFromBookmarks = async () => {
+    const pdf = pdfRef.current;
+    if (!pdf || !activeDocId) return;
+    const found: ContentEntry[] = [];
+    const walk = async (items: any[], depth: number) => {
+      for (const item of items) {
+        let dest = item.dest;
+        if (typeof dest === 'string') dest = await pdf.getDestination(dest).catch(() => null);
+        let page = 0;
+        if (Array.isArray(dest) && dest[0]) page = (await pdf.getPageIndex(dest[0]).catch(() => -1)) + 1;
+        const title = String(item.title || '').trim();
+        if (page > 0 && title) {
+          found.push({ id: newEntryId(), level: depth === 0 ? 'chapter' : 'section', title, page });
+        }
+        if (item.items?.length) await walk(item.items, depth + 1);
+      }
+    };
+    await walk((await pdf.getOutline().catch(() => null)) ?? [], 0);
+    if (!found.length) {
+      setLibraryError('This PDF has no bookmarks. Add its units and chapters by hand.');
+      return;
+    }
+    saveContents(activeDocId, [...bookContents.filter((e) => e.level === 'unit'), ...found]);
+  };
+
+  const addEntry = (level: ContentLevel, title: string, page: number) => {
+    if (!activeDocId) return;
+    const entry: ContentEntry = {
+      id: newEntryId(),
+      level,
+      title: title.trim() || `${LEVEL_LABEL[level]} from p. ${page}`,
+      page,
+    };
+    saveContents(activeDocId, [...bookContents, entry]);
+  };
+
+  const removeEntry = (id: string) => {
+    if (activeDocId) saveContents(activeDocId, bookContents.filter((e) => e.id !== id));
+  };
+
+  // Scans every page of the book and builds the contents from the whole text: the printed contents
+  // page (units and chapters, when the book has one) plus the headings found on the pages, nested
+  // unit > chapter > section > topic. Entries typed in by hand are kept.
+  const buildIndexFromBook = async () => {
+    const pdf = pdfRef.current;
+    if (!pdf || !activeDocId || scanning) return;
+    const docId = activeDocId;
+    const total = numPages;
+    setContentsNote(null);
+    setScanning({ done: 0, total });
+    try {
+      // 1. Read every page, so nothing depends on where the contents page happens to be.
+      const pages = new Map<number, { text: string; size: number; top: number }[]>();
+      for (let n = 1; n <= total; n++) {
+        pages.set(n, await scanLines(await pdf.getPage(n)));
+        setScanning({ done: n, total });
+      }
+
+      // 2. The printed contents page, if there is one, and the pages that carry on from it.
+      let start = 0;
+      for (let n = 1; n <= total && !start; n++) {
+        if (pages.get(n)!.some((l) => /^contents$/i.test(l.text))) start = n;
+      }
+      const contentsPages: number[] = [];
+      let printed: { level: ContentLevel; title: string; page: number }[] = [];
+      if (start) {
+        contentsPages.push(start);
+        // A contents page is mostly lines that end in a page number. Slide pages are not, so they stop the run.
+        const contentsLike = (n: number) => {
+          const ls = pages.get(n)!;
+          const numbered = ls.filter((l) => /\d{1,3}$/.test(l.text)).length;
+          return numbered >= 3 && numbered / ls.length >= 0.5;
+        };
+        for (let n = start + 1; n <= Math.min(total, start + 6) && contentsLike(n); n++) {
+          contentsPages.push(n);
+        }
+        printed = parsePrintedContents(contentsPages.flatMap((n) => pages.get(n)!.map((l) => l.text)));
+      }
+      const bodyPages = Array.from({ length: total }, (_, i) => i + 1).filter((n) => !contentsPages.includes(n));
+      const pageHead = (n: number) => sameText(pages.get(n)!.map((l) => l.text).join(' ').slice(0, 400));
+
+      // 3. Printed page numbers are not PDF page numbers (the front matter comes first). Find the
+      //    shift that puts the first chapter titles on their printed pages.
+      let offset = 0;
+      if (printed.length) {
+        const probes = printed.filter((e) => e.level !== 'unit').slice(0, 6);
+        let bestHits = -1;
+        for (let shift = 0; shift <= 30; shift++) {
+          let hits = 0;
+          for (const e of probes) {
+            const n = e.page + shift;
+            if (n >= 1 && n <= total && !contentsPages.includes(n) && pageHead(n).includes(sameText(e.title).slice(0, 18))) {
+              hits += 1;
+            }
+          }
+          if (hits > bestHits) {
+            bestHits = hits;
+            offset = shift;
+          }
+        }
+      }
+
+      // 4. Headings: lines set in a bigger font than the body text, on the pages outside the contents.
+      const sizeChars = new Map<number, number>();
+      for (const n of bodyPages) {
+        for (const l of pages.get(n)!) sizeChars.set(l.size, (sizeChars.get(l.size) ?? 0) + l.text.length);
+      }
+      let bodySize = 0;
+      let most = -1;
+      for (const [size, chars] of sizeChars) {
+        if (chars > most) {
+          most = chars;
+          bodySize = size;
+        }
+      }
+      const headings: { text: string; size: number; page: number }[] = [];
+      for (const n of bodyPages) {
+        for (const l of pages.get(n)!) {
+          if (l.size < bodySize + 2 || l.text.length < 3 || l.text.length > 90) continue;
+          // A heading is a short line near the top of the page. Figures, slide text and bullet points are not.
+          if (l.top > 0.4 || l.text.split(' ').length > 12) continue;
+          if (/[.;,:]$/.test(l.text) || /^[•*\-–]/.test(l.text) || /\d{1,2}:\d{2}/.test(l.text)) continue;
+          if (!/[A-Za-z]{3}/.test(l.text) || /medicalstudyzone/i.test(l.text)) continue;
+          // Slide titles repeat in capitals, and slide artwork leaves "Active space" and garbled text behind.
+          if (l.text.length > 12 && l.text === l.text.toUpperCase()) continue;
+          if (/active\s*space/i.test(l.text) || l.text.replace(/[^A-Za-z]/g, '').length < l.text.length * 0.7) continue;
+          headings.push({ text: l.text, size: l.size, page: n });
+        }
+      }
+      // The biggest heading size is the top level. With a printed contents page, chapters come from
+      // it, so headings become sections and topics.
+      const sizes = [...new Set(headings.map((h) => h.size))].sort((a, b) => b - a);
+      const levelOfSize = (size: number): ContentLevel => {
+        const rank = sizes.indexOf(size);
+        if (printed.length) return rank === 0 ? 'section' : 'topic';
+        return rank === 0 ? 'chapter' : rank === 1 ? 'section' : 'topic';
+      };
+      const known = new Set(printed.map((e) => sameText(e.title)));
+      const seen = new Set<string>();
+      const found: { level: ContentLevel; title: string; page: number }[] = [];
+      for (const h of headings) {
+        const key = sameText(h.text);
+        // a running header repeats on every page: keep only its first page
+        if (!key || known.has(key) || seen.has(key)) continue;
+        seen.add(key);
+        found.push({ level: levelOfSize(h.size), title: h.text, page: h.page });
+      }
+
+      // 5. Save: the scanned entries replace the earlier scan, and manual entries stay.
+      const scanned: ContentEntry[] = [
+        ...printed.map((e) => ({ level: e.level, title: e.title, page: e.page + offset })),
+        ...found,
+      ]
+        .filter((e) => e.page >= 1 && e.page <= total)
+        .map((e) => ({ id: newEntryId(), level: e.level, title: e.title, page: e.page, auto: true }));
+      saveContents(docId, [...bookContents.filter((e) => !e.auto), ...scanned]);
+      const count = (lvl: ContentLevel) => scanned.filter((e) => e.level === lvl).length;
+      setContentsNote(
+        `Scanned ${total} pages: ${count('unit')} units, ${count('chapter')} chapters, ${count('section')} sections, ${count('topic')} topics. ` +
+          (printed.length
+            ? `Printed page 1 is PDF page ${1 + offset}.`
+            : 'No printed contents page was found, so chapters come from the headings.'),
+      );
+    } catch (err: any) {
+      setContentsNote(`Scan failed: ${err?.message || 'unknown error'}`);
+    } finally {
+      setScanning(null);
+    }
+  };
+
+  const deleteNote = (id: string) => {
+    if (!activeDocId) return;
+    const remaining = readSavedNotes(activeDocId).filter((n) => n.id !== id);
+    writeSavedNotes(activeDocId, remaining);
+    setMadeNotes((prev) => prev.filter((n) => n.id !== id));
+  };
+
+  // Show the saved contents and notes of the open book.
+  useEffect(() => {
+    setMadeNotes(activeDocId ? readSavedNotes(activeDocId) : []);
+    setNotesError(null);
+    setBookContents(activeDocId ? readContents(activeDocId) : []);
+    setNewEntry({ level: 'chapter', title: '', page: '' });
+  }, [activeDocId]);
+
   // ============================ Make notes from pages ============================
 
-  const makeNotesFromPages = async () => {
+  const checkNoteOnWeb = async (docId: string, target: SavedNote) => {
+    const provider = getActiveProvider();
+    if (!provider) { setNotesError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`); return; }
+    setCheckingNotes((prev) => new Set(prev).add(target.id));
+    const webCheck = await runWebCheck(teachingNoteToText(target.note), { provider, model: getEffectiveModel(provider) });
+    // A failed re-check must not wipe out an earlier good result.
+    const keepOld = webCheck.status === 'failed' && target.webCheck?.status === 'done';
+    if (keepOld) {
+      setNotesError(`The new web check failed, so the earlier result is still shown. ${webCheck.error ?? ''}`);
+    } else {
+      writeSavedNotes(docId, readSavedNotes(docId).map((n) => (n.id === target.id ? { ...n, webCheck } : n)));
+      if (activeDocIdRef.current === docId) {
+        setMadeNotes((prev) => prev.map((n) => (n.id === target.id ? { ...n, webCheck } : n)));
+      }
+    }
+    setCheckingNotes((prev) => {
+      const next = new Set(prev);
+      next.delete(target.id);
+      return next;
+    });
+  };
+
+  // override: notes for a given page range (a chapter from the index); label names that range in the notes.
+  const makeNotesFromPages = async (override?: { from: number; to: number; label?: string }) => {
+    if (notesBusy) return;
     const provider = getActiveProvider();
     if (!provider) { setNotesError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`); return; }
     if (!activeDocId || numPages === 0) { setNotesError('Open a document first.'); return; }
-    const from = Math.max(1, Math.min(numPages, Math.floor(notesFrom) || 1));
-    const to = Math.max(from, Math.min(numPages, Math.floor(notesTo) || from));
+    const from = Math.max(1, Math.min(numPages, Math.floor(override?.from ?? notesFrom) || 1));
+    const to = Math.max(from, Math.min(numPages, Math.floor(override?.to ?? notesTo) || from));
     const partSize = Math.max(1, Math.min(20, Math.floor(notesPartSize) || 5));
     const doc = docs.find((d) => d.id === activeDocId);
+    const notesDocId = activeDocId;
     const totalParts = Math.ceil((to - from + 1) / partSize);
 
     notesCancelRef.current = false;
@@ -982,22 +1397,94 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
           const text = await ensurePageText(n).catch(() => '');
           if (text.trim()) parts.push(`[page ${n}]\n${text}`);
         }
-        if (!parts.length) continue;
-        const raw = await aiComplete({
-          system:
-            'You are a high-yield medical revision writer. Turn the supplied book pages into a compact revision note. ' +
-            'Use short headings, bullets, and mark the key takeaway with a line starting "High-yield:" and any memory device with "Mnemonic:". ' +
-            'Cite the page numbers inline as "p. N". Plain text only.',
-          messages: [{
-            role: 'user',
-            content: `Book: ${doc?.title ?? 'document'}\nPages ${start}–${end}:\n\n${parts.join('\n\n').slice(0, 12000)}\n\nWrite the revision notes for these pages.`,
-          }],
-          provider,
-          model: getEffectiveModel(provider),
-        });
-        const text = raw.trim();
-        if (!text) continue;
-        setMadeNotes((prev) => [...prev, { range: `pp. ${start}–${end}`, text }]);
+        // Handwritten and scanned pages come through OCR garbled, so each page is first read from its
+        // image, one call per page, which keeps small details like "3rd" or "CYP2C19" legible. The teacher
+        // then writes from those transcripts. A page that cannot be read falls back to its text layer.
+        const sources: string[] = [];
+        let pagesRead = 0;
+        for (let n = start; n <= end; n++) {
+          if (notesCancelRef.current || job.isCancelled()) break;
+          const key = activeDocId + ':' + n;
+          let transcript = pageTranscriptsRef.current.get(key) ?? '';
+          if (!transcript && pdfRef.current) {
+            job.update({ detail: 'reading page ' + n + ' of ' + end });
+            try {
+              const page = await pdfRef.current.getPage(n);
+              const base = page.getViewport({ scale: 1 });
+              const viewport = page.getViewport({ scale: Math.min(3, 1600 / Math.max(1, base.width)) });
+              const canvas = document.createElement('canvas');
+              canvas.width = Math.floor(viewport.width);
+              canvas.height = Math.floor(viewport.height);
+              await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise;
+              const image = canvas.toDataURL('image/jpeg', 0.8);
+              canvas.width = 0;
+              canvas.height = 0;
+              // The provider rate-limits bursts (HTTP 429). Waiting beats falling back to garbled text.
+              for (let attempt = 0; ; attempt++) {
+                try {
+                  transcript = (await aiCompleteWithImages({
+                    system: PAGE_TRANSCRIBE_SYSTEM,
+                    messages: [{ role: 'user', content: 'Transcribe this page.' }],
+                    provider,
+                    model: getEffectiveModel(provider),
+                  }, [image])).trim();
+                  break;
+                } catch (err: any) {
+                  if (attempt >= 3 || !/429/.test(err?.message || '')) throw err;
+                  job.update({ detail: 'rate limited, retrying page ' + n });
+                  await new Promise((resolve) => setTimeout(resolve, 10000 * (attempt + 1)));
+                }
+              }
+              if (transcript) pageTranscriptsRef.current.set(key, transcript);
+            } catch (err: any) {
+              console.warn('[notes] page ' + n + ' image was not read:', err?.message || err);
+            }
+          }
+          if (transcript) {
+            pagesRead += 1;
+            sources.push('[page ' + n + ']\n' + transcript);
+          } else {
+            const layer = parts.find((p) => p.startsWith('[page ' + n + ']'));
+            if (layer) sources.push(layer);
+          }
+        }
+        if (notesCancelRef.current || job.isCancelled()) break;
+        if (!sources.length) continue;
+        const readImages = pagesRead === end - start + 1;
+        job.update({ detail: 'writing notes for pages ' + start + '–' + end });
+        // Malformed JSON gets one more try before the part is reported as failed.
+        let note: TeachingNote | null = null;
+        for (let attempt = 0; attempt < 2 && !note; attempt++) {
+          note = toTeachingNote(extractJson(await aiComplete({
+            system: TEACHING_NOTE_SYSTEM,
+            messages: [{
+              role: 'user',
+              content: 'Book: ' + (doc?.title ?? 'document') + '\nPages ' + start + '–' + end + ':\n\n' + sources.join('\n\n').slice(0, 24000) + '\n\nTeach these pages. Reply with the JSON note.',
+            }],
+            json: true,
+            effort: 'high',
+            provider,
+            model: getEffectiveModel(provider),
+          })));
+        }
+        if (!note) {
+          setNotesError(`Pages ${start}–${end}: the AI reply could not be read as a note, so this part was skipped.`);
+          continue;
+        }
+        const made: SavedNote = {
+          id: newEntryId(),
+          range: `${override?.label ? `${override.label} · ` : ''}pp. ${start}–${end}`,
+          note,
+          readImages,
+        };
+        // Saved after every part, so a stopped or interrupted chapter keeps what it already made.
+        const savedNotes = [...readSavedNotes(notesDocId), made];
+        if (!writeSavedNotes(notesDocId, savedNotes)) {
+          setNotesError('This note could not be saved because browser storage is full. It will be lost on reload.');
+        }
+        if (activeDocIdRef.current === notesDocId) setMadeNotes((prev) => [...prev, made]);
+        job.update({ detail: 'checking pages ' + start + '–' + end + ' on the web' });
+        await checkNoteOnWeb(notesDocId, made);
         saved += 1;
         job.update({ progress: Math.round(((part + 1) / totalParts) * 100), detail: `${saved} part${saved === 1 ? '' : 's'} saved` });
       }
@@ -1017,25 +1504,11 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
 
   // ============================ Ask AI panel ============================
 
-  const openAskPanel = async (mode: 'selection' | 'page') => {
-    setAskPanel(true);
-    setAskError(null);
-    setMcqs([]);
-    if (mode === 'selection' && popup) {
-      setAskContext(popup.text);
-      setAskContextLabel(`selection (p. ${currentPageRef.current})`);
-      setPopup(null);
-    } else {
-      const text = await ensurePageText(currentPageRef.current).catch(() => '');
-      setAskContext(text.slice(0, 6000));
-      setAskContextLabel(`page ${currentPageRef.current}`);
-    }
-  };
-
-  const askAi = async (customQuestion?: string) => {
+  // ctx: text to answer from (defaults to the panel's current context); onReply: receives the answer.
+  const askAi = async (customQuestion?: string, ctx?: string, onReply?: (reply: string) => void) => {
     const provider = getActiveProvider();
     if (!provider) { setAskError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`); return; }
-    if (!askContext.trim()) {
+    if (!(ctx ?? askContext).trim()) {
       const text = await ensurePageText(currentPageRef.current).catch(() => '');
       setAskContext(text.slice(0, 6000));
       if (!text.trim()) { setAskError('No text available on this page (possibly a scanned image without OCR).'); return; }
@@ -1044,9 +1517,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
     setAskError(null);
     setAskCitations([]);
     setAskReply('');
-    const question = customQuestion?.trim() || `Explain the key clinical content clearly and completely, with mechanisms and any exam-relevant points.`;
+    const question = customQuestion?.trim() || 'Teach me this passage from the beginning, as if I have never seen it before.';
     setAskQuestion(question);
-    const contextText = askContext.trim();
+    const contextText = (ctx ?? askContext).trim();
     try {
       let webBlock = '';
       let urls: string[] = [];
@@ -1067,9 +1540,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
 
       const raw = await aiComplete({
         system:
-          'You are the Pulse Med clinical assistant answering STRICTLY from the provided book passage' +
-          (askIncludeWeb ? ' and the labelled web sources.' : ' only.') +
-          ' Explain accurately with mechanisms; if the passage does not cover something, say so. Cite the passage as [book p. N] and web sources as [Wn].',
+          TEACHER_SYSTEM +
+          (askIncludeWeb ? ' Use the labelled web sources too, and cite them as [Wn].' : ''),
         messages: [{
           role: 'user',
           content:
@@ -1081,11 +1553,37 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
         model: getEffectiveModel(provider),
       });
       setAskReply(raw);
+      onReply?.(raw);
     } catch (err: any) {
       setAskError(err?.message || 'AI request failed.');
     } finally {
       setAskBusy(false);
     }
+  };
+
+  // Selection popup actions: open the Ask panel on the selected text and answer straight away.
+  const EXPLAIN_PROMPT = 'Teach me this selection from the start: the big idea, the mechanism step by step, an analogy, and the trap students fall into.';
+  const NOTES_PROMPT = 'Turn this passage into a short revision note card: one bold title line, 3-6 high-yield bullets, a "High-yield:" line, and a citation.';
+  const askSelection = (prompt?: string, saveNote = false) => {
+    if (!popup) return;
+    const text = popup.text;
+    const label = `selection (p. ${currentPageRef.current})`;
+    setPopup(null);
+    setRightTab('copilot');
+    setShowNotes(true);
+    setAskError(null);
+    setMcqs([]);
+    setAskContext(text);
+    setAskContextLabel(label);
+    void askAi(prompt, text, saveNote ? (reply) => {
+      addUserHighlight(highlightFromAiReply({
+        quote: reply,
+        subject: activeDoc?.subject ?? '',
+        subtopic: label,
+        citation: `AI note · ${activeDoc?.title ?? 'book'} · ${label}`,
+        tags: ['ai-note'],
+      }));
+    } : undefined);
   };
 
   const generateMcqs = async () => {
@@ -1196,6 +1694,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   const toggleFullscreen = async () => {
     const next = !immersive;
     setImmersive(next);
+    // Entering full screen refits the page to the screen width instead of keeping the old zoom.
+    if (next) setFitWidth(true);
     try {
       if (next && !document.fullscreenElement) {
         await document.documentElement.requestFullscreen();
@@ -1273,14 +1773,94 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   const pageHighlights = highlights.filter((h) => h.page === currentPage && h.rects && h.rects.length > 0);
   const currentOcr = ocrWordsRef.current.has(currentPage);
   const currentNativeText = nativeTextPagesRef.current.has(currentPage);
-  const indexedPages = pageTextsRef.current.size;
   const panelOpen = showNotes;
+
+  // Books grouped by subject, for the library shelf. Uncategorised comes last.
+  const shelfGroups = Object.entries(
+    docs.reduce<Record<string, PDFLibraryMeta[]>>((acc, d) => {
+      const key = d.subject || 'Uncategorised';
+      (acc[key] ??= []).push(d);
+      return acc;
+    }, {}),
+  ).sort(([a], [b]) => Number(a === 'Uncategorised') - Number(b === 'Uncategorised') || a.localeCompare(b));
+
+  const shelfView = (
+    <div className="flex h-[calc(100vh-64px)] flex-col gap-3 overflow-y-auto bg-slate-200/70 p-3 text-slate-800">
+      <header className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+        <div>
+          <p className="font-mono text-[9px] uppercase tracking-[0.25em] text-slate-400">PDF reader</p>
+          <h2 className="text-[16px] font-bold text-slate-900">Your library</h2>
+          <p className="text-[11px] text-slate-500">
+            {docs.length} book{docs.length === 1 ? '' : 's'} · grouped by subject
+          </p>
+        </div>
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-[11px] font-bold transition active:scale-95 ${T.cta}`}
+        >
+          <UploadCloud className="h-3.5 w-3.5" /> Import
+        </button>
+      </header>
+
+      {libraryError && (
+        <div className="flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          <span className="flex-1">{libraryError}</span>
+        </div>
+      )}
+
+      {!docs.length && (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
+          <BookOpen className={`h-8 w-8 ${T.dim}`} />
+          <p className={`text-[12px] font-bold ${T.strong}`}>No books yet</p>
+          <p className={`max-w-xs text-[11px] leading-relaxed ${T.muted}`}>Import a PDF or DOCX. It is stored on this computer and sorted by its subject.</p>
+        </div>
+      )}
+
+      {shelfGroups.map(([subject, books]) => (
+        <section key={subject} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center gap-2">
+            <span className="text-[12px] font-bold text-slate-900">{subject}</span>
+            <span className="rounded-full bg-teal-50 px-2 py-0.5 font-mono text-[9px] text-[#00696b]">{books.length}</span>
+            <span className="h-px flex-1 bg-slate-200" />
+          </div>
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-3">
+            {books.map((d) => (
+              <button
+                key={d.id}
+                onClick={() => openDoc(d.id)}
+                title={`${d.title} · ${d.numPages} pages`}
+                className="group flex flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:-translate-y-0.5 hover:border-[#0f8b8d]/40 hover:bg-white hover:shadow-md"
+              >
+                <div className="flex h-24 items-center justify-center rounded-lg bg-gradient-to-br from-[#00696b] to-[#0f8b8d] text-white">
+                  <BookOpen className="h-8 w-8 opacity-90" />
+                </div>
+                <span className="line-clamp-2 text-[12px] font-semibold text-slate-900">{d.title}</span>
+                <span className="font-mono text-[10px] text-slate-500">
+                  {(d.fileType ?? 'pdf').toUpperCase()} · {d.numPages} pages
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+
+  if (showShelf) return shelfView;
 
   return (
     <div className="flex h-[calc(100vh-64px)] flex-col gap-2 overflow-y-auto p-2 lg:overflow-hidden bg-slate-200/70 text-slate-800">
       <section className={`shrink-0 rounded-xl border px-2.5 py-2 ${T.panel}`}>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <button
+              onClick={() => setShowShelf(true)}
+              title="Back to the library"
+              className={`flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-bold transition ${T.chip} ${T.softHover}`}
+            >
+              <ChevronLeft className="h-3.5 w-3.5" /> Library
+            </button>
             <button
               onClick={() => fileInputRef.current?.click()}
               className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-bold transition active:scale-95 ${T.cta}`}
@@ -1296,278 +1876,178 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               className="hidden"
               onChange={(e) => { handleImportFiles(e.target.files); e.target.value = ''; }}
             />
-            <div className="flex min-w-0 items-center gap-1 overflow-x-auto py-0.5">
-              {docs.map((d) => {
-                const on = d.id === activeDocId;
-                return (
-                  <div
-                    key={d.id}
-                    className={`flex shrink-0 items-center rounded-lg border transition ${on ? T.chipAccent : `${T.border} ${T.panelSoft}`}`}
-                  >
-                    <button
-                      onClick={() => openDoc(d.id)}
-                      title={`${d.title} · ${d.numPages} pages`}
-                      className={`flex items-center gap-1.5 px-2 py-1.5 font-mono text-[10px] ${on ? 'font-bold' : T.muted}`}
-                    >
-                      <FileText className="h-3 w-3 shrink-0" />
-                      <span className="max-w-[150px] truncate">{d.title}</span>
-                      {on && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />}
-                    </button>
-                    {on && (
-                      <button
-                        onClick={() => handleDeleteDoc(d.id)}
-                        title="Remove from library"
-                        className="pr-1.5 text-current opacity-40 transition hover:opacity-100"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-              {!docs.length && (
-                <span className={`px-1 font-mono text-[10px] ${T.dim}`}>No documents yet — import a PDF or DOCX</span>
-              )}
+            <div className="min-w-0">
+              <div className={`truncate text-[12px] font-bold ${T.strong}`}>{activeDoc?.title ?? 'No document open'}</div>
+              <div className={`truncate font-mono text-[9px] ${T.dim}`}>
+                {activeDoc
+                  ? `${activeDoc.fileType?.toUpperCase() ?? ''} · ${numPages} pages · ${activeDoc.subject || 'Uncategorised'}`
+                  : 'Import a PDF or DOCX to begin'}
+              </div>
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <span className={`hidden items-center gap-1.5 rounded-lg border px-2 py-1 font-mono text-[9px] uppercase tracking-wider xl:flex ${T.chip}`}>
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+            <span className={`hidden items-center gap-1.5 rounded-full border px-2 py-1 font-mono text-[9px] uppercase tracking-wider xl:flex ${T.chip}`}>
               <span className={`h-1.5 w-1.5 rounded-full ${numPages ? 'bg-emerald-500' : 'bg-slate-500'}`} />
               {numPages ? 'Local engine · ready' : 'Idle'}
             </span>
             {numPages > 0 && (
-              <div className={`mt-2 flex flex-wrap items-center justify-between gap-2 border-t pt-1.5 ${T.divider}`}>
-                <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] ${T.dim}`}>
-                  <span className="flex items-center gap-1">{numPages} pages</span>
-                  <span className="flex items-center gap-1">
-                    <ScanText className="h-3 w-3" />
-                    OCR: {ocrBusy ? 'running' : currentOcr ? `ready (${ocrWordsRef.current.size} pp)` : currentNativeText ? 'native text' : 'not scanned'}
-                  </span>
-                  <span className="hidden sm:inline">{activeDoc?.subject ?? 'Uncategorised'}</span>
-                  <span className="hidden lg:inline">{indexedPages} indexed</span>
-                </div>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <div className={`flex min-w-[180px] flex-1 items-center gap-1 rounded-lg border px-2 py-1 sm:flex-none ${T.input}`}>
-                    <Search className={`h-3 w-3 shrink-0 ${T.dim}`} />
-                    <input
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') runSearch(); }}
-                      placeholder="Search this book…"
-                      className="min-w-0 flex-1 bg-transparent text-[11px] focus:outline-none"
-                    />
-                    {indexing.busy ? (
-                      <button onClick={stopSearch} className="flex shrink-0 items-center gap-1 text-[9px] text-amber-600 dark:text-amber-300" title="Stop indexing">
-                        <Loader2 className="h-3 w-3 animate-spin" /> {indexing.done}/{numPages}
-                      </button>
-                    ) : matches.length > 0 ? (
-                      <button onClick={() => moveMatch(1)} className={`shrink-0 font-mono text-[9px] ${T.accent}`} title="Next match">
-                        {matchIndex + 1}/{matches.length}
-                      </button>
-                    ) : null}
-                    <button onClick={() => moveMatch(-1)} disabled={!matches.length} className="p-0.5 disabled:opacity-30" title="Previous match">
-                      <ChevronLeft className="h-3 w-3" />
+              <>
+                <span
+                  className={`flex items-center gap-1 rounded-full border px-2 py-1 font-mono text-[9px] ${ocrBusy ? T.chipAccent : currentOcr || currentNativeText ? T.chipGood : T.chip}`}
+                  title="OCR status for the current page"
+                >
+                  <ScanText className="h-3 w-3" />
+                  OCR: {ocrBusy
+                    ? `running ${ocrTask ? `${ocrTask.done}/${ocrTask.total}` : ''}`
+                    : currentOcr
+                      ? `ready (${ocrWordsRef.current.size} pp)`
+                      : currentNativeText
+                        ? 'native text'
+                        : 'not scanned'}
+                </span>
+                <div className={`flex min-w-[180px] flex-1 items-center gap-1 rounded-lg border px-2 py-1 sm:flex-none ${T.input}`}>
+                  <Search className={`h-3 w-3 shrink-0 ${T.dim}`} />
+                  <input
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') runSearch(); }}
+                    placeholder="Search this book…"
+                    className="min-w-0 flex-1 bg-transparent text-[11px] focus:outline-none"
+                  />
+                  {indexing.busy ? (
+                    <button onClick={stopSearch} className="flex shrink-0 items-center gap-1 text-[9px] text-amber-600 dark:text-amber-300" title="Stop indexing">
+                      <Loader2 className="h-3 w-3 animate-spin" /> {indexing.done}/{numPages}
                     </button>
-                    <button onClick={() => moveMatch(1)} disabled={!matches.length} className="p-0.5 disabled:opacity-30" title="Next match">
-                      <ChevronRight className="h-3 w-3" />
+                  ) : matches.length > 0 ? (
+                    <button onClick={() => moveMatch(1)} className={`shrink-0 font-mono text-[9px] ${T.accent}`} title="Next match">
+                      {matchIndex + 1}/{matches.length}
                     </button>
-                  </div>
-                  <div className={`flex items-center gap-1 rounded-lg border px-1.5 py-1 ${T.input}`}>
-                    <button onClick={() => gotoPage(currentPage - 1)} disabled={currentPage <= 1} className="p-0.5 disabled:opacity-30" title="Previous page">
-                      <ChevronLeft className="h-3.5 w-3.5" />
-                    </button>
-                    <input
-                      value={currentPage}
-                      onChange={(e) => { const n = parseInt(e.target.value, 10); if (!Number.isNaN(n)) setCurrentPage(n); }}
-                      onKeyDown={(e) => { if (e.key === 'Enter') gotoPage(currentPage); }}
-                      className="w-8 bg-transparent text-center font-mono text-[11px] focus:outline-none"
-                      title="Jump to page"
-                    />
-                    <span className={`font-mono text-[9px] ${T.dim}`}>/ {numPages}</span>
-                    <button onClick={() => gotoPage(currentPage + 1)} disabled={currentPage >= numPages} className="p-0.5 disabled:opacity-30" title="Next page">
-                      <ChevronRight className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                  <div className={`flex items-center gap-1 rounded-lg border px-1.5 py-1 ${T.input}`}>
-                    <button onClick={() => { setFitWidth(false); setScale((s) => Math.max(0.25, +(s - 0.2).toFixed(2))); }} title="Zoom out">
-                      <ZoomOut className="h-3.5 w-3.5" />
-                    </button>
-                    <span className="w-9 text-center font-mono text-[10px]">{Math.round(scale * 100)}%</span>
-                    <button onClick={() => { setFitWidth(false); setScale((s) => Math.min(4, +(s + 0.2).toFixed(2))); }} title="Zoom in">
-                      <ZoomIn className="h-3.5 w-3.5" />
-                    </button>
-                    <button onClick={() => setFitWidth(!fitWidth)} title="Fit width" className={fitWidth ? T.accent : T.dim}>
-                      <Maximize className="h-3.5 w-3.5" />
-                    </button>
-                    <button onClick={() => { setFitWidth(false); setScale(fitPageScale()); }} title="Fit whole page" className={T.dim}>
-                      <Focus className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                  <button
-                    onClick={() => setOcrOpen((v) => !v)}
-                    title="OCR matrix — read scanned pages locally"
-                    className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition ${ocrOpen ? T.chipAccent : T.chip}`}
-                  >
-                    <ScanText className="h-3 w-3" /> OCR Matrix
+                  ) : null}
+                  <button onClick={() => moveMatch(-1)} disabled={!matches.length} className="p-0.5 disabled:opacity-30" title="Previous match">
+                    <ChevronLeft className="h-3 w-3" />
                   </button>
-                  <button
-                    onClick={() => setNotesOpen((v) => !v)}
-                    title="Generate revision notes from a page range"
-                    className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition ${notesOpen ? T.chipAccent : T.chip}`}
-                  >
-                    <NotebookPen className="h-3 w-3" /> Page notes
-                  </button>
-                  <button
-                    onClick={() => generateMcqs()}
-                    disabled={mcqBusy || !getActiveProvider()}
-                    title={getActiveProvider() ? 'Generate MCQs from this page' : 'Connect an AI provider first'}
-                    className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-bold disabled:opacity-40 ${getActiveProvider() ? T.cta : T.chip} ${T.softHover}`}
-                  >
-                    {mcqBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <GraduationCap className="h-3 w-3" />}
-                    {mcqBusy ? 'Generating…' : mcqs.length ? 'Regenerate MCQs' : 'Generate MCQs'}
-                  </button>
-                  <button
-                    onClick={() => setAskPanel((v) => !v)}
-                    title="Ask AI about this page"
-                    className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-bold transition ${askPanel ? T.chipAccent : T.chip} ${T.softHover}`}
-                  >
-                    <Sparkles className="h-3 w-3" /> Ask AI
-                  </button>
-                  <button
-                    onClick={() => onNavigate('research')}
-                    title="Open the clinical evidence browser"
-                    className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition ${T.chip} ${T.softHover}`}
-                  >
-                    <ScanText className="h-3 w-3" /> Evidence
-                  </button>
-                  <button onClick={printDocument} title="Print" className={`rounded-lg border p-1.5 transition ${T.chip} ${T.softHover}`}>
-                    <Printer className="h-3.5 w-3.5" />
-                  </button>
-                  <button onClick={downloadDocument} title="Download the original file" className={`rounded-lg border p-1.5 transition ${T.chip} ${T.softHover}`}>
-                    <FileDown className="h-3.5 w-3.5" />
+                  <button onClick={() => moveMatch(1)} disabled={!matches.length} className="p-0.5 disabled:opacity-30" title="Next match">
+                    <ChevronRight className="h-3 w-3" />
                   </button>
                 </div>
-              </div>
+                <div className={`flex items-center gap-1 rounded-lg border px-1.5 py-1 ${T.input}`}>
+                  <button onClick={() => gotoPage(currentPage - 1)} disabled={currentPage <= 1} className="p-0.5 disabled:opacity-30" title="Previous page">
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </button>
+                  <input
+                    value={currentPage}
+                    onChange={(e) => { const n = parseInt(e.target.value, 10); if (!Number.isNaN(n)) setCurrentPage(n); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') gotoPage(currentPage); }}
+                    className="w-8 bg-transparent text-center font-mono text-[11px] focus:outline-none"
+                    title="Jump to page"
+                  />
+                  <span className={`font-mono text-[9px] ${T.dim}`}>/ {numPages}</span>
+                  <button onClick={() => gotoPage(currentPage + 1)} disabled={currentPage >= numPages} className="p-0.5 disabled:opacity-30" title="Next page">
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div className={`flex items-center gap-1 rounded-lg border px-1.5 py-1 ${T.input}`}>
+                  <button onClick={() => { setFitWidth(false); setScale((s) => Math.max(0.25, +(s - 0.2).toFixed(2))); }} title="Zoom out">
+                    <ZoomOut className="h-3.5 w-3.5" />
+                  </button>
+                  <span className="w-9 text-center font-mono text-[10px]">{Math.round(scale * 100)}%</span>
+                  <button onClick={() => { setFitWidth(false); setScale((s) => Math.min(4, +(s + 0.2).toFixed(2))); }} title="Zoom in">
+                    <ZoomIn className="h-3.5 w-3.5" />
+                  </button>
+                  <button onClick={() => setFitWidth(!fitWidth)} title="Fit width" className={fitWidth ? T.accent : T.dim}>
+                    <Maximize className="h-3.5 w-3.5" />
+                  </button>
+                  <button onClick={() => { setFitWidth(false); setScale(fitPageScale()); }} title="Fit whole page" className={T.dim}>
+                    <Focus className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <button
+                  onClick={() => { setRightTab('copilot'); setShowNotes(true); generateMcqs(); }}
+                  disabled={mcqBusy || !getActiveProvider()}
+                  title={getActiveProvider() ? 'Generate MCQs from this page' : 'Connect an AI provider first'}
+                  className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-bold disabled:opacity-40 ${getActiveProvider() ? T.cta : T.chip} ${T.softHover}`}
+                >
+                  {mcqBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <GraduationCap className="h-3 w-3" />}
+                  {mcqBusy ? 'Generating…' : mcqs.length ? 'Regenerate MCQs' : 'Generate MCQs'}
+                </button>
+                <button
+                  onClick={() => { setRightTab('copilot'); setShowNotes(true); }}
+                  title="Ask AI about this page"
+                  className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-bold transition ${panelOpen && rightTab === 'copilot' ? T.chipAccent : T.chip} ${T.softHover}`}
+                >
+                  <Sparkles className="h-3 w-3" /> Ask AI
+                </button>
+                <button
+                  onClick={() => onNavigate('research')}
+                  title="Open the clinical evidence browser"
+                  className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition ${T.chip} ${T.softHover}`}
+                >
+                  <ScanText className="h-3 w-3" /> Evidence
+                </button>
+                <button onClick={printDocument} title="Print" className={`rounded-lg border p-1.5 transition ${T.chip} ${T.softHover}`}>
+                  <Printer className="h-3.5 w-3.5" />
+                </button>
+                <button onClick={downloadDocument} title="Download the original file" className={`rounded-lg border p-1.5 transition ${T.chip} ${T.softHover}`}>
+                  <FileDown className="h-3.5 w-3.5" />
+                </button>
+              </>
             )}
           </div>
         </div>
       </section>
-      {ocrOpen && numPages > 0 && (
-        <div className={`shrink-0 rounded-xl border p-2.5 text-xs ${T.panel}`}>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className={`flex items-center gap-1.5 text-[11px] font-bold ${T.strong}`}>
-              <ScanText className={`h-4 w-4 ${T.accent}`} /> OCR matrix
-              <span className={`font-mono text-[9px] ${T.dim}`}>tesseract.js · English · on-device</span>
-            </span>
-            <div className="flex flex-wrap items-center gap-2">
-              <label className={`inline-flex items-center gap-1.5 text-[10px] font-semibold ${T.muted}`}>
-                <input type="checkbox" checked={ocrForce} onChange={(e) => setOcrForce(e.target.checked)} className="accent-[#0f8b8d]" />
-                Force OCR even where text exists
-              </label>
-              <button onClick={() => setOcrOpen(false)} className={`${T.dim} hover:opacity-70`} title="Close"><X className="h-3.5 w-3.5" /></button>
-            </div>
-          </div>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
+      {numPages > 0 && (
+        <div className={`flex shrink-0 flex-wrap items-center gap-2 rounded-xl border px-2.5 py-1.5 ${T.panel}`}>
+          <span className={`flex items-center gap-1.5 text-[10px] font-bold ${T.accent}`}>
+            <ScanText className="h-3.5 w-3.5" /> OCR
+          </span>
+          <button
+            onClick={() => runOcr('current')}
+            disabled={ocrBusy || !pdfRef.current}
+            className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.cta}`}
+          >
+            {ocrBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <ScanText className="h-3 w-3" />}
+            OCR current page ({currentPage})
+          </button>
+          <button
+            onClick={() => runOcr('missing')}
+            disabled={ocrBusy || !pdfRef.current}
+            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.chip}`}
+          >
+            <FileDown className="h-3 w-3" /> OCR pages without text
+          </button>
+          {ocrBusy && (
             <button
-              onClick={() => runOcr('current')}
-              disabled={ocrBusy || !pdfRef.current}
-              className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.cta}`}
+              onClick={() => { if (ocrJobRef.current) stopJob(ocrJobRef.current.id); }}
+              className="flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[10px] font-bold text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300"
             >
-              {ocrBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <ScanText className="h-3 w-3" />}
-              OCR current page ({currentPage})
+              <Square className="h-3 w-3" /> Stop OCR
             </button>
-            <button
-              onClick={() => runOcr('missing')}
-              disabled={ocrBusy || !pdfRef.current}
-              className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.chip}`}
-            >
-              <FileDown className="h-3 w-3" /> OCR pages without text
-            </button>
-            {ocrBusy && (
-              <button
-                onClick={() => { if (ocrJobRef.current) stopJob(ocrJobRef.current.id); }}
-                className="flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[10px] font-bold text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300"
-              >
-                <Square className="h-3 w-3" /> Stop OCR
-              </button>
-            )}
-            {ocrNote && <span className={`text-[10px] ${T.muted}`}>{ocrNote}</span>}
-            {!pdfRef.current && <span className="text-[10px] text-amber-600 dark:text-amber-300">OCR needs a PDF. DOCX already has real text.</span>}
-          </div>
-          <p className={`mt-1.5 text-[9px] leading-relaxed ${T.dim}`}>
-            OCR is lossy — review recognised text. Results feed search and are cached per page.
-          </p>
-        </div>
-      )}
-      {notesOpen && numPages > 0 && (
-        <div className={`shrink-0 rounded-xl border p-2.5 text-xs ${T.panel}`}>
-          <div className="flex items-center justify-between">
-            <span className={`flex items-center gap-1.5 text-[11px] font-bold ${T.strong}`}>
-              <NotebookPen className={`h-4 w-4 ${T.accent}`} /> Make revision notes from pages
-            </span>
-            <button onClick={() => setNotesOpen(false)} className={`${T.dim} hover:opacity-70`} title="Close"><X className="h-3.5 w-3.5" /></button>
-          </div>
-          <div className="mt-2 flex flex-wrap items-end gap-2">
-            <label className={`text-[9px] font-semibold ${T.muted}`}>
-              From
-              <input type="number" min={1} max={numPages} value={notesFrom}
-                onChange={(e) => setNotesFrom(Number(e.target.value))}
-                className={`mt-0.5 block w-16 rounded-lg border px-2 py-1 text-[11px] ${T.input}`} />
-            </label>
-            <label className={`text-[9px] font-semibold ${T.muted}`}>
-              To
-              <input type="number" min={1} max={numPages} value={notesTo}
-                onChange={(e) => setNotesTo(Number(e.target.value))}
-                className={`mt-0.5 block w-16 rounded-lg border px-2 py-1 text-[11px] ${T.input}`} />
-            </label>
-            <label className={`text-[9px] font-semibold ${T.muted}`}>
-              Pages / part
-              <input type="number" min={1} max={20} value={notesPartSize}
-                onChange={(e) => setNotesPartSize(Number(e.target.value))}
-                className={`mt-0.5 block w-16 rounded-lg border px-2 py-1 text-[11px] ${T.input}`} />
-            </label>
-            <button
-              onClick={makeNotesFromPages}
-              disabled={notesBusy}
-              className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.cta}`}
-            >
-              {notesBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Generate notes'}
-            </button>
-            {notesBusy && (
-              <button
-                onClick={() => { notesCancelRef.current = true; }}
-                className="flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[10px] font-bold text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300"
-              >
-                <Square className="h-3 w-3" /> Stop
-              </button>
-            )}
-            {madeNotes.length > 0 && (
-              <button
-                onClick={() => downloadNotesPdf(
-                  `${activeDoc?.title ?? 'Book'} — page notes`,
-                  madeNotes.map((n) => `## ${n.range}\n\n${n.text}`).join('\n\n'),
-                )}
-                className={`ml-auto flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold ${T.chip}`}
-              >
-                <FileDown className="h-3 w-3" /> Download all notes (PDF)
-              </button>
-            )}
-          </div>
-          {notesError && (
-            <div className="mt-1.5 flex items-start gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] text-rose-800 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300">
-              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> <span>{notesError}</span>
-            </div>
           )}
-          {madeNotes.length > 0 && (
-            <div className="mt-2 max-h-40 space-y-2 overflow-y-auto">
-              {madeNotes.map((n, i) => (
-                <div key={`${n.range}-${i}`} className={`rounded-lg border p-2 ${T.panelSoft}`}>
-                  <div className={`mb-1 font-mono text-[9px] font-bold ${T.dim}`}>{n.range}</div>
-                  <RevisionNote text={n.text} topic={activeDoc?.title} />
-                </div>
-              ))}
-            </div>
-          )}
+          <label className={`inline-flex items-center gap-1.5 text-[10px] font-semibold ${T.muted}`}>
+            <input type="checkbox" checked={ocrForce} onChange={(e) => setOcrForce(e.target.checked)} className="accent-[#0f8b8d]" />
+            Force OCR even where text exists
+          </label>
+          <label className={`inline-flex items-center gap-1.5 text-[10px] font-semibold ${T.muted}`}>
+            Engine
+            <select
+              value={ocrEngine}
+              onChange={(e) => {
+                const next = e.target.value === 'nemotron' ? 'nemotron' : 'tesseract';
+                setOcrEngine(next);
+                try { localStorage.setItem('pulse.ocrEngine', next); } catch { /* storage full: the choice is for this session */ }
+              }}
+              disabled={ocrBusy}
+              className={`rounded-md border px-1.5 py-0.5 text-[10px] ${T.input}`}
+            >
+              <option value="tesseract">Tesseract (on-device)</option>
+              <option value="nemotron">NVIDIA nemotron-ocr-v2 (hosted)</option>
+            </select>
+          </label>
+          {ocrNote && <span className={`min-w-0 text-[10px] ${T.muted}`}>{ocrNote}</span>}
+          {!pdfRef.current && <span className="text-[10px] text-amber-600 dark:text-amber-300">OCR needs a PDF. DOCX already has real text.</span>}
+          <span className={`ml-auto hidden font-mono text-[9px] ${T.dim} 2xl:inline`}>
+            {ocrEngine === 'nemotron' ? 'NVIDIA nemotron-ocr-v2 · hosted' : 'tesseract.js · English · on-device'} · pages run one after another · lossy, review the text
+          </span>
         </div>
       )}
       {(libraryError || docOpenError) && (
@@ -1580,7 +2060,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-12">
         <article
           className={`flex min-h-0 flex-col overflow-hidden rounded-xl border ${T.panel} ${
-            immersive ? 'fixed inset-0 z-50 rounded-none' : panelOpen ? 'lg:col-span-7' : 'lg:col-span-12'
+            immersive ? 'fixed inset-0 z-50 rounded-none border-0' : panelOpen && numPages > 0 ? 'lg:col-span-7' : 'lg:col-span-12'
           }`}
         >
           <header className={`flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-2.5 py-1.5 ${T.divider}`}>
@@ -1605,6 +2085,28 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               </div>
             </div>
             <div className="flex items-center gap-1">
+              {immersive && numPages > 0 && (
+                <div className={`mr-2 flex items-center gap-1 rounded-lg border px-1.5 py-1 ${T.input}`}>
+                  <button onClick={() => gotoPage(currentPage - 1)} disabled={currentPage <= 1} className="p-0.5 disabled:opacity-30" title="Previous page">
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </button>
+                  <span className="min-w-[52px] text-center font-mono text-[11px]">{currentPage} / {numPages}</span>
+                  <button onClick={() => gotoPage(currentPage + 1)} disabled={currentPage >= numPages} className="p-0.5 disabled:opacity-30" title="Next page">
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                  <span className="mx-1 h-3.5 w-px bg-slate-300" />
+                  <button onClick={() => { setFitWidth(false); setScale((s) => Math.max(0.25, +(s - 0.2).toFixed(2))); }} title="Zoom out">
+                    <ZoomOut className="h-3.5 w-3.5" />
+                  </button>
+                  <span className="w-10 text-center font-mono text-[10px]">{Math.round(scale * 100)}%</span>
+                  <button onClick={() => { setFitWidth(false); setScale((s) => Math.min(4, +(s + 0.2).toFixed(2))); }} title="Zoom in">
+                    <ZoomIn className="h-3.5 w-3.5" />
+                  </button>
+                  <button onClick={() => setFitWidth(true)} title="Fit width" className={`ml-0.5 ${fitWidth ? T.accent : T.dim}`}>
+                    <Maximize className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
               <button
                 onClick={() => setShowThumbs((v) => !v)}
                 title="Page thumbnails"
@@ -1614,17 +2116,17 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               </button>
               <button
                 onClick={() => setShowNotes((v) => !v)}
-                title={panelOpen ? 'Hide highlights panel' : 'Show highlights panel'}
+                title={panelOpen ? 'Hide side panel' : 'Show side panel'}
                 className={`hidden rounded-lg border p-1.5 transition lg:block ${panelOpen ? T.chipAccent : `${T.chip} ${T.softHover}`}`}
               >
-                <span className="h-3.5 w-3.5" />
+                <PanelRight className="h-3.5 w-3.5" />
               </button>
               <button
                 onClick={toggleFullscreen}
-                title={immersive ? 'Exit full screen' : 'Full screen reader'}
-                className={`rounded-lg border p-1.5 transition ${T.chip} ${T.softHover}`}
+                title={immersive ? 'Exit full screen (Esc)' : 'Full screen reader'}
+                className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-[10px] font-bold transition ${immersive ? T.cta : `${T.chip} ${T.softHover}`}`}
               >
-                <Maximize className="h-3.5 w-3.5" />
+                {immersive ? <><X className="h-3.5 w-3.5" /> Exit full screen</> : <Maximize className="h-3.5 w-3.5" />}
               </button>
               <button onClick={printDocument} title="Print" className={`rounded-lg border p-1.5 transition ${T.chip} ${T.softHover}`}>
                 <Printer className="h-3.5 w-3.5" />
@@ -1636,7 +2138,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               ref={scrollRef}
               onPointerDown={handlePointerDown}
               onMouseUp={handleMouseUp}
-              className={`h-full overflow-auto ${T.reader} ${immersive ? '' : ''}`}
+              className={`h-full overflow-auto ${immersive ? 'bg-slate-800' : T.reader}`}
               style={{ scrollbarGutter: 'stable' }}
               data-ocr-version={wordsVersion}
             >
@@ -1699,6 +2201,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                         <div data-canvas-slot className="pointer-events-none absolute inset-0" />
                         <div data-text-slot className="textLayer absolute inset-0 overflow-hidden" />
                         {ocrWordsRef.current.has(n) && !nativeTextPagesRef.current.has(n) && (
+                          <span className={`absolute left-1.5 top-1.5 z-10 rounded px-1 font-mono text-[8px] font-bold ${T.chipAccent}`}>OCR · review</span>
+                        )}
+                        {ocrWordsRef.current.has(n) && !nativeTextPagesRef.current.has(n) && (
                           <div className="ocrTextLayer absolute inset-0 select-text overflow-hidden" style={{ zIndex: 2 }}>
                             {ocrWordsRef.current.get(n)!.map((word, i) => (
                               <span
@@ -1714,6 +2219,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                                   transform: `scaleX(${word.sx ?? 1})`,
                                   transformOrigin: 'left top',
                                   whiteSpace: 'pre',
+                                  textDecoration: word.confidence < 60 ? 'underline dashed #f59e0b' : undefined,
                                   color: 'transparent',
                                   userSelect: 'text',
                                   cursor: 'text',
@@ -1788,10 +2294,26 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                   />
                 ))}
                 <div className="mx-0.5 h-4 w-px bg-slate-200" />
+                <button onClick={() => askSelection()} title="Ask AI about this selection" className="rounded px-1.5 py-0.5 text-[10px] font-bold text-[#00696b] hover:bg-teal-50">Ask AI</button>
+                <button onClick={() => askSelection(EXPLAIN_PROMPT)} title="Explain this selection" className="rounded px-1.5 py-0.5 text-[10px] font-bold text-[#00696b] hover:bg-teal-50">Explain</button>
+                <button onClick={() => askSelection(NOTES_PROMPT, true)} title="Make an AI note and save it to Highlights" className="rounded px-1.5 py-0.5 text-[10px] font-bold text-[#00696b] hover:bg-teal-50">AI notes</button>
+                <div className="mx-0.5 h-4 w-px bg-slate-200" />
                 <button onClick={copySelection} className="rounded p-1 text-slate-500 hover:bg-slate-100" title="Copy">
                   {copied ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
                 </button>
                 <button onClick={() => setPopup(null)} className="rounded p-1 text-slate-400 hover:bg-slate-100"><X className="h-3 w-3" /></button>
+              </div>
+            )}
+            {ocrBusy && ocrTask && (
+              <div className={`absolute bottom-3 right-3 z-30 w-64 rounded-xl border bg-white p-2.5 text-[10px] shadow-xl ${T.border}`}>
+                <div className={`mb-1.5 flex items-center justify-between font-bold ${T.strong}`}>
+                  <span className="flex items-center gap-1.5"><Loader2 className={`h-3 w-3 animate-spin ${T.accent}`} /> OCR</span>
+                  <span className={`font-mono ${T.accent}`}>{ocrTask.done}/{ocrTask.total}</span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
+                  <div className="h-full bg-[#0f8b8d] transition-all" style={{ width: `${Math.round((ocrTask.done / Math.max(1, ocrTask.total)) * 100)}%` }} />
+                </div>
+                <p className={`mt-1.5 truncate ${T.dim}`}>{ocrTask.detail} · one page at a time</p>
               </div>
             )}
           </div>
@@ -1830,49 +2352,321 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
 
         {panelOpen && numPages > 0 && (
           <section className={`flex min-h-0 flex-col overflow-hidden rounded-xl border lg:col-span-5 ${T.panel}`}>
-            <header className={`flex shrink-0 items-center justify-between gap-2 border-b px-2.5 py-1.5 ${T.divider}`}>
-              <div className={`flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-wider ${T.muted}`}>
-                Highlights
-              </div>
-            </header>
-            <div className="min-h-0 flex-1 overflow-y-auto p-2">
-              {highlights.length === 0 && (
-                <p className={`text-[10px] leading-relaxed ${T.dim}`}>
-                  No highlights yet. Select text in the reader and pick a colour.
-                </p>
-              )}
-              <div className="space-y-1.5">
-                {highlights.map((h) => (
-                  <div key={h.id} className={`group rounded-lg border p-2 ${T.panelSoft} ${T.border}`}>
-                    <div className="flex items-center justify-between gap-1">
-                      <div className="flex items-center gap-1.5">
-                        <span className="h-2.5 w-2.5 rounded-full border border-slate-300/60" style={{ background: h.color ?? '#fde047' }} />
-                        <button
-                          onClick={() => { if (h.page) gotoPage(h.page); }}
-                          className={`font-mono text-[9px] font-bold hover:underline ${T.accent}`}
-                          title="Jump to this page"
-                        >
-                          p. {h.page ?? '—'}
-                        </button>
-                      </div>
-                      <button onClick={() => deleteHighlight(h.id)} className={`opacity-0 transition group-hover:opacity-100 ${T.dim} hover:text-rose-500`} title="Delete highlight">
-                        <Trash className="h-3 w-3" />
-                      </button>
-                    </div>
-                    <p className={`mt-1 line-clamp-4 text-[10px] leading-relaxed ${T.text}`}>{h.quote}</p>
-                    {h.note && (
-                      <p className={`mt-1 rounded border px-1.5 py-1 text-[9px] ${T.chipWarn}`}>{h.note}</p>
-                    )}
-                  </div>
+            <header className={`flex shrink-0 items-center justify-between gap-2 border-b px-2 py-1.5 ${T.divider}`}>
+              <div className="flex items-center gap-1">
+                {([
+                  { id: 'copilot', label: 'Copilot' },
+                  { id: 'highlights', label: `Highlights · ${highlights.length}` },
+                  { id: 'notes', label: 'Notes' },
+                  { id: 'index', label: 'Index' },
+                ] as const).map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setRightTab(tab.id)}
+                    className={`rounded-lg px-2.5 py-1 text-[10px] font-bold transition ${rightTab === tab.id ? T.chipAccent : `${T.muted} ${T.softHover}`}`}
+                  >
+                    {tab.label}
+                  </button>
                 ))}
               </div>
-            </div>
-          </section>
-        )}
+              <button onClick={() => setShowNotes(false)} className={`${T.dim} hover:opacity-70`} title="Hide side panel">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </header>
 
-        {/* ======================= Question Bank ======================= */}
-        {numPages > 0 && mcqs.length > 0 && (
-          <section className={`flex h-[220px] flex-col overflow-hidden rounded-xl border ${T.panel}`}>
+            {rightTab === 'highlights' && (
+              <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                {highlights.length === 0 && (
+                  <p className={`text-[10px] leading-relaxed ${T.dim}`}>
+                    No highlights yet. Select text in the reader and pick a colour.
+                  </p>
+                )}
+                <div className="space-y-1.5">
+                  {highlights.map((h) => (
+                    <div key={h.id} className={`group rounded-lg border p-2 ${T.panelSoft} ${T.border}`}>
+                      <div className="flex items-center justify-between gap-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className="h-2.5 w-2.5 rounded-full border border-slate-300/60" style={{ background: h.color ?? '#fde047' }} />
+                          <button
+                            onClick={() => { if (h.page) gotoPage(h.page); }}
+                            className={`font-mono text-[9px] font-bold hover:underline ${T.accent}`}
+                            title="Jump to this page"
+                          >
+                            p. {h.page ?? '—'}
+                          </button>
+                        </div>
+                        <button onClick={() => deleteHighlight(h.id)} className={`opacity-0 transition group-hover:opacity-100 ${T.dim} hover:text-rose-500`} title="Delete highlight">
+                          <Trash className="h-3 w-3" />
+                        </button>
+                      </div>
+                      <p className={`mt-1 line-clamp-4 text-[10px] leading-relaxed ${T.text}`}>{h.quote}</p>
+                      {h.note && (
+                        <p className={`mt-1 rounded border px-1.5 py-1 text-[9px] ${T.chipWarn}`}>{h.note}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {rightTab === 'notes' && (
+              <div className="min-h-0 flex-1 overflow-y-auto p-2.5 text-xs">
+                <div className="flex flex-wrap items-end gap-2">
+                  <label className={`text-[9px] font-semibold ${T.muted}`}>
+                    From
+                    <input type="number" min={1} max={numPages} value={notesFrom}
+                      onChange={(e) => setNotesFrom(Number(e.target.value))}
+                      className={`mt-0.5 block w-16 rounded-lg border px-2 py-1 text-[11px] ${T.input}`} />
+                  </label>
+                  <label className={`text-[9px] font-semibold ${T.muted}`}>
+                    To
+                    <input type="number" min={1} max={numPages} value={notesTo}
+                      onChange={(e) => setNotesTo(Number(e.target.value))}
+                      className={`mt-0.5 block w-16 rounded-lg border px-2 py-1 text-[11px] ${T.input}`} />
+                  </label>
+                  <label className={`text-[9px] font-semibold ${T.muted}`}>
+                    Pages / part
+                    <input type="number" min={1} max={20} value={notesPartSize}
+                      onChange={(e) => setNotesPartSize(Number(e.target.value))}
+                      className={`mt-0.5 block w-16 rounded-lg border px-2 py-1 text-[11px] ${T.input}`} />
+                  </label>
+                  <button
+                    onClick={() => makeNotesFromPages()}
+                    disabled={notesBusy}
+                    className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.cta}`}
+                  >
+                    {notesBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <NotebookPen className="h-3 w-3" />}
+                    {notesBusy ? 'Making notes…' : 'Generate notes'}
+                  </button>
+                  {notesBusy && (
+                    <button
+                      onClick={() => { notesCancelRef.current = true; }}
+                      className="flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[10px] font-bold text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300"
+                    >
+                      <Square className="h-3 w-3" /> Stop
+                    </button>
+                  )}
+                </div>
+                {madeNotes.length > 0 && (
+                  <button
+                    onClick={() => downloadNotesPdf(
+                      `${activeDoc?.title ?? 'Book'} — page notes`,
+                      madeNotes.map((n) => `${n.range}\n${webCheckToText(n.webCheck)}\n\n${teachingNoteToText(n.note)}`).join('\n\n\n'),
+                    )}
+                    className={`mt-2 flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold ${T.chip}`}
+                  >
+                    <FileDown className="h-3 w-3" /> Download all notes (PDF)
+                  </button>
+                )}
+                {notesError && (
+                  <div className="mt-2 flex items-start gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] text-rose-800 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300">
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> <span>{notesError}</span>
+                  </div>
+                )}
+                <div className="mt-3 space-y-4">
+                  {madeNotes.map((n, i) => (
+                    <StructuredNote key={`${n.range}-${i}`} note={n.note} range={n.range} readImages={n.readImages} onOpenPage={gotoPage} onDelete={() => deleteNote(n.id)} webCheck={n.webCheck} checking={checkingNotes.has(n.id)} onWebCheck={() => { if (activeDocId) void checkNoteOnWeb(activeDocId, n); }} />
+                  ))}
+                  {!madeNotes.length && !notesBusy && (
+                    <p className={`text-[10px] leading-relaxed ${T.dim}`}>
+                      Pick a page range, or press Notes on a chapter in the Index tab.
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {rightTab === 'index' && (() => {
+              const field = `rounded-lg border px-2.5 py-1.5 text-[11px] focus:outline-none ${T.input}`;
+              const addPage = Math.round(Number(newEntry.page));
+              const canAdd = !!activeDocId && addPage >= 1 && addPage <= numPages;
+              const tree = contentTree(bookContents);
+              const pct = scanning && scanning.total ? Math.round((scanning.done / scanning.total) * 100) : 0;
+              const styleOf: Record<ContentLevel, string> = {
+                unit: 'font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-[#00696b]',
+                chapter: `text-[13px] font-bold ${T.strong}`,
+                section: `text-[12px] font-semibold ${T.text}`,
+                topic: `text-[11px] ${T.muted}`,
+              };
+              const pageChip = (e: ContentEntry) => (
+                <button
+                  onClick={(ev) => { ev.preventDefault(); ev.stopPropagation(); gotoPage(e.page); }}
+                  className="shrink-0 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[10px] text-slate-600 transition hover:border-[#0f8b8d]/40 hover:bg-teal-50 hover:text-[#00696b]"
+                >
+                  {e.page}
+                </button>
+              );
+              const removeButton = (e: ContentEntry) => (
+                <button
+                  onClick={(ev) => { ev.preventDefault(); ev.stopPropagation(); removeEntry(e.id); }}
+                  title="Remove"
+                  className={`shrink-0 text-[14px] leading-none opacity-0 transition group-hover:opacity-100 ${T.dim} hover:text-rose-500`}
+                >
+                  ×
+                </button>
+              );
+              // The page range a contents entry covers: from its start to the page before the next entry at
+              // the same level or above (or the end of the book).
+              const endPageOf = (e: ContentEntry) => {
+                const sorted = sortContents(bookContents);
+                const i = sorted.findIndex((x) => x.id === e.id);
+                const next = sorted.slice(i + 1).find((x) => LEVEL_ORDER[x.level] <= LEVEL_ORDER[e.level] && x.page > e.page);
+                return next ? next.page - 1 : numPages;
+              };
+              const notesButton = (e: ContentEntry) => (
+                <button
+                  onClick={(ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    setRightTab('notes');
+                    setShowNotes(true);
+                    void makeNotesFromPages({ from: e.page, to: endPageOf(e), label: e.title });
+                  }}
+                  disabled={notesBusy}
+                  title={`Make notes from ${LEVEL_LABEL[e.level].toLowerCase()} "${e.title}"`}
+                  className={`flex shrink-0 items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition disabled:opacity-40 ${T.chip} hover:border-[#0f8b8d]/40 hover:bg-teal-50 hover:text-[#00696b]`}
+                >
+                  <NotebookPen className="h-3 w-3" /> Notes
+                </button>
+              );
+              // A parent with children is a dropdown; a leaf is a plain line that opens its page.
+              const renderNode = (node: ContentNode): React.ReactNode => {
+                const { entry: e, children } = node;
+                if (!children.length) {
+                  return (
+                    <li key={e.id} className="group flex items-center gap-2 py-1">
+                      <button onClick={() => gotoPage(e.page)} className={`min-w-0 flex-1 truncate text-left hover:underline ${styleOf[e.level]}`}>
+                        {e.title}
+                      </button>
+                      {pageChip(e)}
+                      {notesButton(e)}
+                      {removeButton(e)}
+                    </li>
+                  );
+                }
+                return (
+                  <li key={e.id} className="group">
+                    <details open={e.level === 'unit' || e.level === 'chapter'} className="group">
+                      <summary className="flex cursor-pointer list-none items-center gap-2 py-1">
+                        <span className={`text-[9px] text-slate-400 transition-transform group-open:rotate-90 ${T.dim}`}>▶</span>
+                        <span className={`min-w-0 flex-1 truncate ${styleOf[e.level]}`}>{e.title}</span>
+                        <span className={`shrink-0 font-mono text-[9px] ${T.dim}`}>{children.length}</span>
+                        {pageChip(e)}
+                        {notesButton(e)}
+                        {removeButton(e)}
+                      </summary>
+                      <ul className="ml-2 mt-0.5 space-y-0.5 border-l border-slate-200 pl-3">{children.map(renderNode)}</ul>
+                    </details>
+                  </li>
+                );
+              };
+              const flatten = (nodes: ContentNode[], depth = 0): string[] =>
+                nodes.flatMap((n) => [
+                  `${'    '.repeat(depth)}${n.entry.level === 'unit' ? n.entry.title.toUpperCase() : n.entry.title} ..... ${n.entry.page}`,
+                  ...flatten(n.children, depth + 1),
+                ]);
+              return (
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <div className={`shrink-0 space-y-2.5 border-b p-2.5 ${T.divider}`}>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={buildIndexFromBook}
+                        disabled={!!scanning || !pdfRef.current}
+                        className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.cta}`}
+                      >
+                        {scanning ? <Loader2 className="h-3 w-3 animate-spin" /> : <ListTree className="h-3 w-3" />}
+                        {scanning ? `Scanning ${scanning.done}/${scanning.total}` : 'Scan whole book'}
+                      </button>
+                      <button
+                        onClick={importFromBookmarks}
+                        disabled={!!scanning || !pdfRef.current}
+                        className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.chip}`}
+                      >
+                        Import from bookmarks
+                      </button>
+                      {tree.length > 0 && (
+                        <button
+                          onClick={() => downloadNotesPdf(`${activeDoc?.title ?? 'Book'} — contents`, flatten(tree).join('\n'))}
+                          className={`ml-auto flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[10px] font-bold ${T.chip}`}
+                        >
+                          <FileDown className="h-3 w-3" /> Download contents
+                        </button>
+                      )}
+                    </div>
+                    {scanning && (
+                      <div className="h-1 overflow-hidden rounded-full bg-slate-200">
+                        <div className="h-full bg-[#0f8b8d] transition-all" style={{ width: `${pct}%` }} />
+                      </div>
+                    )}
+                    {contentsNote && <p className={`text-[10px] leading-relaxed ${T.muted}`}>{contentsNote}</p>}
+                    <div className="grid grid-cols-[96px_1fr_64px] gap-1.5">
+                      <select
+                        value={newEntry.level}
+                        onChange={(e) => setNewEntry((n) => ({ ...n, level: e.target.value as ContentLevel }))}
+                        className={field}
+                      >
+                        <option value="unit">Unit</option>
+                        <option value="chapter">Chapter</option>
+                        <option value="section">Section</option>
+                        <option value="topic">Topic</option>
+                      </select>
+                      <input
+                        value={newEntry.title}
+                        onChange={(e) => setNewEntry((n) => ({ ...n, title: e.target.value }))}
+                        placeholder="Title"
+                        className={`min-w-0 ${field}`}
+                      />
+                      <input
+                        type="number"
+                        min={1}
+                        max={numPages}
+                        value={newEntry.page}
+                        onChange={(e) => setNewEntry((n) => ({ ...n, page: e.target.value }))}
+                        placeholder="Page"
+                        className={field}
+                      />
+                    </div>
+                    <button
+                      onClick={() => {
+                        addEntry(newEntry.level, newEntry.title, addPage);
+                        setNewEntry((n) => ({ ...n, title: '', page: '' }));
+                      }}
+                      disabled={!canAdd}
+                      className={`w-full rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.cta}`}
+                    >
+                      Add to contents
+                    </button>
+                  </div>
+
+                  <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+                    {!tree.length && (
+                      <div className="flex flex-col items-center gap-2 py-10 text-center">
+                        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-teal-50">
+                          <ListTree className="h-6 w-6 text-[#00696b]" />
+                        </div>
+                        <p className={`text-[12px] font-bold ${T.strong}`}>No contents yet</p>
+                        <p className={`max-w-[240px] text-[11px] leading-relaxed ${T.muted}`}>
+                          Press Scan whole book. It reads every page and builds units, chapters, sections and topics as dropdowns.
+                        </p>
+                      </div>
+                    )}
+                    {tree.length > 0 && (
+                      <div className="mb-3 text-center">
+                        <p className={`font-mono text-[9px] uppercase tracking-[0.25em] ${T.dim}`}>Contents</p>
+                        <p className={`mt-0.5 text-[13px] font-bold ${T.strong}`}>{activeDoc?.title}</p>
+                      </div>
+                    )}
+                    <ol className="space-y-1">{tree.map(renderNode)}</ol>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {rightTab === 'copilot' && (
+            <div className="flex min-h-0 flex-1 flex-col">
+            {/* ======================= Question Bank ======================= */}
+            {mcqs.length > 0 && (
+          <section className={`flex h-56 shrink-0 flex-col overflow-hidden border-b ${T.divider}`}>
             <header className={`flex shrink-0 items-center justify-between gap-2 border-b px-2.5 py-1.5 ${T.divider}`}>
               <div className="flex items-center gap-1.5">
                 <GraduationCap className="h-3 w-3" />
@@ -1967,32 +2761,21 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
           </section>
         )}
 
-        {/* ======================= Ask AI Copilot ======================= */}
-        {askPanel && numPages > 0 && (
-          <section className={`flex h-[220px] flex-col overflow-hidden rounded-xl border ${T.panel}`}>
-            <header className={`flex shrink-0 items-center justify-between gap-2 border-b px-2.5 py-1.5 ${T.divider}`}>
-              <div className="flex items-center gap-1.5">
-                <Sparkles className="h-3 w-3" />
-                <span className={`font-mono text-[10px] font-bold ${T.accent}`}>Clinical copilot</span>
-              </div>
-              <span className={`max-w-[130px] truncate rounded border px-1.5 py-0.5 font-mono text-[8px] ${T.chip}`} title={(() => { const p = getActiveProvider(); return p ? `${p} · ${getEffectiveModel(p)}` : 'no provider'; })()}>
-                {(() => { const p = getActiveProvider(); return p ? `${p} · ${getEffectiveModel(p)}` : 'no provider'; })()}
-              </span>
-            </header>
+        {/* ======================= Clinical copilot ======================= */}
             <div className="flex min-h-0 flex-1 flex-col">
               <div className="flex shrink-0 flex-wrap items-center gap-1 px-2 pt-1.5">
                 <button
-                  onClick={() => { setAskPanel(true); askAi('Explain this passage clearly and completely, with mechanisms and clinical reasoning.'); }}
+                  onClick={() => askAi('Teach me this passage from the beginning, as if I have never seen it before.')}
                   disabled={askBusy}
-                  title="Explain this passage"
+                  title="Teach this passage step by step"
                   className={`rounded-full border px-2 py-0.5 text-[9px] font-semibold transition disabled:opacity-40 ${T.chip} ${T.softHover}`}
                 >
-                  Explain
+                  Teach me
                 </button>
                 <button
-                  onClick={() => { setAskPanel(true); askAi('List the high-yield key points in this passage as short bullets.'); }}
+                  onClick={() => askAi('What must I remember from this passage for the exam, and why does each point matter? Teach each one briefly.')}
                   disabled={askBusy}
-                  title="Key points"
+                  title="Exam takeaways, with the reason for each"
                   className={`rounded-full border px-2 py-0.5 text-[9px] font-semibold transition disabled:opacity-40 ${T.chip} ${T.softHover}`}
                 >
                   Key points
@@ -2089,7 +2872,6 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                         e.preventDefault();
                         const question = askInput.trim();
                         if (!question || askBusy) return;
-                        setAskPanel(true);
                         setAskInput('');
                         askAi(question);
                       }
@@ -2102,7 +2884,6 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                     onClick={() => {
                       const question = askInput.trim();
                       if (!question || askBusy) return;
-                      setAskPanel(true);
                       setAskInput('');
                       askAi(question);
                     }}
@@ -2115,6 +2896,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                 </div>
               </div>
             </div>
+          </div>
+            )}
           </section>
         )}
       </div>

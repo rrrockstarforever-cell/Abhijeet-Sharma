@@ -295,9 +295,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'mistakes' as AppView, label: 'Mistakes & Spaced Review', icon: AlertOctagon, badge: srsDueCount > 0 ? `${srsDueCount} due` : unresolvedMistakesCount > 0 ? String(unresolvedMistakesCount) : undefined },
     { id: 'highlights' as AppView, label: 'Highlights & Memory', icon: Bookmark },
     { id: 'ai-tutor' as AppView, label: 'Clinical AI Tutor', icon: Brain },
-    // PDF Reader & OCR is temporarily hidden from the sidebar (kept in the codebase and
-    // still routable) — re-add `{ id: 'pdf-reader', label: 'PDF Reader & OCR', icon: BookOpen }`
-    // here (and the BookOpen import) to bring it back into view.
+    { id: 'pdf-reader' as AppView, label: 'PDF Reader & OCR', icon: BookOpen },
     { id: 'research' as AppView, label: 'Clinical Evidence Browser', icon: Compass },
     { id: 'image-review' as AppView, label: 'Image Question Review', icon: Images },
     { id: 'qa' as AppView, label: 'QA & Benchmark', icon: ShieldCheck },
