@@ -1,7 +1,7 @@
 {
   "name": "pulse-med",
   "private": true,
-  "version": "1.0.16",
+  "version": "1.0.61",
   "type": "module",
   "scripts": {
     "predev": "node tools/copy-tesseract-assets.mjs",
@@ -75,7 +75,9 @@
       "!**/.neet-pg-prep/**",
       "!debug-center-data/**",
       "!**/*.pem",
-      "!**/*.key"
+      "!**/*.key",
+      "!node_modules/@huggingface/transformers/.cache/**",
+      "!node_modules/onnxruntime-node/**"
     ],
     "asar": true,
     "win": {

@@ -307,6 +307,8 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
       showResults: showResultsScreen,
       showExplanation,
     });
+    // Let the Question Bank's saved list show the new progress.
+    window.dispatchEvent(new Event('pulse-modules-changed'));
   }, [questions, userAnswers, flaggedIds, currentIndex, secondsElapsed, examSubmitted, showResultsScreen, showExplanation]);
 
   // A fresh question always opens on the rationale tab.

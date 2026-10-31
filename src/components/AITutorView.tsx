@@ -6,7 +6,7 @@
 // - Per-message actions: copy, regenerate, "Save as highlight" (writes to the user-highlights store).
 // - Context question attaches as a removable chip; quick prompts for clinical use.
 // - Replies are rendered as React elements (markdown-ish) — never raw HTML (no innerHTML).
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, useSyncExternalStore } from 'react';
 import {
   Sparkles,
   Send,
@@ -246,12 +246,57 @@ function renderMarkdown(text: string): React.ReactNode {
 
 // ---------- component ----------
 
+// ----- shared chat store -----
+// Replies keep arriving after the learner leaves the tutor (the request is still running on the
+// server). The conversation list and the set of conversations awaiting a reply therefore live
+// outside the component, so a reply that arrives later is still saved and shown on return.
+let conversationStore: Conversation[] | null = null;
+const pendingConversations = new Set<string>();
+const storeListeners = new Set<() => void>();
+
+function getConversationStore(): Conversation[] {
+  if (!conversationStore) {
+    const loaded = loadConversations();
+    conversationStore = loaded.length ? loaded : [newConversation()];
+  }
+  return conversationStore;
+}
+
+function notifyStore(): void {
+  storeListeners.forEach((listener) => listener());
+}
+
+function subscribeStore(listener: () => void): () => void {
+  storeListeners.add(listener);
+  return () => { storeListeners.delete(listener); };
+}
+
+function setConversationStore(updater: (prev: Conversation[]) => Conversation[]): void {
+  conversationStore = updater(getConversationStore());
+  saveConversations(conversationStore);
+  notifyStore();
+}
+
+function setConversationPending(id: string, pending: boolean): void {
+  if (pending) pendingConversations.add(id);
+  else pendingConversations.delete(id);
+  notifyStore();
+}
+
+/** The conversation list, with a setter that behaves like useState's. */
+function useConversationStore(): [Conversation[], (updater: (prev: Conversation[]) => Conversation[]) => void] {
+  const list = useSyncExternalStore(subscribeStore, getConversationStore);
+  return [list, setConversationStore];
+}
+
+/** True while the given conversation is waiting for a reply. */
+function useConversationPending(id: string): boolean {
+  return useSyncExternalStore(subscribeStore, () => pendingConversations.has(id));
+}
+
 export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, attachedQuestion, onNavigate, currentExam = 'NEET_PG' }) => {
   // ----- conversations -----
-  const [conversations, setConversations] = useState<Conversation[]>(() => {
-    const loaded = loadConversations();
-    return loaded.length ? loaded : [newConversation()];
-  });
+  const [conversations, setConversations] = useConversationStore();
   const [activeId, setActiveId] = useState<string>('');
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState<string>('');
@@ -303,7 +348,8 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
     setRecording(true);
     setVoiceStatus('Listening… click the mic again to stop.');
   };
-  const [loading, setLoading] = useState<boolean>(false);
+  // Waiting for a reply in the active conversation (kept in the store, so it survives navigation).
+  const loading = useConversationPending(activeId);
   const [persona, setPersona] = useState<(typeof PERSONAS)[number]['id']>('BOARD_MASTER');
   const [effort, setEffort] = useState<EffortLevel>(() => {
     try {
@@ -347,10 +393,6 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
 
   const messages = activeConversation?.messages ?? [];
 
-  // persist conversations whenever they change
-  useEffect(() => {
-    saveConversations(conversations);
-  }, [conversations]);
 
   // fetch REAL provider connection status on mount; pick a connected provider
   useEffect(() => {
@@ -637,7 +679,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
 
     setInput('');
     if (!opts) setAttachments([]);
-    setLoading(true);
+    setConversationPending(conv.id, true);
 
     // history for the API: last ~10 non-error turns BEFORE this message, without the
     // just-added user bubble (the server appends the current message itself).
@@ -755,7 +797,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
         isError: true,
       });
     } finally {
-      setLoading(false);
+      setConversationPending(conv.id, false);
     }
   };
 
