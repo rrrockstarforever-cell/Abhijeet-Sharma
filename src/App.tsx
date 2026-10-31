@@ -18,7 +18,8 @@ import { JobsBanner } from './components/JobsBanner.tsx';
 import { dueCount } from './utils/flashcardStore.ts';
 import { listCapturedQuestions } from './utils/mistakeStore.ts';
 import { subscribeDataChanged } from './utils/dataEvents.ts';
-import { loadActiveTest, saveActiveTest } from './utils/sessionStore.ts';
+import { loadActiveTest, saveActiveTest, signature } from './utils/sessionStore.ts';
+import { saveModule } from './utils/moduleStore.ts';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<AppView>('analytics');
@@ -116,6 +117,8 @@ export default function App() {
       sourceType: 'ai-generator' as const,
     }));
     setActiveTestQuestions(tagged);
+    // Keep every generated bank, not only the latest, so it can be reopened and finished later.
+    void saveModule({ id: signature(tagged), exam, mode, questions: tagged });
     if (tagged.length > 0) {
       setActiveQuestionId(tagged[0].id);
     }

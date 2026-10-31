@@ -300,6 +300,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     // here (and the BookOpen import) to bring it back into view.
     { id: 'research' as AppView, label: 'Clinical Evidence Browser', icon: Compass },
     { id: 'image-review' as AppView, label: 'Image Question Review', icon: Images },
+    { id: 'qa' as AppView, label: 'QA & Benchmark', icon: ShieldCheck },
     { id: 'settings' as AppView, label: 'AI Subscriptions & OCR', icon: Sliders },
   ];
 

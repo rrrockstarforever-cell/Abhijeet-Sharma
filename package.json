@@ -1,7 +1,7 @@
 {
   "name": "pulse-med",
   "private": true,
-  "version": "1.0.15",
+  "version": "1.0.61",
   "type": "module",
   "scripts": {
     "predev": "node tools/copy-tesseract-assets.mjs",
@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
+    "@huggingface/transformers": "^4.3.2",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",
     "dotenv": "^17.2.3",
@@ -47,10 +48,10 @@
     "electron-builder": "^26.18.0",
     "esbuild": "^0.28.2",
     "playwright": "^1.64.1",
+    "playwright-core": "^1.64.1",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
-    "typescript": "^7.0.2",
-    "playwright-core": "^1.64.1"
+    "typescript": "^7.0.2"
   },
   "main": "electron/main.cjs",
   "build": {
@@ -74,7 +75,9 @@
       "!**/.neet-pg-prep/**",
       "!debug-center-data/**",
       "!**/*.pem",
-      "!**/*.key"
+      "!**/*.key",
+      "!node_modules/@huggingface/transformers/.cache/**",
+      "!node_modules/onnxruntime-node/**"
     ],
     "asar": true,
     "win": {

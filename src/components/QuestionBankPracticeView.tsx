@@ -20,6 +20,8 @@ import {
   FileQuestion
 } from 'lucide-react';
 import { ExamType, AppView, ClinicalQuestion } from '../types.ts';
+import { GeneratedBanksPanel } from './GeneratedBanksPanel.tsx';
+import { SavedModulesPanel } from './SavedModulesPanel.tsx';
 import {
   BankId,
   BankMetadata,
@@ -797,6 +799,9 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-12">
+      <SavedModulesPanel onLaunchTest={onLaunchTest} />
+      <GeneratedBanksPanel />
+
       {/* Header Banner */}
       <div className="bg-[#001432] rounded-2xl p-6 text-white border border-[#13294b] shadow-md relative overflow-hidden">
         <div className="absolute right-0 top-0 bottom-0 w-96 bg-gradient-to-l from-[#0f8b8d]/20 to-transparent pointer-events-none" />

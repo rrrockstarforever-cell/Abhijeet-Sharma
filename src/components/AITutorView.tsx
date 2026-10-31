@@ -6,7 +6,7 @@
 // - Per-message actions: copy, regenerate, "Save as highlight" (writes to the user-highlights store).
 // - Context question attaches as a removable chip; quick prompts for clinical use.
 // - Replies are rendered as React elements (markdown-ish) — never raw HTML (no innerHTML).
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, useSyncExternalStore } from 'react';
 import {
   Sparkles,
   Send,
@@ -32,8 +32,11 @@ import {
   ChevronDown,
   Paperclip,
   FileText,
-  ImageIcon
+  ImageIcon,
+  Mic,
+  MicOff
 } from 'lucide-react';
+import { transcribe } from '../lib/speech.ts';
 import { AppView, ClinicalQuestion, ExamType } from '../types.ts';
 import {
   getActiveProvider as getStoredActiveProvider,
@@ -126,6 +129,15 @@ const CONVERSATIONS_KEY = 'pulse.aiTutor.conversations.v1';
 const EFFORT_KEY = 'ai.effort';
 const EFFORT_LEVELS = ['Min', 'Low', 'Medium', 'High', 'Ultra'] as const;
 type EffortLevel = (typeof EFFORT_LEVELS)[number];
+/** One-tap prompts shown when a question is attached, so a learner does not have to type "explain". */
+const QUICK_ACTIONS: { label: string; prompt: string }[] = [
+  { label: 'Explain', prompt: 'Explain this question step by step, ending with the correct answer.' },
+  { label: 'Why are the others wrong?', prompt: 'For each wrong option, say why it is wrong and name the trap it sets.' },
+  { label: 'Mnemonic', prompt: 'Give a short mnemonic or memory hook for the key fact in this question.' },
+  { label: 'Similar question', prompt: 'Write one similar MCQ on the same concept with four options, then give the answer and a one-line reason.' },
+  { label: 'Drug interactions', prompt: 'List the important drug interactions and monitoring points relevant to this question.' },
+];
+
 const PERSONAS = [
   { id: 'BOARD_MASTER', label: 'Board Master', hint: 'Distractors & pearls' },
   { id: 'ATTENDING', label: 'Attending', hint: 'Socratic rounds' },
@@ -234,12 +246,57 @@ function renderMarkdown(text: string): React.ReactNode {
 
 // ---------- component ----------
 
+// ----- shared chat store -----
+// Replies keep arriving after the learner leaves the tutor (the request is still running on the
+// server). The conversation list and the set of conversations awaiting a reply therefore live
+// outside the component, so a reply that arrives later is still saved and shown on return.
+let conversationStore: Conversation[] | null = null;
+const pendingConversations = new Set<string>();
+const storeListeners = new Set<() => void>();
+
+function getConversationStore(): Conversation[] {
+  if (!conversationStore) {
+    const loaded = loadConversations();
+    conversationStore = loaded.length ? loaded : [newConversation()];
+  }
+  return conversationStore;
+}
+
+function notifyStore(): void {
+  storeListeners.forEach((listener) => listener());
+}
+
+function subscribeStore(listener: () => void): () => void {
+  storeListeners.add(listener);
+  return () => { storeListeners.delete(listener); };
+}
+
+function setConversationStore(updater: (prev: Conversation[]) => Conversation[]): void {
+  conversationStore = updater(getConversationStore());
+  saveConversations(conversationStore);
+  notifyStore();
+}
+
+function setConversationPending(id: string, pending: boolean): void {
+  if (pending) pendingConversations.add(id);
+  else pendingConversations.delete(id);
+  notifyStore();
+}
+
+/** The conversation list, with a setter that behaves like useState's. */
+function useConversationStore(): [Conversation[], (updater: (prev: Conversation[]) => Conversation[]) => void] {
+  const list = useSyncExternalStore(subscribeStore, getConversationStore);
+  return [list, setConversationStore];
+}
+
+/** True while the given conversation is waiting for a reply. */
+function useConversationPending(id: string): boolean {
+  return useSyncExternalStore(subscribeStore, () => pendingConversations.has(id));
+}
+
 export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, attachedQuestion, onNavigate, currentExam = 'NEET_PG' }) => {
   // ----- conversations -----
-  const [conversations, setConversations] = useState<Conversation[]>(() => {
-    const loaded = loadConversations();
-    return loaded.length ? loaded : [newConversation()];
-  });
+  const [conversations, setConversations] = useConversationStore();
   const [activeId, setActiveId] = useState<string>('');
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState<string>('');
@@ -252,7 +309,47 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
 
   // ----- chat state -----
   const [input, setInput] = useState<string>('');
-  const [loading, setLoading] = useState<boolean>(false);
+  // Voice input: records from the microphone, then transcribes locally with Whisper.
+  const [recording, setRecording] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+
+  const toggleVoice = async () => {
+    if (recording) { recorderRef.current?.stop(); return; }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setVoiceStatus('Voice input needs microphone access, which this window does not have.');
+      return;
+    }
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      setVoiceStatus('Microphone permission was denied, or no microphone was found.');
+      return;
+    }
+    chunksRef.current = [];
+    const recorder = new MediaRecorder(stream);
+    recorder.ondataavailable = (e) => { if (e.data.size) chunksRef.current.push(e.data); };
+    recorder.onstop = async () => {
+      stream.getTracks().forEach((track) => track.stop());
+      setRecording(false);
+      setVoiceStatus('Transcribing…');
+      try {
+        const text = await transcribe(new Blob(chunksRef.current, { type: recorder.mimeType }), (m) => setVoiceStatus(m));
+        if (text) setInput((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text));
+        setVoiceStatus(text ? null : 'Nothing was heard. Try again.');
+      } catch (err: any) {
+        setVoiceStatus(`Voice input failed: ${err?.message || err}`);
+      }
+    };
+    recorderRef.current = recorder;
+    recorder.start();
+    setRecording(true);
+    setVoiceStatus('Listening… click the mic again to stop.');
+  };
+  // Waiting for a reply in the active conversation (kept in the store, so it survives navigation).
+  const loading = useConversationPending(activeId);
   const [persona, setPersona] = useState<(typeof PERSONAS)[number]['id']>('BOARD_MASTER');
   const [effort, setEffort] = useState<EffortLevel>(() => {
     try {
@@ -263,6 +360,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
     }
   });
   const [contextRemoved, setContextRemoved] = useState<boolean>(false);
+  const [contextOpen, setContextOpen] = useState<boolean>(false);
   const [imageEnabled, setImageEnabled] = useState<boolean>(() => isExplanationImagesEnabled());
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [savedHighlightId, setSavedHighlightId] = useState<string | null>(null);
@@ -295,10 +393,6 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
 
   const messages = activeConversation?.messages ?? [];
 
-  // persist conversations whenever they change
-  useEffect(() => {
-    saveConversations(conversations);
-  }, [conversations]);
 
   // fetch REAL provider connection status on mount; pick a connected provider
   useEffect(() => {
@@ -575,13 +669,17 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
       appendMessage(conv.id, userMsg);
       // auto-title from first exchange
       if (conv.messages.length === 0) {
-        updateConversation(conv.id, (c) => ({ ...c, title: trimmed.slice(0, 40) || 'New clinical chat' }));
+        // With a question attached, the subtopic is the useful part of the title ("explain" alone says nothing).
+        const title = contextQuestion?.subtopic
+          ? `${trimmed.slice(0, 24)} · ${contextQuestion.subtopic.slice(0, 40)}`
+          : trimmed.slice(0, 40);
+        updateConversation(conv.id, (c) => ({ ...c, title: title || 'New clinical chat' }));
       }
     }
 
     setInput('');
     if (!opts) setAttachments([]);
-    setLoading(true);
+    setConversationPending(conv.id, true);
 
     // history for the API: last ~10 non-error turns BEFORE this message, without the
     // just-added user bubble (the server appends the current message itself).
@@ -699,7 +797,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
         isError: true,
       });
     } finally {
-      setLoading(false);
+      setConversationPending(conv.id, false);
     }
   };
 
@@ -821,12 +919,13 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
 
           {/* Model (editable, persisted per provider) */}
           <input
-            value={model}
+            value={model || (provider ? getEffectiveModel(provider) : '')}
             onChange={(e) => handleModelChange(e.target.value)}
             disabled={!provider}
             list="tutor-model-options"
             placeholder="model id"
-            className="w-36 bg-slate-800/80 border border-slate-700 text-[11px] font-mono text-white rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] disabled:opacity-50 placeholder-slate-500"
+            title={model || (provider ? getEffectiveModel(provider) : '')}
+            className="w-64 bg-slate-800/80 border border-slate-700 text-[11px] font-mono text-white rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] disabled:opacity-50 placeholder-slate-500"
           />
           <datalist id="tutor-model-options">
             {provider && providerMap[provider]?.connected && (
@@ -853,20 +952,43 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
 
       {/* Context question chip */}
       {contextQuestion && !contextRemoved && (
-        <div className="mt-2 flex items-center gap-2">
-          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-50 border border-amber-200 text-xs text-amber-900">
-            <BookOpen className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-            <span className="font-semibold truncate max-w-[320px] lg:max-w-[480px]">
-              Context: {contextQuestion.subtopic} — {contextQuestion.stem.slice(0, 80)}{contextQuestion.stem.length > 80 ? '…' : ''}
-            </span>
-            <button
-              onClick={() => setContextRemoved(true)}
-              title="Remove attached question from context"
-              className="text-amber-700 hover:text-amber-900 shrink-0"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+        <div className="mt-2">
+          <div className="flex items-center gap-2">
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-50 border border-amber-200 text-xs text-amber-900 min-w-0">
+              <BookOpen className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+              <span className="font-semibold truncate max-w-[320px] lg:max-w-[480px]">
+                Context: {contextQuestion.subtopic} — {contextQuestion.stem.slice(0, 80)}{contextQuestion.stem.length > 80 ? '…' : ''}
+              </span>
+              <button
+                onClick={() => setContextOpen((open) => !open)}
+                className="font-bold text-[#00696b] hover:underline shrink-0"
+                aria-expanded={contextOpen}
+              >
+                {contextOpen ? 'Hide' : 'Show full question'}
+              </button>
+              <button
+                onClick={() => setContextRemoved(true)}
+                title="Remove attached question from context"
+                className="text-amber-700 hover:text-amber-900 shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
+          {contextOpen && (
+            <div className="mt-2 rounded-xl border border-amber-200 bg-white p-3 text-xs text-slate-800 space-y-2 max-h-56 overflow-y-auto">
+              <p className="whitespace-pre-line leading-relaxed">{contextQuestion.stem}</p>
+              {contextQuestion.questionText && contextQuestion.questionText !== contextQuestion.stem && (
+                <p className="font-semibold">{contextQuestion.questionText}</p>
+              )}
+              <ol className="space-y-1">
+                {contextQuestion.options.map((o) => (
+                  <li key={o.id}><span className="font-bold mr-1.5">{o.id}.</span>{o.text}</li>
+                ))}
+              </ol>
+              <p className="text-[10px] text-slate-400">The answer key is not shown here, so the tutor's reasoning is yours to check.</p>
+            </div>
+          )}
         </div>
       )}
 
@@ -1311,6 +1433,19 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
               <ImageIcon className="w-4 h-4" />
             </button>
             <button
+              onClick={toggleVoice}
+              disabled={loading}
+              title={recording ? 'Stop recording and transcribe' : 'Speak your question (transcribed on this device)'}
+              aria-pressed={recording}
+              className={`p-2.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 shrink-0 disabled:opacity-40 ${
+                recording
+                  ? 'bg-rose-50 border-rose-300 text-rose-700 animate-pulse'
+                  : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-[#00696b] hover:border-[#0f8b8d]/40'
+              }`}
+            >
+              {recording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            </button>
+            <button
               onClick={openAttachPanel}
               title="Attach a page from your PDF library as context"
               className={`p-2.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 shrink-0 ${
@@ -1349,6 +1484,23 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
               Send
             </button>
           </div>
+          {voiceStatus && (
+            <p className={`mt-1.5 text-[11px] ${recording ? 'text-rose-700' : 'text-slate-500'}`}>{voiceStatus}</p>
+          )}
+          {contextQuestion && !contextRemoved && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {QUICK_ACTIONS.map((action) => (
+                <button
+                  key={action.label}
+                  onClick={() => send(action.prompt)}
+                  disabled={loading || connectedCount === 0}
+                  className="px-2.5 py-1.5 rounded-full border border-slate-200 bg-white text-[11px] font-semibold text-slate-600 hover:text-[#00696b] hover:border-[#0f8b8d]/40 disabled:opacity-40"
+                >
+                  {action.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
