@@ -8,6 +8,12 @@ import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../ut
 import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
 
 /**
+ * Two key facts this similar are the same fact (word overlap on the key-fact sentences). Set low because
+ * paraphrases share few words: a repeat pair scored about 0.33, an unrelated pair 0.
+ */
+const KEY_FACT_SIMILARITY = 0.3;
+
+/**
  * Shape of each item by its position in the set: mostly single best answer, one in four asks which
  * option is incorrect or NOT true, and only one in eight is a numbered-statements item.
  */
@@ -113,25 +119,21 @@ export function getEffectiveModel(provider: AiProviderId): string {
   return stored ?? DEFAULT_MODELS[provider];
 }
 
-let workCursor = 0;
+/** The model that checks answers: always NVIDIA Nemotron 3.5 Super VL, with thinking on. */
+export const CHECK_ROUTE: { provider: AiProviderId; model: string } = {
+  provider: 'nvidia',
+  model: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
+};
 
-/**
- * The provider and model for one piece of question work (generation, repair, answer checks).
- * With NVIDIA selected, all of it runs on NVIDIA. With another engine selected, the work alternates
- * between NVIDIA and that engine, so the two share the load.
- */
-export function workRoute(): { provider: AiProviderId; model: string } | null {
+/** The provider and model that write questions and refine or review them: always the engine you selected. */
+export function writeRoute(): { provider: AiProviderId; model: string } | null {
   const active = getActiveProvider();
-  if (!active) return null;
-  if (active === 'nvidia') return { provider: 'nvidia', model: getEffectiveModel('nvidia') };
-  workCursor += 1;
-  const provider: AiProviderId = workCursor % 2 === 0 ? 'nvidia' : active;
-  return { provider, model: getEffectiveModel(provider) };
+  return active ? { provider: active, model: getEffectiveModel(active) } : null;
 }
 
-/** The provider and model fields for a question-work request body. */
+/** The provider and model fields for a question-writing request body. */
 export function workBody(): { provider: AiProviderId | 'opencode'; model?: string } {
-  const route = workRoute();
+  const route = writeRoute();
   return { provider: route?.provider ?? 'opencode', model: route?.model };
 }
 
@@ -140,8 +142,8 @@ export function workBody(): { provider: AiProviderId | 'opencode'; model?: strin
  * engine is in use (shared work, or an engine with no rate limit) the limit is wider.
  */
 export function parallelRequestLimit(): number {
-  const active = getActiveProvider();
-  return !active || active === 'nvidia' ? 3 : 8;
+  // 30 questions at a time, each with its write and check. Retries on rate-limit errors still apply.
+  return 30;
 }
 
 // ---------- provider status ----------
@@ -177,7 +179,7 @@ export interface AiCompleteOptions {
   effort?: string;
   provider?: AiProviderId;
   model?: string;
-  /** Question work (generation, repair, checks) is shared between NVIDIA and the selected engine. See workRoute. */
+  /** Question writing and repair: sent to the selected engine. See writeRoute. */
   work?: boolean;
   /** Cancels the HTTP request; the server also drops the upstream call (see /api/ai/complete). */
   signal?: AbortSignal;
@@ -203,17 +205,20 @@ function openCodeSessionId(): string {
 
 interface TopicSource { title: string; url: string; text: string }
 
+/** One planned question slot: the subject, subtopic, the part of it to focus on, and the difficulty. */
+interface PlannedTopic { subject: string; subtopic: string; focus?: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }
+
 // PubMed abstracts per topic, fetched once and shared by every question written on that topic.
 const topicEvidenceCache = new Map<string, Promise<TopicSource[]>>();
 
-function topicEvidence(query: string): Promise<TopicSource[]> {
-  const key = query.trim().toLowerCase();
+function topicEvidence(query: string, subject: string): Promise<TopicSource[]> {
+  const key = `${subject}|${query.trim().toLowerCase()}`;
   let hit = topicEvidenceCache.get(key);
   if (!hit) {
     hit = fetch('/api/ai/topic-sources', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, subject }),
     })
       .then((r) => (r.ok ? r.json() : { sources: [] }))
       .then((d) => (Array.isArray(d?.sources) ? (d.sources as TopicSource[]) : []))
@@ -225,7 +230,7 @@ function topicEvidence(query: string): Promise<TopicSource[]> {
 
 /** Calls POST /api/ai/complete with the active (or given) provider. Throws typed AiError on failure. */
 export async function aiComplete(options: AiCompleteOptions): Promise<string> {
-  const route = options.work ? workRoute() : null;
+  const route = options.work ? writeRoute() : null;
   const provider = route?.provider ?? options.provider ?? getActiveProvider();
   if (!provider) {
     throw new AiError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`, 'not_connected');
@@ -472,6 +477,10 @@ export interface GenerateQuestionsOptions {
   shouldStop?: () => boolean;
   /** Runs right after each question is written; a question that returns false is dropped. */
   verify?: (q: ClinicalQuestion) => Promise<boolean>;
+  /** Questions already kept in this module; new questions must not repeat them. */
+  existing?: ClinicalQuestion[];
+  /** Topic units ("subtopic|focus") already written in this module. Shared across rounds and updated here. */
+  usedUnits?: Set<string>;
   /** Aborts the in-flight batch request immediately (Stop button) and ends the loop. */
   signal?: AbortSignal;
   /** Called when a batch is being retried: 1-based attempt, attempt limit, and why. */
@@ -606,7 +615,7 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
 export async function generateExamQuestions(options: GenerateQuestionsOptions): Promise<{ questions: ClinicalQuestion[]; dropped: number; stopped: boolean; failure: string | null; imagesAttached: number }> {
   const {
     exam, count, subjectSubtopics, difficultyTier, difficultySubLevel, effort,
-    onProgress, onBatch, batchPromises, shouldStop, verify, signal, onRetry,
+    onProgress, onBatch, batchPromises, shouldStop, verify, existing, usedUnits: unitsUsed, signal, onRetry,
     questionTypes, stemPatterns, evidenceSources, patientGroup, presentingProblems,
     sourceMaterial, customInstructions, includeImages,
   } = options;
@@ -627,25 +636,37 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   let failure: string | null = null;
   const seenStems = new Set<string>();
   const acceptedStems: string[] = [];
+  // Key facts of accepted questions: the same fact asked in other words is still a repeat.
+  const acceptedKeyFacts: string[] = [];
   const stemKey = (stem: string) =>
     stem.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 140);
+  // Topic units already written: "subtopic|focus". Planning in a later round skips them.
+  const used = unitsUsed ?? new Set<string>();
+  // Questions already kept in this module (from an earlier round): new ones must not repeat them.
+  for (const prior of existing ?? []) {
+    seenStems.add(stemKey(prior.stem));
+    acceptedStems.push(toBenchItem(prior).stem);
+    if (prior.keyFact) acceptedKeyFacts.push(prior.keyFact);
+  }
 
   // ---------- Step 1: Topic Planning ----------
   // Ask the backend to plan topic distribution with importance weighting.
   // Higher priority topics are repeated more often across concurrent batches.
-  const planTopics = async (): Promise<{ subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }[] | null> => {
+  const planTopics = async (): Promise<PlannedTopic[] | null> => {
     try {
       const res = await fetch('/api/ai/plan-topics', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           subjectSubtopics,
-          count,
+          // Plan twice the number asked for, so there are spare slots when some questions fail their check.
+          count: count * 2,
           difficultyTier,
           provider: activeProvider || 'gemini',
           model: getEffectiveModel(activeProvider || 'gemini'),
           exam,
           effort,
+          exclude: [...used],
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -653,6 +674,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       return data.topics.map((t: any) => ({
         subject: t.subject,
         subtopic: t.subtopic,
+        focus: typeof t.focus === 'string' && t.focus.trim() ? t.focus.trim() : undefined,
         difficultyTier: (t.difficultyTier ?? tier) as 'LOW' | 'MEDIUM' | 'HIGH',
       }));
     } catch {
@@ -676,8 +698,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // ---------- Step 2: Select topic subsets for concurrent batches ----------
   // For 50-100 questions, we select subsets of 10 topics per concurrent batch.
   // Important topics (higher priority) appear more often in the topic list.
-  const topics: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }[] = plannedTopics ??
-    Array.from({ length: count }, (_, i) => ({
+  const topics: PlannedTopic[] = plannedTopics ??
+    Array.from({ length: count * 2 }, (_, i) => ({
       ...workingPool[i % workingPool.length],
       difficultyTier: tier,
     }));
@@ -687,7 +709,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
     // The writer reads PubMed on the topic first, so the key rests on the literature rather than memory alone.
-    const evidence = await topicEvidence(focus ?? focusParts(topic.subtopic)[0] ?? topic.subtopic);
+    const evidence = await topicEvidence(focus ?? focusParts(topic.subtopic)[0] ?? topic.subtopic, topic.subject);
     const prompt = [
       `Write ONE exam-standard MCQ for ${pattern.name}.`,
       `Subject: ${topic.subject}`,
@@ -726,7 +748,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           json: true,
           work: true,
           // Writing keeps its reasoning pass: a key written without it is less reliable, and the check runs on it next.
-          effort: effort ?? 'medium',
+          effort: effort ?? 'min',
           spread: true,
           signal,
         });
@@ -742,10 +764,14 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (seenStems.has(key)) return null;
         const fullStem = toBenchItem(q).stem;
         if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) return null;
+        // The same key fact asked in other words (same drug, same finding) is a repeat, even when the stem differs.
+        const keyFact = (q.keyFact || '').trim();
+        if (keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) return null;
         // Check the keyed answer right after it is written. A question that fails is not kept.
         if (verify && !(await verify(q))) return null;
         seenStems.add(key);
         acceptedStems.push(fullStem);
+        if (keyFact) acceptedKeyFacts.push(keyFact);
 
         // Attach image if this item actually asked for one. Previously this read
         // `!q.figureQuery` and then searched with `q.figureQuery || ''` — an empty
@@ -768,6 +794,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           }
         }
 
+        used.add(`${topic.subtopic}|${focus ?? ''}`);
         return q;
       } catch (err: any) {
         if (signal?.aborted || (err instanceof AiError && err.kind === 'aborted') || err?.name === 'AbortError') {
@@ -805,8 +832,12 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   });
   const questionPromises = topics.map((topic, idx) => {
     const parts = focusParts(topic.subtopic);
-    const focus = parts.length > 1 ? parts[idx % parts.length] : undefined;
-    return limited(() => generateSingleQuestion(topic, 0, focus, itemShape(idx, exam))).then((q) => {
+    // A planned topic carries its own focus (one drug class, one part of a subtopic); otherwise rotate the parts.
+    const focus = topic.focus ?? (parts.length > 1 ? parts[idx % parts.length] : undefined);
+    // Once enough questions are kept, no new slot starts: the rest of the plan is never written.
+    return limited(() => (questions.length >= count
+      ? Promise.resolve(null)
+      : generateSingleQuestion(topic, 0, focus, itemShape(idx, exam)))).then((q) => {
       // Update progress as each question completes (not after all finish).
       completedCount += 1;
       if (q) {

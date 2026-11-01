@@ -121,6 +121,9 @@ const EXAM_LABEL: Record<ExamType, string> = {
 
 const QUESTION_COUNTS = [10, 20, 25, 30, 40, 50, 75, 100];
 
+/** Most generation rounds one module may take to reach its question count. */
+const MAX_FILL_ROUNDS = 8;
+
 // ---------------------------------------------------------------- small pieces
 
 const Row: React.FC<{ label: string; hint?: string; children: React.ReactNode; last?: boolean }> = ({
@@ -570,6 +573,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       };
 
       // Same settings for the first pass and for any replacement round; only the count and batches differ.
+      const moduleUnits = new Set<string>();
       const genArgs = (count: number, batchPromises: Promise<void>[]): GenerateQuestionsOptions => ({
         exam: selectedExam,
         count,
@@ -607,8 +611,27 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         patientGroup: selectedExam === 'AMC_CAT' && patientGroup ? patientGroup : undefined,
         presentingProblems: selectedExam === 'AMC_CAT' ? presentingProblems : undefined,
         sourceMaterial,
+        // One set for the whole module, so a later round never writes the same drug or topic again.
+        usedUnits: moduleUnits,
       });
-      const { questions, dropped, stopped, failure } = await generateExamQuestions(genArgs(targetCount, batchPromises));
+      // Keep generating until the module has the number asked for. A question that fails its check is
+      // dropped, so each round asks for twice the missing count and skips the questions already kept.
+      const first = await generateExamQuestions(genArgs(targetCount, batchPromises));
+      let questions = first.questions;
+      let dropped = first.dropped;
+      let stopped = first.stopped;
+      let failure = first.failure;
+      for (let round = 2; round <= MAX_FILL_ROUNDS && questions.length < targetCount && !stopped && !failure && !stopEarlyRef.current; round++) {
+        setHeldBackNote(`Round ${round}: ${questions.length}/${targetCount} kept, writing more…`);
+        const more = await generateExamQuestions({
+          ...genArgs(Math.min(2 * (targetCount - questions.length), 100), batchPromises),
+          existing: questions,
+        });
+        questions = [...questions, ...more.questions];
+        dropped += more.dropped;
+        stopped = more.stopped;
+        failure = more.failure;
+      }
 
       // ---- Image-first pass -------------------------------------------------
       // When images are enabled, upgrade a slice of the set to genuine image-based

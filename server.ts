@@ -16,7 +16,7 @@ import {
   type OAuthChatMessage,
 } from './server/oauth.mjs';
 import { aiLog } from './server/oauth.mjs';
-import { research as webResearch, pubmedSearch, topicSources, SOURCE_REGISTRY } from './server/web.mjs';
+import { research as webResearch, literatureSources, SOURCE_REGISTRY } from './server/web.mjs';
 import { searchImages, fetchImage, REFERENCE_SOURCES } from './server/images.mjs';
 import { buildImageBank, loadImageBank, queryImageBank, getBankImage, bankStats, rejectImage, searchBankByText } from './server/imageBank.mjs';
 import { generateQuestionFromImage } from './server/visionQuestion.mjs';
@@ -266,7 +266,8 @@ const NVIDIA_SPREAD_MODELS = [
   'nvidia/nemotron-3.5-lightning-30b-a3b',
 ];
 let nvidiaSpreadCursor = 0;
-const NVIDIA_SLOTS = Number(process.env.NVIDIA_MAX_IN_FLIGHT || 3);
+// No cap on NVIDIA requests in flight. Set NVIDIA_MAX_IN_FLIGHT only to impose one.
+const NVIDIA_SLOTS = Number(process.env.NVIDIA_MAX_IN_FLIGHT || Infinity);
 let nvidiaInFlight = 0;
 const nvidiaWaiting: (() => void)[] = [];
 async function nvidiaSlot<T>(task: () => Promise<T>): Promise<T> {
@@ -668,10 +669,12 @@ app.get('/api/ai/source-registry', (_req: Request, res: Response) => {
 // POST /api/ai/topic-sources: drug label and PubMed evidence on a topic, for the question writer to read before it writes.
 app.post('/api/ai/topic-sources', async (req: Request, res: Response) => {
   const query = String(req.body?.query || '').trim().slice(0, 200);
+  const subject = String(req.body?.subject || '');
   if (!query) return res.json({ sources: [] });
   try {
-    const found = await topicSources(query);
-    return res.json({ sources: found.map((s) => ({ title: s.title, url: s.url, text: String(s.text || '').slice(0, 1500) })) });
+    const found = await literatureSources(query, subject);
+    // Shorter excerpts keep the writer's prompt small, which makes each call faster.
+    return res.json({ sources: found.map((s) => ({ title: s.title, url: s.url, text: String(s.text || '').slice(0, 700) })) });
   } catch {
     // Writing still goes ahead without evidence when PubMed is unreachable.
     return res.json({ sources: [] });
@@ -732,7 +735,7 @@ app.post('/api/qa/verify-answer', async (req: Request, res: Response) => {
     const solveSystem = 'You are an expert exam examiner. Answer the multiple-choice question from medical knowledge alone. Return only JSON.';
     const solveBody = `${stem}\n\n${optionLines}\n\nReturn JSON {"answer":"<option letter>","confidence":<0-100>,"reason":"<one sentence>"}.`;
     // The solve keeps its reasoning: a blind answer with thinking off was less accurate, and the key depends on it.
-    const solveOut = complete(solveSystem, solveBody);
+    const solveOut = complete(solveSystem, solveBody, 'min');
 
     // 2. The search: the item's key fact when it has one (a better query than one written here); otherwise a short query.
     const queryPromise = question.keyFact && String(question.keyFact).trim()
@@ -748,7 +751,7 @@ app.post('/api/qa/verify-answer', async (req: Request, res: Response) => {
     const query = String(queryOut?.query || '').trim();
     let sources: { title: string; url: string; text: string }[] = [];
     if (query) {
-      try { sources = await pubmedSearch(query); } catch { sources = []; }
+      try { sources = await literatureSources(query, question.subject); } catch { sources = []; }
     }
 
     // 3 and 4: the evidence judgement and the item's defect check read the same question, so with sources
@@ -762,6 +765,7 @@ app.post('/api/qa/verify-answer', async (req: Request, res: Response) => {
       quality = await complete(
         'You check whether medical evidence supports an exam answer, and you review exam items for defects. Use only the sources given. Return only JSON.',
         `Question: ${stem}\n${optionLines}\nKeyed answer: ${keyed}. ${keyedText}\n\nSources:\n${numbered}\n\nReturn JSON {"verdict":"SUPPORTED|CONTRADICTED|INSUFFICIENT","citedSources":[<source numbers>],"reason":"<one sentence>","wellFormed":true|false,"issues":["<short issue>"]}. Use SUPPORTED only if a source directly supports the keyed answer. ${defectRules}`,
+        'min',
       );
       verdict = ['SUPPORTED', 'CONTRADICTED', 'INSUFFICIENT'].includes(quality?.verdict) ? quality.verdict : 'INSUFFICIENT';
       const nums: number[] = Array.isArray(quality?.citedSources) ? quality.citedSources : [];
@@ -773,6 +777,7 @@ app.post('/api/qa/verify-answer', async (req: Request, res: Response) => {
       quality = await complete(
         'You review exam questions for defects. Return only JSON.',
         `${stem}\n\n${optionLines}\n\nKeyed answer: ${keyed}.\n\n${defectRules} Return JSON {"wellFormed":true|false,"issues":["<short issue>"]}.`,
+        'min',
       );
     }
     // A key can be right and the item still broken, so the defect check counts too.
@@ -806,11 +811,26 @@ app.get(/^\/api\/bank-figures\/(.+)$/, (req: Request, res: Response) => {
   res.sendFile(full);
 });
 
+/** Ranking replies from the planner, kept for the session so later rounds of a module do not rank again. */
+const rankCache = new Map<string, string>();
+
+/** A subtopic's parts, as the writer focuses on them: "Antipsychotics: haloperidol, olanzapine" gives two. */
+function subtopicParts(subtopic: string): string[] {
+  const after = subtopic.includes(':') ? subtopic.split(':').slice(1).join(':') : subtopic;
+  // Each part keeps only its own name: "Antiepileptics: phenytoin" becomes "phenytoin".
+  return after
+    .split(/,|&| and /)
+    .map((s) => s.trim().split(':').pop()!.trim())
+    .filter(Boolean);
+}
+
 // 1a-bis. POST /api/ai/plan-topics: plan topic distribution for MCQ generation.
 // Returns a ranked list of subject+subtopic pairs with importance weights,
 // so that important topics appear more often across concurrent batches.
 app.post('/api/ai/plan-topics', async (req: Request, res: Response) => {
-  const { subjectSubtopics, count, difficultyTier, provider, model, exam, effort } = req.body || {};
+  const { subjectSubtopics, count, difficultyTier, provider, model, exam, effort, exclude } = req.body || {};
+  // Topic units already written in this module ("subtopic|focus"). Later rounds skip them.
+  const excluded = new Set<string>(Array.isArray(exclude) ? exclude.map(String) : []);
   if (!subjectSubtopics || !Array.isArray(subjectSubtopics) || subjectSubtopics.length === 0) {
     return res.status(400).json({ error: 'subjectSubtopics is required' });
   }
@@ -841,13 +861,21 @@ app.post('/api/ai/plan-topics', async (req: Request, res: Response) => {
       `Output ONLY the JSON array.`,
     ].join('\n');
 
-    const raw = await runCompletion({
-      provider: provider || 'gemini',
-      model: model || DEFAULT_MODELS.nvidia,
-      messages: [{ role: 'user', content: planPrompt }],
-      json: true,
-      effort: effort || undefined,
-    });
+    // The same subjects are ranked again in every later round of a module. Keep the first reply for this session.
+    const rankKey = JSON.stringify({ exam, provider, model, subjectSubtopics });
+    let raw = rankCache.get(rankKey) ?? '';
+    if (!raw) {
+      raw = await runCompletion({
+        provider: provider || 'gemini',
+        model: model || DEFAULT_MODELS.nvidia,
+        messages: [{ role: 'user', content: planPrompt }],
+        json: true,
+        // Ranking subtopics is a short judgement, so it runs without reasoning, like the rest of the pipeline.
+        effort: 'min',
+      });
+      if (rankCache.size >= 50) rankCache.delete(rankCache.keys().next().value as string);
+      rankCache.set(rankKey, raw);
+    }
 
     const parsed = extractJson<{ subject: string; subtopic: string; priority: number }[]>(raw);
     // Keep only pairs the user actually selected. The model can return subjects it was
@@ -860,27 +888,49 @@ app.post('/api/ai/plan-topics', async (req: Request, res: Response) => {
       (entry) => allowed.get(entry?.subject)?.has(String(entry?.subtopic ?? '').trim()),
     );
 
-    // Build weighted topic list: higher priority = more repetitions.
-    const weighted: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }[] = [];
+    // One distinct topic per question first. Each subtopic is split into its parts (for example, one drug
+    // class each). Subtopics are taken in priority order, round by round, so a topic repeats only after every
+    // subtopic has had its first question, and then only with a different part.
+    // The model can list one subtopic more than once; keep each subtopic once, at its highest priority.
+    const bestByTopic = new Map<string, any>();
     for (const entry of ranked) {
-      const repeats = Math.max(1, Math.min(entry.priority || 5, 10));
-      for (let i = 0; i < repeats; i++) {
+      const key = `${entry.subject}|${String(entry.subtopic).trim()}`;
+      const prior = bestByTopic.get(key);
+      if (!prior || (entry.priority || 0) > (prior.priority || 0)) bestByTopic.set(key, entry);
+    }
+    const sorted = [...bestByTopic.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0));
+    const weighted: { subject: string; subtopic: string; focus?: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }[] = [];
+    for (let round = 0; sorted.length > 0 && weighted.length < countN && round < 20; round++) {
+      for (const entry of sorted) {
+        if (weighted.length >= countN) break;
+        const parts = subtopicParts(entry.subtopic);
+        const focus = parts.length > 1 ? parts[round % parts.length] : undefined;
+        if (excluded.has(`${entry.subtopic}|${focus ?? ''}`)) continue;
         weighted.push({
           subject: entry.subject,
           subtopic: entry.subtopic,
+          focus,
           difficultyTier: tier as 'LOW' | 'MEDIUM' | 'HIGH',
         });
       }
     }
 
-    // If weighted list is empty (parse failed), fall back to round-robin.
+    // If the ranking failed, fall back to a round-robin over the same units, with the same rules: each unit
+    // once, parts split out, and units already written in this module skipped.
     if (weighted.length === 0) {
-      for (let i = 0; i < countN; i++) {
-        weighted.push({
-          subject: pool[i % pool.length].subject,
-          subtopic: pool[i % pool.length].subtopic,
-          difficultyTier: tier as 'LOW' | 'MEDIUM' | 'HIGH',
-        });
+      const units: { subject: string; subtopic: string; focus?: string }[] = [];
+      for (let round = 0; round < 20; round++) {
+        for (const entry of pool) {
+          const parts = subtopicParts(entry.subtopic);
+          const focus = parts.length > 1 ? parts[round % parts.length] : undefined;
+          if (round > 0 && parts.length <= 1) continue;
+          units.push({ subject: entry.subject, subtopic: entry.subtopic, focus });
+        }
+      }
+      for (const unit of units) {
+        if (weighted.length >= countN) break;
+        if (excluded.has(`${unit.subtopic}|${unit.focus ?? ''}`)) continue;
+        weighted.push({ ...unit, difficultyTier: tier as 'LOW' | 'MEDIUM' | 'HIGH' });
       }
     }
 
@@ -1878,11 +1928,22 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
 
   const messages: OAuthChatMessage[] = [...history, { role: 'user', content: message }];
 
+  // Evidence for this question: a drug label and PubMed abstracts, fetched before the model answers.
+  // The model is told to rely on them where they apply and to cite them by title.
+  const evidence = await literatureSources(message.slice(0, 200), typeof body.subject === 'string' ? body.subject : '').catch(() => []);
+  const groundedSystem = evidence.length
+    ? [
+        system,
+        'Evidence retrieved for this question (use it where it applies, cite it by its title, and say when a point is from your own knowledge rather than these sources):',
+        ...evidence.map((s, i) => `[${i + 1}] ${s.title}\n${s.url}\n${String(s.text || '').slice(0, 1200)}`),
+      ].join('\n\n')
+    : system;
+
   try {
     const raw = await runCompletion({
       provider,
       model: typeof body.model === 'string' ? body.model : undefined,
-      system,
+      system: groundedSystem,
       messages,
       json: true,
       effort: typeof body.effort === 'string' ? body.effort : undefined,
@@ -1900,6 +1961,7 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
     }
 
     const result: any = { success: true, reply, modelUsed: body.model || DEFAULT_MODELS[provider] };
+    if (evidence.length) result.sources = evidence.map((s) => ({ title: s.title, url: s.url }));
 
     if (parsed && !Array.isArray(parsed)) {
       if (Array.isArray(parsed.reasoningSteps)) {
