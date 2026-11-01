@@ -545,25 +545,28 @@ async function pubmed(q) {
     return { title: pick(/<ArticleTitle>([\s\S]*?)<\/ArticleTitle>/), url: `https://pubmed.ncbi.nlm.nih.gov/${id}/`, text: `${pick(/<Journal>[\s\S]*?<Title>([\s\S]*?)<\/Title>/)} ${pick(/<PubDate>[\s\S]*?<Year>(\d+)<\/Year>/)}. ${abs}`.slice(0, 2500) };
   }).filter((s) => s.text.length > 40);
 }
-async function pageText(url) {
+async function pageText(url, chars = 2500) {
   const r = await get(url);
   const type = r.headers.get("content-type") || "";
   if (!/text\/html|text\/plain|xml/.test(type)) throw new Error("not a web page");
-  return strip((await r.text()).slice(0, 15e5)).slice(0, 2500);
+  return strip((await r.text()).slice(0, 15e5)).slice(0, chars);
 }
-async function research(query) {
+async function research(query, pageChars = 2500) {
   const q = String(query || "").trim().slice(0, 300);
   if (!q) throw new Error("Nothing to search for.");
   const [w, p] = await Promise.allSettled([ddg(q), pubmed(q)]);
   const web = (w.status === "fulfilled" ? w.value : []).sort((a, b) => Number(TRUSTED.test(b.url)) - Number(TRUSTED.test(a.url))).slice(0, 3);
   const pm = p.status === "fulfilled" ? p.value : [];
-  const pages = await Promise.allSettled(web.map((x) => pageText(x.url)));
+  const pages = await Promise.allSettled(web.map((x) => pageText(x.url, pageChars)));
   const sources = [
     ...web.map((x, i) => ({ title: x.title, url: x.url, text: (pages[i].status === "fulfilled" && pages[i].value.length > 200 ? pages[i].value : x.snippet) || x.snippet, kind: "web" })),
     ...pm.map((x) => ({ ...x, kind: "pubmed" }))
   ].filter((s) => s.text).map((s, i) => ({ n: i + 1, ...s }));
   if (!sources.length) throw new Error("No sources found (check your internet connection, or try different wording).");
   return { sources, retrievedAt: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10) };
+}
+async function pubmedSearch(query) {
+  return pubmed(String(query || "").slice(0, 300));
 }
 
 // server/images.mjs
@@ -1917,6 +1920,8 @@ try {
   dotenv.config({ path: ENV_FILE });
 } catch {
 }
+app.use("/api/ai/complete-images", express.json({ limit: "30mb" }));
+app.use("/api/ocr/nemotron", express.json({ limit: "1mb" }));
 app.use(express.json());
 var OPENCODE_DEFAULT_MODEL = "deepseek-v4.1-flash";
 var DEFAULT_MODELS = {
@@ -2053,7 +2058,7 @@ function notConnectedMessage(providerId) {
   return `${providerId.charAt(0).toUpperCase() + providerId.slice(1)} is not signed in. Connect an AI provider in Settings \u2192 AI Subscription Hub.`;
 }
 async function runCompletion(opts) {
-  const { provider, model, system, messages, json, effort, search, signal } = opts;
+  const { provider, model, system, messages, json, effort, search, signal, images } = opts;
   if (provider === "opencode") {
     const key = opencodeKey();
     if (!key) throw new ApiError(notConnectedMessage("opencode"), 401);
@@ -2229,12 +2234,16 @@ async function runCompletion(opts) {
     const model_ = model || DEFAULT_MODELS.nvidia;
     const payloadMessages = [
       ...system ? [{ role: "system", content: system }] : [],
-      ...messages.map((m) => ({ role: m.role, content: m.content }))
+      ...messages.map((m, i) => ({
+        role: m.role,
+        content: images?.length && i === messages.length - 1 ? [{ type: "text", text: m.content }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))] : m.content
+      }))
     ];
     const payload = JSON.stringify({
       model: model_,
       messages: payloadMessages,
-      temperature: 0.7,
+      // Reading pages is transcription as much as writing, so keep it close to the source.
+      temperature: images?.length ? 0.3 : 0.7,
       // Let a long clinical answer finish rather than starving the reasoning trace.
       max_tokens: nvidiaTokenBudget(effort),
       chat_template_kwargs: nvidiaReasoningKwargs(effort),
@@ -2318,6 +2327,98 @@ app.get("/api/oauth/status", (req, res) => {
     },
     defaults: DEFAULT_MODELS
   });
+});
+app.post("/api/qa/verify-answer", async (req, res) => {
+  const { question, provider, model } = req.body || {};
+  if (!question || !Array.isArray(question.options) || !question.correctOption || !provider) {
+    return res.status(400).json({ error: "question (with options and correctOption) and provider are required." });
+  }
+  const complete = async (system, content) => {
+    const waits = [3e3, 8e3, 15e3, 3e4];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return extractJson(await runCompletion({
+          provider,
+          model: model || DEFAULT_MODELS[provider] || DEFAULT_MODELS.opencode,
+          system,
+          messages: [{ role: "user", content }],
+          json: true
+        }));
+      } catch (err) {
+        const rateLimited = /429|rate.?limit|too many requests/i.test(String(err?.message || err));
+        if (!rateLimited || attempt >= waits.length) throw err;
+        await new Promise((resolve) => setTimeout(resolve, waits[attempt]));
+      }
+    }
+  };
+  const keyed = String(question.correctOption).toUpperCase();
+  const keyedText = String((question.options.find((o) => String(o.id).toUpperCase() === keyed) || {}).text || "");
+  const stem = [question.stem, question.questionText].filter(Boolean).join("\n");
+  const optionLines3 = question.options.map((o) => `${o.id}. ${o.text}`).join("\n");
+  try {
+    const solveSystem = "You are an expert exam examiner. Answer the multiple-choice question from medical knowledge alone. Return only JSON.";
+    const solveBody = `${stem}
+
+${optionLines3}
+
+Return JSON {"answer":"<option letter>","confidence":<0-100>,"reason":"<one sentence>"}.`;
+    const [s1, s2] = await Promise.all([complete(solveSystem, solveBody), complete(solveSystem, solveBody)]);
+    const solves = [s1?.answer, s2?.answer].map((a) => String(a || "").toUpperCase());
+    const solvesAgree = solves.every((a) => a === keyed);
+    const queryOut = await complete(
+      "You write PubMed search queries. Return only JSON.",
+      `Question: ${stem}
+Correct option: ${keyed}. ${keyedText}
+
+Write one PubMed search query of 6-12 words that would find evidence for the correct option. Return JSON {"query":"..."}.`
+    );
+    const query = String(queryOut?.query || "").trim();
+    let sources = [];
+    if (query) {
+      try {
+        sources = await pubmedSearch(query);
+      } catch {
+        sources = [];
+      }
+    }
+    let verdict = "INSUFFICIENT";
+    let cited = [];
+    if (sources.length) {
+      const numbered = sources.map((s, i) => `[${i + 1}] ${s.title}
+${s.url}
+${s.text}`).join("\n\n");
+      const judged = await complete(
+        "You check whether medical evidence supports a exam answer. Use only the sources given. Return only JSON.",
+        `Question: ${stem}
+Keyed answer: ${keyed}. ${keyedText}
+
+Sources:
+${numbered}
+
+Return JSON {"verdict":"SUPPORTED|CONTRADICTED|INSUFFICIENT","citedSources":[<source numbers>],"reason":"<one sentence>"}. Use SUPPORTED only if a source directly supports the keyed answer.`
+      );
+      verdict = ["SUPPORTED", "CONTRADICTED", "INSUFFICIENT"].includes(judged?.verdict) ? judged.verdict : "INSUFFICIENT";
+      const nums = Array.isArray(judged?.citedSources) ? judged.citedSources : [];
+      cited = nums.map((n) => sources[Number(n) - 1]).filter((s) => Boolean(s)).map((s) => ({ title: s.title, url: s.url }));
+    }
+    const quality = await complete(
+      "You review exam questions for defects. Return only JSON.",
+      `${stem}
+
+${optionLines3}
+
+Keyed answer: ${keyed}.
+
+Check: (1) exactly one option is the single best answer; (2) if the question asks which is NOT / INCORRECT / FALSE / EXCEPT, exactly one option is that; (3) every number or result needed to answer is given in the stem; (4) no other option is also correct. Return JSON {"wellFormed":true|false,"issues":["<short issue>"]}.`
+    );
+    const wellFormed = quality?.wellFormed === true;
+    const issues = Array.isArray(quality?.issues) ? quality.issues.map(String).slice(0, 5) : [];
+    const solvedAgainst = solves.every((a) => a && a !== keyed);
+    const proof = solvesAgree && verdict === "SUPPORTED" && cited.length > 0 && wellFormed ? "VERIFIED" : solvedAgainst && verdict === "CONTRADICTED" ? "CONTESTED" : "UNVERIFIED";
+    return res.json({ proof, keyed, solves, query, evidence: { verdict, cited }, wellFormed, issues });
+  } catch (err) {
+    return res.status(502).json({ error: err?.message || "Answer check failed." });
+  }
 });
 var BANK_FIGURES_DIR = process.env.BANK_FIGURES_DIR || path.join(os.homedir(), ".pulse-med", "bank-figures");
 app.get(/^\/api\/bank-figures\/(.+)$/, (req, res) => {
@@ -3020,6 +3121,106 @@ app.post("/api/ai/complete", async (req, res) => {
     if (!res.headersSent) return res.status(status2).json({ error: err?.message || "AI request failed." });
   }
 });
+function nemotronWords(body) {
+  const out = [];
+  const visit = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    const text = typeof node.text === "string" ? node.text : node.text_prediction?.text;
+    const shape = node.bounding_box ?? node.bbox ?? node.points ?? node.bounding_box?.points;
+    const pts = Array.isArray(shape) ? shape : Array.isArray(shape?.points) ? shape.points : void 0;
+    if (typeof text === "string" && text.trim() && pts && pts.length) {
+      const xs = [];
+      const ys = [];
+      if (pts.every((v) => typeof v === "number")) {
+        pts.forEach((v, i) => (i % 2 === 0 ? xs : ys).push(v));
+      } else {
+        for (const p of pts) {
+          const x = Array.isArray(p) ? p[0] : p?.x;
+          const y = Array.isArray(p) ? p[1] : p?.y;
+          if (typeof x === "number" && typeof y === "number") {
+            xs.push(x);
+            ys.push(y);
+          }
+        }
+      }
+      if (xs.length && ys.length) {
+        const conf = Number(node.confidence ?? node.text_prediction?.confidence);
+        out.push({
+          text: text.trim(),
+          confidence: Number.isFinite(conf) ? conf * (conf <= 1 ? 100 : 1) : 90,
+          bbox: { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) }
+        });
+      }
+      return;
+    }
+    Object.values(node).forEach(visit);
+  };
+  visit(body);
+  return out;
+}
+app.post("/api/ocr/nemotron", async (req, res) => {
+  const image = req.body?.image;
+  if (typeof image !== "string" || !/^data:image\/(jpeg|png|webp);base64,/.test(image)) {
+    return res.status(400).json({ error: "image must be a JPEG, PNG or WebP data URL." });
+  }
+  const key = nvidiaKey();
+  if (!key) return res.status(401).json({ error: notConnectedMessage("nvidia") });
+  if (image.split(",")[1].length > 18e4) {
+    return res.status(413).json({ error: "The page image is too large for the NVIDIA OCR API. Use a smaller image." });
+  }
+  try {
+    const r = await fetch("https://ai.api.nvidia.com/v1/cv/nvidia/nemotron-ocr-v2", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ input: [{ type: "image_url", url: image }] }),
+      signal: AbortSignal.timeout(12e4)
+    });
+    const raw = await r.text();
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+    }
+    if (!r.ok) return res.status(r.status === 429 ? 429 : 502).json({ error: `NVIDIA OCR: ${providerErrorText(body, r.status)}` });
+    const words = nemotronWords(body);
+    if (process.env.OCR_DEBUG) console.log("[ocr/nemotron] raw response:", raw.slice(0, 2e3));
+    return res.json({ text: words.map((w) => w.text).join("\n"), words });
+  } catch (err) {
+    return res.status(502).json({ error: err?.message || "The NVIDIA OCR request failed." });
+  }
+});
+app.post("/api/ai/complete-images", async (req, res) => {
+  const { provider, model, system, messages, json, effort, images } = req.body || {};
+  if (provider !== "nvidia") {
+    return res.status(400).json({ error: `Reading page images is not available with ${provider || "this provider"}.` });
+  }
+  if (!Array.isArray(messages) || messages.length === 0 || messages.some((m) => !m || typeof m.content !== "string")) {
+    return res.status(400).json({ error: "messages must be an array of {role, content}." });
+  }
+  if (!Array.isArray(images) || images.length === 0 || images.some((u) => typeof u !== "string" || !/^data:image\/(jpeg|png|webp);base64,/.test(u))) {
+    return res.status(400).json({ error: "images must be JPEG, PNG or WebP data URLs." });
+  }
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) controller.abort();
+  });
+  try {
+    const text = await runCompletion({ provider, model, system, messages, json, effort, images, signal: controller.signal });
+    if (controller.signal.aborted) return;
+    if (!text || !text.trim()) {
+      return res.status(502).json({ error: "The AI provider returned an empty response. Try again." });
+    }
+    return res.json({ success: true, text });
+  } catch (err) {
+    if (controller.signal.aborted) return;
+    const status2 = err instanceof ApiError ? err.status : 502;
+    if (!res.headersSent) return res.status(status2).json({ error: err?.message || "AI request failed." });
+  }
+});
 var PERSONA_PROMPTS = {
   BOARD_MASTER: "You are the PULSE MED Board Exam Master for NEET-PG / INI-CET / AMC CAT: razor-sharp high-yield clinical breakdowns, distractor (trap) dissection, and exam-board pearls.",
   ATTENDING: "You are the PULSE MED Socratic Attending Physician on teaching rounds: reason step by step with the resident, ask and answer like a senior clinician.",
@@ -3465,7 +3666,8 @@ app.post("/api/qa/refine-batch", async (req, res) => {
 app.post("/api/web/research", async (req, res) => {
   const query = typeof req.body?.query === "string" ? req.body.query : "";
   try {
-    const out = await research(query);
+    const pageChars = Math.min(3e4, Math.max(2500, Number(req.body?.pageChars) || 2500));
+    const out = await research(query, pageChars);
     return res.json({ success: true, sources: out.sources, retrievedAt: out.retrievedAt });
   } catch (err) {
     return res.status(502).json({ error: err?.message || "Web research failed." });
@@ -3628,3 +3830,6 @@ async function startServer() {
   httpServer.keepAliveTimeout = 12e4;
 }
 startServer();
+export {
+  nemotronWords
+};

@@ -29,9 +29,9 @@ function focusParts(subtopic: string): string[] {
   const after = subtopic.includes(':') ? subtopic.split(':').slice(1).join(':') : subtopic;
   return after.split(/,|&| and /).map((s) => s.trim()).filter(Boolean);
 }
-export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'opencode' | 'nvidia';
+export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'opencode' | 'nvidia' | 'vyce';
 
-export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia'];
+export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia', 'vyce'];
 
 // Server defaults (mirrored in server.ts); models are user-selectable and persisted
 // in localStorage as `ai.model.<provider>` and sent with every request.
@@ -46,6 +46,8 @@ export const DEFAULT_MODELS: Record<string, string> = {
   custom: 'gpt-4o-mini',
   // NVIDIA NIM API — OpenAI-compatible endpoint at integrate.api.nvidia.com/v1.
   nvidia: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
+  // VyceAI (https://vyceai.com/v1) — OpenAI-compatible, serves DeepSeek models.
+  vyce: 'deepseek-v4.1',
 };
 
 // Console-only model ids a previous version of the app offered for OpenCode. They are not
@@ -136,6 +138,8 @@ export interface AiMessage {
 }
 
 export interface AiCompleteOptions {
+  /** Spread the call across the NVIDIA text models (see the server). */
+  spread?: boolean;
   system?: string;
   messages: AiMessage[];
   json?: boolean;
@@ -177,6 +181,7 @@ export async function aiComplete(options: AiCompleteOptions): Promise<string> {
     messages: options.messages,
     json: options.json,
     effort: options.effort,
+    spread: options.spread,
   };
 
   let res: Response;
@@ -523,6 +528,7 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
     options: shuffled.entries.map((o) => ({ id: o.id as 'A' | 'B' | 'C' | 'D' | 'E', text: o.text })),
     correctOption: correct as ClinicalQuestion['correctOption'],
     boardPearl: typeof raw.boardPearl === 'string' ? raw.boardPearl.trim() : '',
+    keyFact: typeof raw.keyFact === 'string' && raw.keyFact.trim() ? raw.keyFact.trim().slice(0, 400) : undefined,
     explanation: typeof raw.explanation === 'string' && raw.explanation.trim() ? raw.explanation.trim() : undefined,
     citations: Array.isArray(raw.citations)
       ? raw.citations.filter((c: any) => typeof c === 'string' && c.trim()).map((c: string) => c.trim()).slice(0, 5)
@@ -642,7 +648,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       includeImages
         ? 'If this item is image-based (about one in five items must be), describe the finding in the stem AND set "figureModality" and "figureQuery" so a real picture can be fetched: "figureModality" is one of ECG | X-ray | CT | MRI | ultrasound | histology | fundus | clinical photo, and "figureQuery" is a 3-6 word English search phrase naming the diagnosis + modality (e.g. "atrial fibrillation ECG", "lobar pneumonia chest X-ray", "membranous nephropathy histology"). For items that are NOT image-based, set both to an empty string — never invent a picture.'
         : '',
-      `JSON shape — return exactly one object: { "examType": "${exam}", "subject": "${topic.subject}", "subtopic": "${topic.subtopic}", "cognitiveTier": "Direct Recall | Clinical 2-Step | Multi-Step & IBQ", "difficultyTier": "${topic.difficultyTier}", "stem": "...", "questionText": "...", "options": {${'ABCDE'.slice(0, pattern.opts).split('').map(k => `"${k}": "text"`).join(', ')}}, "correctOption": "A|B|C|D|E", "explanation": "...", "boardPearl": "...", "citations": [...], "trapType": "...", "trapExplanation": "...", "targetAccuracy": 0-100${includeImages ? ', "figureModality": "", "figureQuery": ""' : ''} }`,
+      `JSON shape — return exactly one object: { "examType": "${exam}", "subject": "${topic.subject}", "subtopic": "${topic.subtopic}", "cognitiveTier": "Direct Recall | Clinical 2-Step | Multi-Step & IBQ", "difficultyTier": "${topic.difficultyTier}", "stem": "...", "questionText": "...", "options": {${'ABCDE'.slice(0, pattern.opts).split('').map(k => `"${k}": "text"`).join(', ')}}, "correctOption": "A|B|C|D|E", "explanation": "...", "keyFact": "one sentence: the textbook or guideline fact that makes the correct option right, stated so a student could look it up", "boardPearl": "...", "citations": [...], "trapType": "...", "trapExplanation": "...", "targetAccuracy": 0-100${includeImages ? ', "figureModality": "", "figureQuery": ""' : ''} }`,
       learnerProfile ? `Learner instructions: """${learnerProfile}"""` : '',
       'Output ONLY the JSON object.',
     ].join('\n');
@@ -655,7 +661,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           system: GENERATOR_SYSTEM,
           messages: [{ role: 'user', content: prompt }],
           json: true,
-          effort,
+          // Writing a question does not need a reasoning pass: with thinking on, each question took about a minute.
+          // The answer check still reasons, so a wrong key is caught there.
+          effort: effort ?? 'min',
+          spread: true,
           signal,
         });
         const parsed = extractJson<BatchQuestionSpec>(raw);

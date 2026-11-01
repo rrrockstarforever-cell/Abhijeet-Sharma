@@ -1425,6 +1425,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                   transcript = (await aiCompleteWithImages({
                     system: PAGE_TRANSCRIBE_SYSTEM,
                     messages: [{ role: 'user', content: 'Transcribe this page.' }],
+                    // Copying text from an image needs no reasoning; thinking here made each page take far longer.
+                    effort: 'min',
                     provider,
                     model: getEffectiveModel(provider),
                   }, [image])).trim();
@@ -1462,7 +1464,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               content: 'Book: ' + (doc?.title ?? 'document') + '\nPages ' + start + '–' + end + ':\n\n' + sources.join('\n\n').slice(0, 24000) + '\n\nTeach these pages. Reply with the JSON note.',
             }],
             json: true,
-            effort: 'high',
+            // Medium is about as good as high for writing from a transcript, and about three times faster.
+            effort: 'medium',
             provider,
             model: getEffectiveModel(provider),
           })));

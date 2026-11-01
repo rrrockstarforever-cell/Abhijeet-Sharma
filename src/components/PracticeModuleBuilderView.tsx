@@ -51,6 +51,7 @@ import { reviewBatch, refineBatch, recordReviewBatch, loadBank } from '../lib/qa
 import { normalizeSubject } from '../lib/benchmark.ts';
 import { checkMany, proofOf } from '../lib/answerProof.ts';
 import { cleanQuestions } from '../lib/questionCleanup.ts';
+import { reasonsFor, repairQuestion } from '../lib/repairQuestion.ts';
 
 interface PracticeModuleBuilderViewProps {
   currentExam: ExamType;
@@ -762,7 +763,17 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         const good = verifiedOf(candidates);
         if (good.length >= targetCount || round === 3 || stopEarlyRef.current) break;
         const missing = targetCount - good.length;
-        setHeldBackNote(`Round ${round}: ${good.length}/${targetCount} verified. Generating ${missing} replacements…`);
+        // Repair before replacing: each failed question is rewritten with the reasons it failed, so its topic survives.
+        const failed = candidates.filter((q) => proofOf(q.id)?.proof !== 'VERIFIED').slice(0, Math.max(missing * 2, 8));
+        const repaired: ClinicalQuestion[] = [];
+        for (let i = 0; i < failed.length; i += 2) {
+          setHeldBackNote(`Round ${round}: repairing ${Math.min(i + 2, failed.length)}/${failed.length} failed questions…`);
+          const batch = failed.slice(i, i + 2);
+          const fixed = await Promise.all(batch.map((q) =>
+            repairQuestion(q, reasonsFor(q, proofOf(q.id))).catch(() => null)));
+          for (const r of fixed) if (r) repaired.push(r);
+        }
+        setHeldBackNote(`Round ${round}: ${good.length}/${targetCount} verified, ${repaired.length} repaired. Generating ${missing} replacements…`);
         const extra = await generateExamQuestions(genArgs(missing, []));
         const replacements = cleanQuestions(extra.questions);
         if (replacements.length > 0) {
@@ -770,7 +781,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
           recordReviewBatch(replacements, reviews);
           for (const r of reviews) if (r?.questionId) qaStatusById.current.set(r.questionId, r.status);
         }
-        candidates = [...candidates, ...replacements];
+        candidates = [...candidates, ...repaired, ...replacements];
       }
       const finalList = verifiedOf(candidates).slice(0, targetCount);
       launchWith(finalList, labels, chosenSubtopics);

@@ -66,6 +66,8 @@ export interface ClinicalQuestion {
   trapType?: string;
   trapExplanation?: string;
   boardPearl: string;
+  /** The one textbook or guideline fact that makes the keyed answer right. Used as the evidence search. */
+  keyFact?: string;
   citations: string[];
   targetAccuracy: number;
   nationalPercentile?: number;
