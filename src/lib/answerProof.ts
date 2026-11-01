@@ -1,7 +1,7 @@
 // Answer proof: each question's keyed answer is checked (blind solves plus PubMed evidence) before it
 // may reach the Test Runner. Results are stored per question, so a question is checked once.
 import type { ClinicalQuestion } from '../types.ts';
-import { getActiveProvider, parallelRequestLimit, workRoute } from './ai.ts';
+import { CHECK_ROUTE, getActiveProvider, parallelRequestLimit } from './ai.ts';
 
 export type ProofStatus = 'VERIFIED' | 'UNVERIFIED' | 'CONTESTED';
 
@@ -41,12 +41,10 @@ export function proofOf(questionId: string): ProofRecord | null {
 
 /** Runs the answer check for one question and stores the result. */
 export async function checkAnswer(question: ClinicalQuestion): Promise<ProofRecord> {
-  const route = workRoute();
-  if (!route) throw new Error('No AI provider is active, so the answer cannot be checked.');
   const res = await fetch('/api/qa/verify-answer', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, provider: route.provider, model: route.model }),
+    body: JSON.stringify({ question, provider: CHECK_ROUTE.provider, model: CHECK_ROUTE.model }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `Answer check failed (HTTP ${res.status}).`);
