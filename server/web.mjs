@@ -91,3 +91,44 @@ export async function research(query, pageChars = 2500) {
 export async function pubmedSearch(query) {
   return pubmed(String(query || '').slice(0, 300));
 }
+
+/**
+ * The sources the question writer may read, with the licence and fetch status of each.
+ * "live" sources are fetched when a topic is written; "pending" ones are listed but not yet fetched.
+ */
+export const SOURCE_REGISTRY = [
+  { id: 'pubmed', name: 'PubMed abstracts', licence: 'Abstracts free; full text varies by article', fetch: 'NCBI E-utilities', status: 'live' },
+  { id: 'openfda', name: 'openFDA drug labels', licence: 'US government data (openFDA terms)', fetch: 'api.fda.gov', status: 'live' },
+  { id: 'bookshelf', name: 'NCBI Bookshelf (StatPearls and open textbooks)', licence: 'Varies per book; StatPearls is free to read', fetch: 'NCBI E-utilities', status: 'pending: chapter text not yet retrievable' },
+];
+
+/** Drug-label text from openFDA for a query, when a label's indications mention it. */
+async function openFdaLabel(query) {
+  const phrase = String(query || '').replace(/["\\]/g, ' ').trim();
+  if (!phrase) return [];
+  const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(`indications_and_usage:"${phrase}"`)}&limit=1`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => ({}));
+  const hit = data?.results?.[0];
+  if (!hit) return [];
+  const name = hit.openfda?.generic_name?.[0] || hit.openfda?.brand_name?.[0] || 'Drug label';
+  const text = [hit.indications_and_usage?.[0], hit.warnings?.[0] || hit.boxed_warning?.[0]]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ');
+  if (!text) return [];
+  return [{ title: `${name} (FDA drug label)`, url: 'https://open.fda.gov/apis/drug/label/', text: text.slice(0, 1200) }];
+}
+
+/**
+ * Evidence for writing a question on a topic: openFDA drug label first (when one matches), then PubMed.
+ * Capped at four items so the writer's prompt stays short. Each source fails on its own.
+ */
+export async function topicSources(query) {
+  const [label, papers] = await Promise.all([
+    openFdaLabel(query).catch(() => []),
+    pubmedSearch(query).catch(() => []),
+  ]);
+  return [...label, ...papers].slice(0, 4);
+}

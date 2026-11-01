@@ -22,8 +22,7 @@ export function reasonsFor(q: ClinicalQuestion, proof: ProofRecord | null): stri
 
 /** Asks the writer to rewrite one question so it fixes the listed reasons. Null when the reply is unusable. */
 export async function repairQuestion(q: ClinicalQuestion, reasons: string[]): Promise<ClinicalQuestion | null> {
-  const provider = getActiveProvider();
-  if (!provider) return null;
+  if (!getActiveProvider()) return null;
   const current = {
     stem: q.stem,
     questionText: q.questionText,
@@ -32,8 +31,7 @@ export async function repairQuestion(q: ClinicalQuestion, reasons: string[]): Pr
     explanation: q.explanation ?? '',
   };
   const request = {
-    provider,
-    model: getEffectiveModel(provider),
+    work: true,
     effort: 'min',
     spread: true,
     json: true,

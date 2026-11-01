@@ -22,3 +22,13 @@ export interface PubmedAbstract {
   text: string;
 }
 export declare function pubmedSearch(query: string): Promise<PubmedAbstract[]>;
+
+export interface SourceRegistryEntry {
+  id: string;
+  name: string;
+  licence: string;
+  fetch: string;
+  status: string;
+}
+export declare const SOURCE_REGISTRY: SourceRegistryEntry[];
+export declare function topicSources(query: string): Promise<PubmedAbstract[]>;

@@ -49,9 +49,8 @@ import {
 import { TopicPickerModal } from './TopicPickerModal.tsx';
 import { reviewBatch, refineBatch, recordReviewBatch, loadBank } from '../lib/qaClient.ts';
 import { normalizeSubject } from '../lib/benchmark.ts';
-import { checkMany, proofOf } from '../lib/answerProof.ts';
+import { checkAnswer, checkMany, proofOf } from '../lib/answerProof.ts';
 import { cleanQuestions } from '../lib/questionCleanup.ts';
-import { reasonsFor, repairQuestion } from '../lib/repairQuestion.ts';
 
 interface PracticeModuleBuilderViewProps {
   currentExam: ExamType;
@@ -589,6 +588,14 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         onBatch,
         batchPromises,
         shouldStop: () => stopEarlyRef.current,
+        // Each question is checked as soon as it is written; only a verified key is kept.
+        verify: async (q) => {
+          try {
+            return (await checkAnswer(q)).proof === 'VERIFIED';
+          } catch {
+            return false;
+          }
+        },
         signal: controller.signal,
         onRetry: (attempt, maxAttempts, reason) =>
           setRetrying(`retrying ${attempt}/${maxAttempts} · ${reason}`),
@@ -749,39 +756,17 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       // A question counts only with an answer proof AND a QA approval.
       const verifiedOf = (list: ClinicalQuestion[]) => list.filter((q) =>
         proofOf(q.id)?.proof === 'VERIFIED' && ['APPROVED', 'PUBLISHED'].includes(qaStatusOf(q.id) ?? ''));
-      let candidates: ClinicalQuestion[] = merged;
-      for (let round = 1; round <= 3; round++) {
-        await checkMany(candidates, (done, total) => setHeldBackNote(`Round ${round}: checking answers ${done}/${total}…`));
-        // Anything without a QA verdict in this run gets one now, so no candidate skips the QA gate.
-        const unreviewed = candidates.filter((q) => !qaStatusById.current.has(q.id));
-        if (unreviewed.length > 0) {
-          setHeldBackNote(`Round ${round}: QA review for ${unreviewed.length} questions…`);
-          const reviews = await reviewBatch(unreviewed).catch(() => []);
-          recordReviewBatch(unreviewed, reviews);
-          for (const r of reviews) if (r?.questionId) qaStatusById.current.set(r.questionId, r.status);
-        }
-        const good = verifiedOf(candidates);
-        if (good.length >= targetCount || round === 3 || stopEarlyRef.current) break;
-        const missing = targetCount - good.length;
-        // Repair before replacing: each failed question is rewritten with the reasons it failed, so its topic survives.
-        const failed = candidates.filter((q) => proofOf(q.id)?.proof !== 'VERIFIED').slice(0, Math.max(missing * 2, 8));
-        const repaired: ClinicalQuestion[] = [];
-        for (let i = 0; i < failed.length; i += 2) {
-          setHeldBackNote(`Round ${round}: repairing ${Math.min(i + 2, failed.length)}/${failed.length} failed questions…`);
-          const batch = failed.slice(i, i + 2);
-          const fixed = await Promise.all(batch.map((q) =>
-            repairQuestion(q, reasonsFor(q, proofOf(q.id))).catch(() => null)));
-          for (const r of fixed) if (r) repaired.push(r);
-        }
-        setHeldBackNote(`Round ${round}: ${good.length}/${targetCount} verified, ${repaired.length} repaired. Generating ${missing} replacements…`);
-        const extra = await generateExamQuestions(genArgs(missing, []));
-        const replacements = cleanQuestions(extra.questions);
-        if (replacements.length > 0) {
-          const reviews = await reviewBatch(replacements).catch(() => []);
-          recordReviewBatch(replacements, reviews);
-          for (const r of reviews) if (r?.questionId) qaStatusById.current.set(r.questionId, r.status);
-        }
-        candidates = [...candidates, ...repaired, ...replacements];
+      // One pass only: repair and replacement rounds took most of the run's time, so a module can be shorter
+      // than the number asked for. Anything not verified stays in the QA dashboard.
+      const candidates: ClinicalQuestion[] = merged;
+      await checkMany(candidates, (done, total) => setHeldBackNote(`Checking answers ${done}/${total}…`));
+      // Anything without a QA verdict in this run gets one now, so no candidate skips the QA gate.
+      const unreviewed = candidates.filter((q) => !qaStatusById.current.has(q.id));
+      if (unreviewed.length > 0) {
+        setHeldBackNote(`QA review for ${unreviewed.length} questions…`);
+        const reviews = await reviewBatch(unreviewed).catch(() => []);
+        recordReviewBatch(unreviewed, reviews);
+        for (const r of reviews) if (r?.questionId) qaStatusById.current.set(r.questionId, r.status);
       }
       const finalList = verifiedOf(candidates).slice(0, targetCount);
       launchWith(finalList, labels, chosenSubtopics);

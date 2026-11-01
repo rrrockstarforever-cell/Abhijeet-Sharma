@@ -16,7 +16,7 @@ import {
   type OAuthChatMessage,
 } from './server/oauth.mjs';
 import { aiLog } from './server/oauth.mjs';
-import { research as webResearch, pubmedSearch } from './server/web.mjs';
+import { research as webResearch, pubmedSearch, topicSources, SOURCE_REGISTRY } from './server/web.mjs';
 import { searchImages, fetchImage, REFERENCE_SOURCES } from './server/images.mjs';
 import { buildImageBank, loadImageBank, queryImageBank, getBankImage, bankStats, rejectImage, searchBankByText } from './server/imageBank.mjs';
 import { generateQuestionFromImage } from './server/visionQuestion.mjs';
@@ -495,18 +495,28 @@ async function runCompletion(opts: {
       temperature: 0.7,
       ...(json ? { response_format: { type: 'json_object' } } : {}),
     });
-    const r = await fetch(`${VYCE_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: payload,
-      ...(signal ? { signal } : {}),
-    });
-    const raw = await r.text();
+    // VyceAI sometimes answers 502 for a moment; one more try almost always succeeds.
+    let r = null as unknown as globalThis.Response;
+    let raw = '';
     let body: any = {};
-    try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      r = await fetch(`${VYCE_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+        body: payload,
+        ...(signal ? { signal } : {}),
+      });
+      raw = await r.text();
+      body = {};
+      try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+      if (r.ok || r.status < 500) break;
+      aiLog({ provider: 'vyce', model: model_, status: r.status, error: true, retry: attempt });
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+    }
     if (!r.ok) {
       aiLog({ provider: 'vyce', model: model_, status: r.status, error: true });
-      throw new ApiError(`VyceAI: ${providerErrorText(body, r.status)}`, r.status === 401 || r.status === 403 ? 401 : 502);
+      // Only a bad key means "not connected"; a 403 is a model this account cannot use, so its message is shown.
+      throw new ApiError(`VyceAI: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
     }
     const content = body?.choices?.[0]?.message?.content;
     const text = typeof content === 'string' ? content : '';
@@ -650,6 +660,24 @@ app.get('/api/oauth/status', (req: Request, res: Response) => {
   });
 });
 
+// GET /api/ai/source-registry: the sources the question writer may read, with licence and status.
+app.get('/api/ai/source-registry', (_req: Request, res: Response) => {
+  return res.json({ sources: SOURCE_REGISTRY });
+});
+
+// POST /api/ai/topic-sources: drug label and PubMed evidence on a topic, for the question writer to read before it writes.
+app.post('/api/ai/topic-sources', async (req: Request, res: Response) => {
+  const query = String(req.body?.query || '').trim().slice(0, 200);
+  if (!query) return res.json({ sources: [] });
+  try {
+    const found = await topicSources(query);
+    return res.json({ sources: found.map((s) => ({ title: s.title, url: s.url, text: String(s.text || '').slice(0, 1500) })) });
+  } catch {
+    // Writing still goes ahead without evidence when PubMed is unreachable.
+    return res.json({ sources: [] });
+  }
+});
+
 // POST /api/qa/verify-answer: checks a question's keyed answer before it may be shown.
 // Two blind solves (the key is hidden), then a PubMed search for the key's claim and a judgement of
 // whether the retrieved abstracts support it. VERIFIED needs both solves to match the key and the
@@ -703,8 +731,8 @@ app.post('/api/qa/verify-answer', async (req: Request, res: Response) => {
     // limit, so the check makes two calls at most instead of four.
     const solveSystem = 'You are an expert exam examiner. Answer the multiple-choice question from medical knowledge alone. Return only JSON.';
     const solveBody = `${stem}\n\n${optionLines}\n\nReturn JSON {"answer":"<option letter>","confidence":<0-100>,"reason":"<one sentence>"}.`;
-    // The solve is an answer from memory, not a reasoned judgement, so it skips thinking: that is where most of a check's time went.
-    const solveOut = complete(solveSystem, solveBody, 'min');
+    // The solve keeps its reasoning: a blind answer with thinking off was less accurate, and the key depends on it.
+    const solveOut = complete(solveSystem, solveBody);
 
     // 2. The search: the item's key fact when it has one (a better query than one written here); otherwise a short query.
     const queryPromise = question.keyFact && String(question.keyFact).trim()

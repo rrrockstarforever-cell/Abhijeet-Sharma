@@ -1,7 +1,7 @@
 // Client for the QA pipeline (server/qa). Runs the server-side review and keeps the
 // approved bank in localStorage so the dashboard survives reloads.
 import type { QAReview, ClinicalQuestion } from '../types.ts';
-import { getActiveProvider, getEffectiveModel } from './ai.ts';
+import { workBody } from './ai.ts';
 
 const BANK_KEY = 'pulse.qa.bank';
 const REVIEWS_KEY = 'pulse.qa.reviews';
@@ -48,8 +48,7 @@ export function reviewQuestion(question: ClinicalQuestion, runLlm = false): Prom
         imageCaption: question.imageCaption,
       },
       runLlm,
-      provider: getActiveProvider() ?? 'opencode',
-      model: getActiveProvider() ? getEffectiveModel(getActiveProvider()!) : undefined,
+      ...workBody(),
     }),
   }).then((r) => r.json().then((j) => (r.ok ? (j.review as QAReview) : Promise.reject(new Error(j.error || 'QA review failed.')))));
 }
@@ -65,8 +64,7 @@ export function reviewBatch(questions: ClinicalQuestion[]): Promise<QAReview[]> 
         subtopic: q.subtopic, examType: q.examType, image: q.image, imageCaption: q.imageCaption,
       })),
       runLlm: false,
-      provider: getActiveProvider() ?? 'opencode',
-      model: getActiveProvider() ? getEffectiveModel(getActiveProvider()!) : undefined,
+      ...workBody(),
     }),
   }).then((r) => r.json().then((j) => (r.ok ? (j.reviews as QAReview[]) : Promise.reject(new Error(j.error || 'QA batch failed.')))));
 }
@@ -79,8 +77,7 @@ export function refineBatch(questions: ClinicalQuestion[]): Promise<ClinicalQues
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       questions,
-      provider: getActiveProvider() ?? 'opencode',
-      model: getActiveProvider() ? getEffectiveModel(getActiveProvider()!) : undefined,
+      ...workBody(),
     }),
   }).then((r) => r.json().then((j) => (r.ok ? (j.questions as ClinicalQuestion[]) : Promise.reject(new Error(j.error || 'Refinement failed.')))));
 }

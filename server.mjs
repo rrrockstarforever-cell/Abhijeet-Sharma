@@ -1931,7 +1931,8 @@ var DEFAULT_MODELS = {
   grok: "grok-4.7",
   opencode: OPENCODE_DEFAULT_MODEL,
   custom: "gpt-4o-mini",
-  nvidia: "nvidia/nemotron-3.5-super-vl-120b-a12b"
+  nvidia: "nvidia/nemotron-3.5-super-vl-120b-a12b",
+  vyce: "deepseek-v4.1"
 };
 var INTERNAL_PROVIDER = {
   chatgpt: "codex",
@@ -1949,6 +1950,10 @@ function geminiKey() {
 }
 function nvidiaKey() {
   return (process.env.NVIDIA_API_KEY || "").trim();
+}
+var VYCE_BASE_URL = "https://vyceai.com/v1";
+function vyceKey() {
+  return (process.env.VYCE_API_KEY || "").trim();
 }
 function nvidiaReasoningKwargs(effort) {
   const level = String(effort || "").trim().toLowerCase();
@@ -2032,6 +2037,7 @@ function isProviderConnected(providerId) {
   if (providerId === "gemini") return Boolean(geminiKey());
   if (providerId === "opencode") return Boolean(opencodeKey());
   if (providerId === "nvidia") return Boolean(nvidiaKey());
+  if (providerId === "vyce") return Boolean(vyceKey());
   if (providerId === "custom") return Boolean(getActiveCustomEndpoint());
   try {
     const s = status();
@@ -2052,13 +2058,41 @@ function notConnectedMessage(providerId) {
   if (providerId === "nvidia") {
     return "NVIDIA is not connected. Paste your NVIDIA API key in Settings \u2192 AI Subscription Hub.";
   }
+  if (providerId === "vyce") {
+    return "VyceAI is not connected. Paste your VyceAI API key in Settings \u2192 AI Subscription Hub.";
+  }
   if (providerId === "custom") {
     return "Custom provider is not connected. Add a custom endpoint in Settings \u2192 AI Subscription Hub.";
   }
   return `${providerId.charAt(0).toUpperCase() + providerId.slice(1)} is not signed in. Connect an AI provider in Settings \u2192 AI Subscription Hub.`;
 }
+var NVIDIA_CHAT_MODELS = [
+  "nvidia/nemotron-3.5-super-vl-120b-a12b",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "nvidia/nemotron-3.5-lightning-30b-a3b",
+  "nvidia/nemotron-3.5-bolt-e4b"
+];
+var NVIDIA_SPREAD_MODELS = [
+  "nvidia/nemotron-3.5-super-vl-120b-a12b",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "nvidia/nemotron-3.5-lightning-30b-a3b"
+];
+var nvidiaSpreadCursor = 0;
+var NVIDIA_SLOTS = Number(process.env.NVIDIA_MAX_IN_FLIGHT || 3);
+var nvidiaInFlight = 0;
+var nvidiaWaiting = [];
+async function nvidiaSlot(task) {
+  if (nvidiaInFlight >= NVIDIA_SLOTS) await new Promise((resolve) => nvidiaWaiting.push(resolve));
+  nvidiaInFlight += 1;
+  try {
+    return await task();
+  } finally {
+    nvidiaInFlight -= 1;
+    nvidiaWaiting.shift()?.();
+  }
+}
 async function runCompletion(opts) {
-  const { provider, model, system, messages, json, effort, search, signal, images } = opts;
+  const { provider, model, system, messages, json, effort, search, signal, images, spread } = opts;
   if (provider === "opencode") {
     const key = opencodeKey();
     if (!key) throw new ApiError(notConnectedMessage("opencode"), 401);
@@ -2228,10 +2262,55 @@ async function runCompletion(opts) {
     }
     return text;
   }
+  if (provider === "vyce") {
+    const key = vyceKey();
+    if (!key) throw new ApiError(notConnectedMessage("vyce"), 401);
+    const model_ = model || DEFAULT_MODELS.vyce;
+    const payload = JSON.stringify({
+      model: model_,
+      messages: [
+        ...system ? [{ role: "system", content: system }] : [],
+        ...messages.map((m) => ({ role: m.role, content: m.content }))
+      ],
+      temperature: 0.7,
+      ...json ? { response_format: { type: "json_object" } } : {}
+    });
+    let r = null;
+    let raw = "";
+    let body = {};
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      r = await fetch(`${VYCE_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: payload,
+        ...signal ? { signal } : {}
+      });
+      raw = await r.text();
+      body = {};
+      try {
+        body = raw ? JSON.parse(raw) : {};
+      } catch {
+      }
+      if (r.ok || r.status < 500) break;
+      aiLog({ provider: "vyce", model: model_, status: r.status, error: true, retry: attempt });
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 1e3 * attempt));
+    }
+    if (!r.ok) {
+      aiLog({ provider: "vyce", model: model_, status: r.status, error: true });
+      throw new ApiError(`VyceAI: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
+    }
+    const content = body?.choices?.[0]?.message?.content;
+    const text = typeof content === "string" ? content : "";
+    aiLog({ provider: "vyce", model: model_, status: r.status, text_len: text.length, json: !!json });
+    if (!text.trim()) {
+      throw new ApiError(`VyceAI returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || "unknown"}).`, 502);
+    }
+    return text;
+  }
   if (provider === "nvidia") {
     const key = nvidiaKey();
     if (!key) throw new ApiError(notConnectedMessage("nvidia"), 401);
-    const model_ = model || DEFAULT_MODELS.nvidia;
+    let model_ = model || DEFAULT_MODELS.nvidia;
     const payloadMessages = [
       ...system ? [{ role: "system", content: system }] : [],
       ...messages.map((m, i) => ({
@@ -2239,44 +2318,62 @@ async function runCompletion(opts) {
         content: images?.length && i === messages.length - 1 ? [{ type: "text", text: m.content }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))] : m.content
       }))
     ];
-    const payload = JSON.stringify({
-      model: model_,
-      messages: payloadMessages,
-      // Reading pages is transcription as much as writing, so keep it close to the source.
-      temperature: images?.length ? 0.3 : 0.7,
-      // Let a long clinical answer finish rather than starving the reasoning trace.
-      max_tokens: nvidiaTokenBudget(effort),
-      chat_template_kwargs: nvidiaReasoningKwargs(effort),
-      ...json ? { response_format: { type: "json_object" } } : {}
-    });
+    let chain;
+    if (images?.length) {
+      chain = [model_];
+    } else if (spread) {
+      const start = nvidiaSpreadCursor++ % NVIDIA_SPREAD_MODELS.length;
+      const rotated = [...NVIDIA_SPREAD_MODELS.slice(start), ...NVIDIA_SPREAD_MODELS.slice(0, start)];
+      chain = rotated.slice(0, 3);
+    } else {
+      chain = [model_, ...NVIDIA_CHAT_MODELS.filter((m) => m !== model_)].slice(0, 3);
+    }
     let httpRes = null;
     let raw = "";
     let body = {};
-    const maxAttempts = 3;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      httpRes = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${key}`
-        },
-        body: payload,
-        ...signal ? { signal } : {}
+    for (const candidate of chain) {
+      model_ = candidate;
+      const payload = JSON.stringify({
+        model: model_,
+        messages: payloadMessages,
+        // Reading pages is transcription as much as writing, so keep it close to the source.
+        temperature: images?.length ? 0.3 : 0.7,
+        // Let a long clinical answer finish rather than starving the reasoning trace.
+        max_tokens: nvidiaTokenBudget(effort),
+        chat_template_kwargs: nvidiaReasoningKwargs(effort),
+        ...json ? { response_format: { type: "json_object" } } : {}
       });
-      raw = await httpRes.text();
-      body = {};
-      try {
-        body = raw ? JSON.parse(raw) : {};
-      } catch {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        httpRes = await nvidiaSlot(() => fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${key}`
+          },
+          body: payload,
+          // A call that never returns would hold its question forever; give up after four minutes instead.
+          signal: signal ?? AbortSignal.timeout(24e4)
+        }));
+        raw = await httpRes.text();
+        body = {};
+        try {
+          body = raw ? JSON.parse(raw) : {};
+        } catch {
+        }
+        const rateLimited = httpRes.status === 429;
+        if (httpRes.ok || httpRes.status < 500 && !rateLimited) break;
+        aiLog({ provider: "nvidia", model: model_, status: httpRes.status, error: true, retry: attempt });
+        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, (rateLimited ? 4e3 : 1200) * attempt));
       }
-      if (httpRes.ok || httpRes.status === 429 || httpRes.status < 500 || attempt === maxAttempts) break;
-      aiLog({ provider: "nvidia", model: model_, status: httpRes.status, error: true, retry: attempt });
-      await new Promise((resolve) => setTimeout(resolve, 1200 * attempt));
+      if (httpRes.ok || httpRes.status !== 429) break;
+      aiLog({ provider: "nvidia", model: model_, status: 429, error: true, fallback: true });
     }
     if (!httpRes || !httpRes.ok) {
       const status2 = httpRes?.status ?? 502;
       aiLog({ provider: "nvidia", model: model_, status: status2, error: true });
-      throw new ApiError(`NVIDIA: ${providerErrorText(body, status2)}`, status2 === 401 ? 401 : 502);
+      const detail = providerErrorText(body, status2);
+      const extra = detail === `HTTP ${status2}` && raw ? ` \u2014 ${raw.replace(/\s+/g, " ").slice(0, 160)}` : "";
+      throw new ApiError(`NVIDIA: ${detail}${extra}`, status2 === 401 ? 401 : 502);
     }
     const content = body?.choices?.[0]?.message?.content;
     const text = typeof content === "string" ? content : "";
@@ -2323,18 +2420,28 @@ app.get("/api/oauth/status", (req, res) => {
       grok: { connected: isProviderConnected("grok") },
       opencode: { connected: isProviderConnected("opencode") },
       nvidia: { connected: isProviderConnected("nvidia") },
+      vyce: { connected: isProviderConnected("vyce") },
       custom: { connected: isProviderConnected("custom") }
     },
     defaults: DEFAULT_MODELS
   });
 });
+var SEARCH_STOP = /* @__PURE__ */ new Set(["that", "with", "from", "this", "have", "were", "their", "which", "also", "after", "before", "than", "such", "only", "other", "most", "some", "used", "will", "does", "into", "when", "while", "there", "these", "those", "about", "among", "through", "where", "being", "given", "shows", "reduce", "reduces", "patient", "patients", "drug", "drugs", "should", "could", "would", "they", "them", "does", "have", "been", "make", "makes"]);
+function keywordQuery(text) {
+  const picked = [];
+  for (const w of text.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) ?? []) {
+    if (!SEARCH_STOP.has(w) && !picked.includes(w)) picked.push(w);
+    if (picked.length >= 6) break;
+  }
+  return picked.join(" ");
+}
 app.post("/api/qa/verify-answer", async (req, res) => {
   const { question, provider, model } = req.body || {};
   if (!question || !Array.isArray(question.options) || !question.correctOption || !provider) {
     return res.status(400).json({ error: "question (with options and correctOption) and provider are required." });
   }
-  const complete = async (system, content) => {
-    const waits = [3e3, 8e3, 15e3, 3e4];
+  const complete = async (system, content, effort) => {
+    const waits = [5e3, 15e3, 3e4, 6e4, 9e4];
     for (let attempt = 0; ; attempt++) {
       try {
         return extractJson(await runCompletion({
@@ -2342,7 +2449,9 @@ app.post("/api/qa/verify-answer", async (req, res) => {
           model: model || DEFAULT_MODELS[provider] || DEFAULT_MODELS.opencode,
           system,
           messages: [{ role: "user", content }],
-          json: true
+          json: true,
+          effort,
+          spread: true
         }));
       } catch (err) {
         const rateLimited = /429|rate.?limit|too many requests/i.test(String(err?.message || err));
@@ -2362,16 +2471,18 @@ app.post("/api/qa/verify-answer", async (req, res) => {
 ${optionLines3}
 
 Return JSON {"answer":"<option letter>","confidence":<0-100>,"reason":"<one sentence>"}.`;
-    const [s1, s2] = await Promise.all([complete(solveSystem, solveBody), complete(solveSystem, solveBody)]);
-    const solves = [s1?.answer, s2?.answer].map((a) => String(a || "").toUpperCase());
-    const solvesAgree = solves.every((a) => a === keyed);
-    const queryOut = await complete(
+    const solveOut = complete(solveSystem, solveBody, "min");
+    const queryPromise = question.keyFact && String(question.keyFact).trim() ? Promise.resolve({ query: keywordQuery(String(question.keyFact)) || String(question.keyFact).trim().slice(0, 120) }) : complete(
       "You write PubMed search queries. Return only JSON.",
       `Question: ${stem}
 Correct option: ${keyed}. ${keyedText}
 
-Write one PubMed search query of 6-12 words that would find evidence for the correct option. Return JSON {"query":"..."}.`
+Write one PubMed search query of 6-12 words that would find evidence for the correct option. Return JSON {"query":"..."}.`,
+      "min"
     );
+    const [s1, queryOut] = await Promise.all([solveOut, queryPromise]);
+    const solves = [String(s1?.answer || "").toUpperCase()];
+    const solvesAgree = solves.every((a) => a === keyed);
     const query = String(queryOut?.query || "").trim();
     let sources = [];
     if (query) {
@@ -2381,36 +2492,40 @@ Write one PubMed search query of 6-12 words that would find evidence for the cor
         sources = [];
       }
     }
+    const defectRules = "Check the item: (1) exactly one option is the single best answer; (2) if the question asks which is NOT / INCORRECT / FALSE / EXCEPT, exactly one option is that; (3) every number or result needed to answer is given in the stem; (4) no other option is also correct.";
     let verdict = "INSUFFICIENT";
     let cited = [];
+    let quality;
     if (sources.length) {
       const numbered = sources.map((s, i) => `[${i + 1}] ${s.title}
 ${s.url}
 ${s.text}`).join("\n\n");
-      const judged = await complete(
-        "You check whether medical evidence supports a exam answer. Use only the sources given. Return only JSON.",
+      quality = await complete(
+        "You check whether medical evidence supports an exam answer, and you review exam items for defects. Use only the sources given. Return only JSON.",
         `Question: ${stem}
+${optionLines3}
 Keyed answer: ${keyed}. ${keyedText}
 
 Sources:
 ${numbered}
 
-Return JSON {"verdict":"SUPPORTED|CONTRADICTED|INSUFFICIENT","citedSources":[<source numbers>],"reason":"<one sentence>"}. Use SUPPORTED only if a source directly supports the keyed answer.`
+Return JSON {"verdict":"SUPPORTED|CONTRADICTED|INSUFFICIENT","citedSources":[<source numbers>],"reason":"<one sentence>","wellFormed":true|false,"issues":["<short issue>"]}. Use SUPPORTED only if a source directly supports the keyed answer. ${defectRules}`
       );
-      verdict = ["SUPPORTED", "CONTRADICTED", "INSUFFICIENT"].includes(judged?.verdict) ? judged.verdict : "INSUFFICIENT";
-      const nums = Array.isArray(judged?.citedSources) ? judged.citedSources : [];
+      verdict = ["SUPPORTED", "CONTRADICTED", "INSUFFICIENT"].includes(quality?.verdict) ? quality.verdict : "INSUFFICIENT";
+      const nums = Array.isArray(quality?.citedSources) ? quality.citedSources : [];
       cited = nums.map((n) => sources[Number(n) - 1]).filter((s) => Boolean(s)).map((s) => ({ title: s.title, url: s.url }));
-    }
-    const quality = await complete(
-      "You review exam questions for defects. Return only JSON.",
-      `${stem}
+    } else {
+      quality = await complete(
+        "You review exam questions for defects. Return only JSON.",
+        `${stem}
 
 ${optionLines3}
 
 Keyed answer: ${keyed}.
 
-Check: (1) exactly one option is the single best answer; (2) if the question asks which is NOT / INCORRECT / FALSE / EXCEPT, exactly one option is that; (3) every number or result needed to answer is given in the stem; (4) no other option is also correct. Return JSON {"wellFormed":true|false,"issues":["<short issue>"]}.`
-    );
+${defectRules} Return JSON {"wellFormed":true|false,"issues":["<short issue>"]}.`
+      );
+    }
     const wellFormed = quality?.wellFormed === true;
     const issues = Array.isArray(quality?.issues) ? quality.issues.map(String).slice(0, 5) : [];
     const solvedAgainst = solves.every((a) => a && a !== keyed);
@@ -2584,6 +2699,14 @@ app.post("/api/oauth/complete", async (req, res) => {
 });
 app.post("/api/oauth/logout", (req, res) => {
   const { provider } = req.body || {};
+  if (provider === "vyce") {
+    try {
+      clearEnvValue("VYCE_API_KEY");
+      return res.json({ ok: true, connected: false, provider });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Could not remove the VyceAI key." });
+    }
+  }
   if (provider === "opencode") {
     try {
       clearEnvValue("OPENCODE_API_KEY");
@@ -2638,6 +2761,18 @@ app.post("/api/settings/nvidia-key", (req, res) => {
     return res.json({ ok: true, connected: true });
   } catch (err) {
     return res.status(500).json({ error: err?.message || "Could not save the NVIDIA API key." });
+  }
+});
+app.post("/api/settings/vyce-key", (req, res) => {
+  const key = String(req.body?.apiKey || "").trim();
+  if (!/^[A-Za-z0-9_.\-]{10,}$/.test(key)) {
+    return res.status(400).json({ error: "That does not look like a valid VyceAI API key." });
+  }
+  try {
+    writeEnvValue("VYCE_API_KEY", key);
+    return res.json({ ok: true, connected: true });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Could not save the VyceAI API key." });
   }
 });
 var CUSTOM_ENDPOINTS_FILE = path.join(DATA_DIR, "custom-endpoints.json");
@@ -2984,11 +3119,28 @@ async function listNvidiaModels() {
     return { models: [], error: e?.message || "Could not list NVIDIA models." };
   }
 }
+async function listVyceModels() {
+  if (!isProviderConnected("vyce")) return { models: [], error: "No VyceAI API key saved." };
+  try {
+    const r = await fetch(`${VYCE_BASE_URL}/models`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${vyceKey()}` }
+    });
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(providerErrorText(b, r.status));
+    const rows = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
+    return {
+      models: rows.map((m) => ({ id: String(m?.id ?? m?.name ?? ""), name: String(m?.name || m?.id || ""), source: "account" })).filter((m) => m.id)
+    };
+  } catch (e) {
+    return { models: [], error: e?.message || "Could not list VyceAI models." };
+  }
+}
 app.get("/api/models/available", async (req, res) => {
   const refresh = req.query.refresh === "1" || req.query.refresh === "true";
   const probe = req.query.probe === "1" || req.query.probe === "true";
   const only = String(req.query.provider || "").trim();
-  if (only && !["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "nvidia"].includes(only)) {
+  if (only && !["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "nvidia", "vyce"].includes(only)) {
     return res.status(400).json({ error: `Unknown provider: ${only}` });
   }
   if (!only && !probe && !refresh && availableModelsCache && Date.now() - availableModelsCache.at < 3e5) {
@@ -3030,6 +3182,11 @@ app.get("/api/models/available", async (req, res) => {
     providers.nvidia = nv.models;
     if (nv.error) errors.nvidia = nv.error;
   }
+  if (!only || only === "vyce") {
+    const vy = await listVyceModels();
+    providers.vyce = vy.models;
+    if (vy.error) errors.vyce = vy.error;
+  }
   const payload = {
     providers,
     errors,
@@ -3043,7 +3200,7 @@ app.get("/api/models/available", async (req, res) => {
 app.post("/api/models/probe", async (req, res) => {
   const provider = String(req.body?.provider || "").trim();
   const model = String(req.body?.model || "").trim();
-  if (!["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "nvidia"].includes(provider)) {
+  if (!["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "nvidia", "vyce"].includes(provider)) {
     return res.status(400).json({ error: "Choose a provider to test." });
   }
   if (!model || model.length > 200) {
@@ -3097,7 +3254,7 @@ app.get("/api/models/catalog", async (_req, res) => {
   }
 });
 app.post("/api/ai/complete", async (req, res) => {
-  const { provider, model, system, messages, json, effort } = req.body || {};
+  const { provider, model, system, messages, json, effort, spread } = req.body || {};
   if (!provider) {
     return res.status(400).json({ error: "No AI provider selected. Connect an AI provider in Settings." });
   }
@@ -3109,7 +3266,7 @@ app.post("/api/ai/complete", async (req, res) => {
     if (!res.writableFinished) controller.abort();
   });
   try {
-    const text = await runCompletion({ provider, model, system, messages, json, effort, signal: controller.signal, session: req.header("x-opencode-session") || void 0 });
+    const text = await runCompletion({ provider, model, system, messages, json, effort, spread: spread === true, signal: controller.signal, session: req.header("x-opencode-session") || void 0 });
     if (controller.signal.aborted) return;
     if (!text || !text.trim()) {
       return res.status(502).json({ error: "The AI provider returned an empty response. Try again." });
@@ -3592,7 +3749,10 @@ function qaComplete(provider, model) {
       model: modelOverride || model || DEFAULT_MODELS[provider] || DEFAULT_MODELS.opencode,
       system,
       messages,
-      json
+      json,
+      // QA checks are short judgements on a finished question; thinking here made each review take minutes.
+      effort: "min",
+      spread: true
     });
   };
 }
@@ -3638,14 +3798,21 @@ app.post("/api/qa/review-batch", async (req, res) => {
   const provider = String(req.body?.provider || "opencode");
   const model = String(req.body?.model || DEFAULT_MODELS[provider] || "");
   const complete = runLlm ? qaComplete(provider, model) : void 0;
-  const reviews = [];
-  for (const q of questions.slice(0, 200)) {
-    try {
-      reviews.push(await runQaPipeline(q, { complete, runLlm, bank: qaBank }));
-    } catch (err) {
-      reviews.push({ questionId: q?.id, error: err?.message || "QA failed", status: "REVIEWING" });
+  const list = questions.slice(0, 200);
+  const reviews = new Array(list.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < list.length) {
+      const i = next++;
+      const q = list[i];
+      try {
+        reviews[i] = await runQaPipeline(q, { complete, runLlm, bank: qaBank });
+      } catch (err) {
+        reviews[i] = { questionId: q?.id, error: err?.message || "QA failed", status: "REVIEWING" };
+      }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, list.length) }, worker));
   return res.json({ reviews });
 });
 app.post("/api/qa/refine-batch", async (req, res) => {
@@ -3763,7 +3930,7 @@ app.get("/api/providers/status", (req, res) => {
   const customEndpoints = readCustomEndpoints();
   res.json({
     providers: [
-      ...["gemini", "chatgpt", "claude", "grok", "opencode", "nvidia"].map((id) => ({
+      ...["gemini", "chatgpt", "claude", "grok", "opencode", "nvidia", "vyce"].map((id) => ({
         id,
         model: DEFAULT_MODELS[id],
         connected: isProviderConnected(id)

@@ -1383,7 +1383,7 @@ export const SettingsAIView: React.FC = () => {
 
                     {/* Controls: Sign In Button or Connected State + Set Active */}
                     <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
-                      {(p.id === 'gemini' || p.id === 'opencode') ? (
+                      {(p.id === 'gemini' || p.id === 'opencode' || p.id === 'nvidia' || p.id === 'vyce') ? (
                         <div className="flex items-center gap-2">
                           <span className={`text-xs font-bold px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
                             isConnected
@@ -1543,6 +1543,8 @@ export const SettingsAIView: React.FC = () => {
                         ? 'OpenCode API Key'
                         : selectedProvider.id === 'nvidia'
                           ? 'NVIDIA API Key'
+                          : selectedProvider.id === 'vyce'
+                            ? 'VyceAI API Key'
                           : selectedProvider.id === 'custom' && editingEndpoint
                             ? 'Edit Endpoint'
                             : selectedProvider.id === 'custom'
@@ -1576,7 +1578,7 @@ export const SettingsAIView: React.FC = () => {
 
             {/* This is the real local flow, not a web demo: the code comes from the
                 provider right now and the token is stored on this computer only. */}
-            {selectedProvider.id !== 'gemini' && selectedProvider.id !== 'opencode' && selectedProvider.id !== 'custom' && (
+            {selectedProvider.id !== 'gemini' && selectedProvider.id !== 'opencode' && selectedProvider.id !== 'nvidia' && selectedProvider.id !== 'vyce' && selectedProvider.id !== 'custom' && (
               <p className="text-[11px] leading-relaxed text-slate-600 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
                 {selectedProvider.id === 'claude'
                   ? 'Open the Claude approval page, sign in, then paste the code Claude shows you. The token stays on this computer.'

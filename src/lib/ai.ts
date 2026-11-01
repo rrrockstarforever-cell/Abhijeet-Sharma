@@ -113,6 +113,37 @@ export function getEffectiveModel(provider: AiProviderId): string {
   return stored ?? DEFAULT_MODELS[provider];
 }
 
+let workCursor = 0;
+
+/**
+ * The provider and model for one piece of question work (generation, repair, answer checks).
+ * With NVIDIA selected, all of it runs on NVIDIA. With another engine selected, the work alternates
+ * between NVIDIA and that engine, so the two share the load.
+ */
+export function workRoute(): { provider: AiProviderId; model: string } | null {
+  const active = getActiveProvider();
+  if (!active) return null;
+  if (active === 'nvidia') return { provider: 'nvidia', model: getEffectiveModel('nvidia') };
+  workCursor += 1;
+  const provider: AiProviderId = workCursor % 2 === 0 ? 'nvidia' : active;
+  return { provider, model: getEffectiveModel(provider) };
+}
+
+/** The provider and model fields for a question-work request body. */
+export function workBody(): { provider: AiProviderId | 'opencode'; model?: string } {
+  const route = workRoute();
+  return { provider: route?.provider ?? 'opencode', model: route?.model };
+}
+
+/**
+ * How many question requests run at once. NVIDIA alone rate-limits bursts, so it gets 3. When another
+ * engine is in use (shared work, or an engine with no rate limit) the limit is wider.
+ */
+export function parallelRequestLimit(): number {
+  const active = getActiveProvider();
+  return !active || active === 'nvidia' ? 3 : 8;
+}
+
 // ---------- provider status ----------
 
 export interface ProviderStatusResponse {
@@ -146,6 +177,8 @@ export interface AiCompleteOptions {
   effort?: string;
   provider?: AiProviderId;
   model?: string;
+  /** Question work (generation, repair, checks) is shared between NVIDIA and the selected engine. See workRoute. */
+  work?: boolean;
   /** Cancels the HTTP request; the server also drops the upstream call (see /api/ai/complete). */
   signal?: AbortSignal;
 }
@@ -168,15 +201,38 @@ function openCodeSessionId(): string {
   }
 }
 
+interface TopicSource { title: string; url: string; text: string }
+
+// PubMed abstracts per topic, fetched once and shared by every question written on that topic.
+const topicEvidenceCache = new Map<string, Promise<TopicSource[]>>();
+
+function topicEvidence(query: string): Promise<TopicSource[]> {
+  const key = query.trim().toLowerCase();
+  let hit = topicEvidenceCache.get(key);
+  if (!hit) {
+    hit = fetch('/api/ai/topic-sources', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    })
+      .then((r) => (r.ok ? r.json() : { sources: [] }))
+      .then((d) => (Array.isArray(d?.sources) ? (d.sources as TopicSource[]) : []))
+      .catch(() => []);
+    topicEvidenceCache.set(key, hit);
+  }
+  return hit;
+}
+
 /** Calls POST /api/ai/complete with the active (or given) provider. Throws typed AiError on failure. */
 export async function aiComplete(options: AiCompleteOptions): Promise<string> {
-  const provider = options.provider ?? getActiveProvider();
+  const route = options.work ? workRoute() : null;
+  const provider = route?.provider ?? options.provider ?? getActiveProvider();
   if (!provider) {
     throw new AiError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`, 'not_connected');
   }
   const body = {
     provider,
-    model: options.model ?? getEffectiveModel(provider),
+    model: options.model ?? route?.model ?? getEffectiveModel(provider),
     system: options.system,
     messages: options.messages,
     json: options.json,
@@ -414,6 +470,8 @@ export interface GenerateQuestionsOptions {
   batchPromises?: Promise<void>[];
   /** Checked between batches; return true to stop early and keep everything generated so far. */
   shouldStop?: () => boolean;
+  /** Runs right after each question is written; a question that returns false is dropped. */
+  verify?: (q: ClinicalQuestion) => Promise<boolean>;
   /** Aborts the in-flight batch request immediately (Stop button) and ends the loop. */
   signal?: AbortSignal;
   /** Called when a batch is being retried: 1-based attempt, attempt limit, and why. */
@@ -548,7 +606,7 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
 export async function generateExamQuestions(options: GenerateQuestionsOptions): Promise<{ questions: ClinicalQuestion[]; dropped: number; stopped: boolean; failure: string | null; imagesAttached: number }> {
   const {
     exam, count, subjectSubtopics, difficultyTier, difficultySubLevel, effort,
-    onProgress, onBatch, batchPromises, shouldStop, signal, onRetry,
+    onProgress, onBatch, batchPromises, shouldStop, verify, signal, onRetry,
     questionTypes, stemPatterns, evidenceSources, patientGroup, presentingProblems,
     sourceMaterial, customInstructions, includeImages,
   } = options;
@@ -628,6 +686,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string): Promise<ClinicalQuestion | null> => {
     if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
+    // The writer reads PubMed on the topic first, so the key rests on the literature rather than memory alone.
+    const evidence = await topicEvidence(focus ?? focusParts(topic.subtopic)[0] ?? topic.subtopic);
     const prompt = [
       `Write ONE exam-standard MCQ for ${pattern.name}.`,
       `Subject: ${topic.subject}`,
@@ -645,6 +705,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       patientGroup ? `Patient group: ${patientGroup}.` : '',
       presentingProblems?.length ? `Presenting problems: ${presentingProblems.join('; ')}.` : '',
       sourceMaterial ? `Base on these notes: """${sourceMaterial.slice(0, 6000)}""".` : '',
+      evidence.length
+        ? `Read these PubMed abstracts on the topic first. Base the correct option on them where they apply, state the fact in keyFact, and do not copy their wording: """${evidence.map((s, i) => `[${i + 1}] ${s.title}\n${s.text}`).join('\n\n')}"""`
+        : '',
       includeImages
         ? 'If this item is image-based (about one in five items must be), describe the finding in the stem AND set "figureModality" and "figureQuery" so a real picture can be fetched: "figureModality" is one of ECG | X-ray | CT | MRI | ultrasound | histology | fundus | clinical photo, and "figureQuery" is a 3-6 word English search phrase naming the diagnosis + modality (e.g. "atrial fibrillation ECG", "lobar pneumonia chest X-ray", "membranous nephropathy histology"). For items that are NOT image-based, set both to an empty string — never invent a picture.'
         : '',
@@ -661,9 +724,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           system: GENERATOR_SYSTEM,
           messages: [{ role: 'user', content: prompt }],
           json: true,
-          // Writing a question does not need a reasoning pass: with thinking on, each question took about a minute.
-          // The answer check still reasons, so a wrong key is caught there.
-          effort: effort ?? 'min',
+          work: true,
+          // Writing keeps its reasoning pass: a key written without it is less reliable, and the check runs on it next.
+          effort: effort ?? 'medium',
           spread: true,
           signal,
         });
@@ -679,6 +742,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (seenStems.has(key)) return null;
         const fullStem = toBenchItem(q).stem;
         if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) return null;
+        // Check the keyed answer right after it is written. A question that fails is not kept.
+        if (verify && !(await verify(q))) return null;
         seenStems.add(key);
         acceptedStems.push(fullStem);
 
@@ -724,7 +789,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // Use a completion counter that updates progress as each question finishes.
   let completedCount = 0;
   // At most GENERATION_CONCURRENCY question requests run at once, so the provider does not rate-limit them.
-  const GENERATION_CONCURRENCY = 3;
+  const GENERATION_CONCURRENCY = parallelRequestLimit();
   let inFlight = 0;
   const waiting: (() => void)[] = [];
   const limited = <T,>(task: () => Promise<T>): Promise<T> => new Promise<T>((resolve, reject) => {

@@ -1,7 +1,7 @@
 // Answer proof: each question's keyed answer is checked (blind solves plus PubMed evidence) before it
 // may reach the Test Runner. Results are stored per question, so a question is checked once.
 import type { ClinicalQuestion } from '../types.ts';
-import { getActiveProvider, getEffectiveModel } from './ai.ts';
+import { getActiveProvider, parallelRequestLimit, workRoute } from './ai.ts';
 
 export type ProofStatus = 'VERIFIED' | 'UNVERIFIED' | 'CONTESTED';
 
@@ -41,12 +41,12 @@ export function proofOf(questionId: string): ProofRecord | null {
 
 /** Runs the answer check for one question and stores the result. */
 export async function checkAnswer(question: ClinicalQuestion): Promise<ProofRecord> {
-  const provider = getActiveProvider();
-  if (!provider) throw new Error('No AI provider is active, so the answer cannot be checked.');
+  const route = workRoute();
+  if (!route) throw new Error('No AI provider is active, so the answer cannot be checked.');
   const res = await fetch('/api/qa/verify-answer', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, provider, model: getEffectiveModel(provider) }),
+    body: JSON.stringify({ question, provider: route.provider, model: route.model }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `Answer check failed (HTTP ${res.status}).`);
@@ -88,7 +88,7 @@ export async function checkMany(
       onProgress?.(done, unique.length);
     }
   };
-  // 3 at a time: the provider rate-limits higher parallelism (HTTP 429), so bursts of 10 fail.
-  await Promise.all(Array.from({ length: Math.min(options.concurrency ?? 3, todo.length) }, worker));
+  // NVIDIA allows 3 at a time (higher bursts get HTTP 429); VyceAI runs wider.
+  await Promise.all(Array.from({ length: Math.min(options.concurrency ?? parallelRequestLimit(), todo.length) }, worker));
   return results;
 }
