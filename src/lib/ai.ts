@@ -119,12 +119,6 @@ export function getEffectiveModel(provider: AiProviderId): string {
   return stored ?? DEFAULT_MODELS[provider];
 }
 
-/** The model that checks answers: always NVIDIA Nemotron 3.5 Super VL, with thinking on. */
-export const CHECK_ROUTE: { provider: AiProviderId; model: string } = {
-  provider: 'nvidia',
-  model: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
-};
-
 /** The provider and model that write questions and refine or review them: always the engine you selected. */
 export function writeRoute(): { provider: AiProviderId; model: string } | null {
   const active = getActiveProvider();
@@ -142,8 +136,13 @@ export function workBody(): { provider: AiProviderId | 'opencode'; model?: strin
  * engine is in use (shared work, or an engine with no rate limit) the limit is wider.
  */
 export function parallelRequestLimit(): number {
-  // 30 questions at a time, each with its write and check. Retries on rate-limit errors still apply.
-  return 30;
+  // Test override: localStorage 'pulse.parallelLimit' sets how many questions run at once.
+  try {
+    const forced = Number(localStorage.getItem('pulse.parallelLimit'));
+    if (Number.isFinite(forced) && forced >= 1) return forced;
+  } catch { /* storage unavailable */ }
+  // Mixed mode: 4 DeepSeek lanes plus 1 NVIDIA lane, so 5 questions at once. NVIDIA alone takes 30.
+  return isMixedMode() ? 5 : 30;
 }
 
 // ---------- provider status ----------
@@ -229,15 +228,79 @@ function topicEvidence(query: string, subject: string): Promise<TopicSource[]> {
 }
 
 /** Calls POST /api/ai/complete with the active (or given) provider. Throws typed AiError on failure. */
+/** Time taken by each step of question generation. Read it in the browser console: window.__stageLog */
+export interface StageTiming { stage: string; lane?: string; ms: number; endedAt: string; detail?: Record<string, number> }
+export const stageLog: StageTiming[] = [];
+(globalThis as { __stageLog?: StageTiming[] }).__stageLog = stageLog;
+
+export function logStage(stage: string, ms: number, lane?: string, detail?: Record<string, number>): void {
+  stageLog.push({ stage, lane, ms: Math.round(ms), endedAt: new Date().toISOString().slice(11, 23), detail });
+}
+
+/** Runs one step and records how long it took. */
+export async function timed<T>(stage: string, fn: () => Promise<T>, lane?: string): Promise<T> {
+  const t0 = performance.now();
+  try {
+    return await fn();
+  } finally {
+    logStage(stage, performance.now() - t0, lane);
+  }
+}
+
+// Mixed mode (DeepSeek selected): writing and checking use two lanes at once. DeepSeek takes up to 4 calls,
+// NVIDIA takes one call at a time, so the NVIDIA lane never bursts past its limit.
+const laneCapacity: Record<'vyce' | 'nvidia', number> = { vyce: 4, nvidia: 1 };
+const laneBusy: Record<'vyce' | 'nvidia', number> = { vyce: 0, nvidia: 0 };
+const laneWaiters: (() => void)[] = [];
+
+export function isMixedMode(): boolean {
+  return getActiveProvider() === 'vyce';
+}
+
+/** Waits for a free lane and returns it. Call release() when the call is finished. */
+export async function acquireLane(only?: 'vyce' | 'nvidia'): Promise<{ provider: AiProviderId; model: string; release: () => void }> {
+  for (;;) {
+    const order: ('vyce' | 'nvidia')[] = only ? [only] : ['vyce', 'nvidia'];
+    for (const p of order) {
+      if (laneBusy[p] < laneCapacity[p]) {
+        laneBusy[p] += 1;
+        return {
+          provider: p,
+          model: getEffectiveModel(p),
+          release: () => {
+            laneBusy[p] -= 1;
+            laneWaiters.splice(0).forEach((wake) => wake());
+          },
+        };
+      }
+    }
+    await new Promise<void>((resolve) => laneWaiters.push(resolve));
+  }
+}
+
+/** Calls the completion route. In mixed mode, writing calls take a free lane; otherwise the selected engine is used. */
 export async function aiComplete(options: AiCompleteOptions): Promise<string> {
+  if (options.work && !options.provider && isMixedMode()) {
+    // Writing always goes to DeepSeek: NVIDIA refuses the large writing requests, and its lane is kept for checks.
+    const lane = await timed('lane-wait', () => acquireLane('vyce'));
+    try {
+      return await timed('write', () => completeOn(lane.provider, lane.model, options), lane.provider);
+    } finally {
+      lane.release();
+    }
+  }
   const route = options.work ? writeRoute() : null;
   const provider = route?.provider ?? options.provider ?? getActiveProvider();
   if (!provider) {
     throw new AiError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`, 'not_connected');
   }
+  return timed('write', () => completeOn(provider, options.model ?? route?.model ?? getEffectiveModel(provider), options), provider);
+}
+
+async function completeOn(provider: AiProviderId, model: string, options: AiCompleteOptions): Promise<string> {
   const body = {
     provider,
-    model: options.model ?? route?.model ?? getEffectiveModel(provider),
+    model,
     system: options.system,
     messages: options.messages,
     json: options.json,
@@ -709,7 +772,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
     // The writer reads PubMed on the topic first, so the key rests on the literature rather than memory alone.
-    const evidence = await topicEvidence(focus ?? focusParts(topic.subtopic)[0] ?? topic.subtopic, topic.subject);
+    const evidence = await timed('evidence', () => topicEvidence(focus ?? focusParts(topic.subtopic)[0] ?? topic.subtopic, topic.subject));
     const prompt = [
       `Write ONE exam-standard MCQ for ${pattern.name}.`,
       `Subject: ${topic.subject}`,
@@ -753,22 +816,22 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           signal,
         });
         const parsed = extractJson<BatchQuestionSpec>(raw);
-        if (!parsed) return null;
+        if (!parsed) { logStage('drop:unparsed', 0); return null; }
 
         const q = buildQuestion(parsed, exam, [{ subject: topic.subject, subtopic: topic.subtopic }], topic.difficultyTier, difficultySubLevel, pattern.opts);
-        if (!q) return null;
+        if (!q) { logStage('drop:invalid', 0); return null; }
 
         // Dedup against already-accepted questions: exact stems, then near-identical scenarios
         // (same patient and regimen with the words reshuffled).
         const key = stemKey(q.stem);
-        if (seenStems.has(key)) return null;
+        if (seenStems.has(key)) { logStage('drop:repeat-stem', 0); return null; }
         const fullStem = toBenchItem(q).stem;
-        if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) return null;
+        if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) { logStage('drop:similar-stem', 0); return null; }
         // The same key fact asked in other words (same drug, same finding) is a repeat, even when the stem differs.
         const keyFact = (q.keyFact || '').trim();
-        if (keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) return null;
+        if (keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { logStage('drop:repeat-fact', 0); return null; }
         // Check the keyed answer right after it is written. A question that fails is not kept.
-        if (verify && !(await verify(q))) return null;
+        if (verify && !(await verify(q))) { logStage('drop:failed-check', 0); return null; }
         seenStems.add(key);
         acceptedStems.push(fullStem);
         if (keyFact) acceptedKeyFacts.push(keyFact);
@@ -815,6 +878,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // ---------- Step 4: Fire all question-generation requests in parallel ----------
   // Use a completion counter that updates progress as each question finishes.
   let completedCount = 0;
+  let questionsInProgress = 0;
   // At most GENERATION_CONCURRENCY question requests run at once, so the provider does not rate-limit them.
   const GENERATION_CONCURRENCY = parallelRequestLimit();
   let inFlight = 0;
@@ -830,29 +894,52 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     if (inFlight < GENERATION_CONCURRENCY) start();
     else waiting.push(start);
   });
-  const questionPromises = topics.map((topic, idx) => {
-    const parts = focusParts(topic.subtopic);
-    // A planned topic carries its own focus (one drug class, one part of a subtopic); otherwise rotate the parts.
-    const focus = topic.focus ?? (parts.length > 1 ? parts[idx % parts.length] : undefined);
-    // Once enough questions are kept, no new slot starts: the rest of the plan is never written.
-    return limited(() => (questions.length >= count
-      ? Promise.resolve(null)
-      : generateSingleQuestion(topic, 0, focus, itemShape(idx, exam)))).then((q) => {
-      // Update progress as each question completes (not after all finish).
-      completedCount += 1;
-      if (q) {
-        questions.push(q);
+  // A pool of workers takes planned topics from a queue. When the queue runs low, more topics are planned right
+  // away, so a question starts as soon as a lane is free, while others are still in progress.
+  const queue: { topic: PlannedTopic; idx: number }[] = topics.map((topic, idx) => ({ topic, idx }));
+  let slotCounter = topics.length;
+  let refilling: Promise<boolean> | null = null;
+  const refill = (): Promise<boolean> => {
+    if (!refilling) {
+      refilling = (async () => {
+        if (shouldStop?.() || signal?.aborted) return false;
+        const more = await planTopics();
+        const extra: PlannedTopic[] = more && more.length ? more : Array.from({ length: count }, (_, i) => ({
+          ...workingPool[(slotCounter + i) % workingPool.length],
+          difficultyTier: tier,
+        }));
+        for (const topic of extra) queue.push({ topic, idx: slotCounter++ });
+        return extra.length > 0;
+      })().finally(() => { refilling = null; });
+    }
+    return refilling;
+  };
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      if (stopped || shouldStop?.() || signal?.aborted || questions.length >= count) return;
+      if (queue.length === 0) {
+        if (questionsInProgress > 0) { await new Promise((r) => setTimeout(r, 300)); continue; }
+        if (!(await refill())) return;
+        continue;
       }
-      onProgress?.(questions.length, count, completedCount, topics.length);
-      // Fire onBatch periodically (every ~25% of completion).
-      if (onBatch && questions.length > 0 && completedCount % Math.max(1, Math.floor(topics.length / 4)) === 0) {
+      const allowedInProgress = Math.ceil(1.5 * Math.max(0, count - questions.length));
+      if (questionsInProgress >= allowedInProgress) { await new Promise((r) => setTimeout(r, 300)); continue; }
+      const { topic, idx } = queue.shift()!;
+      const parts = focusParts(topic.subtopic);
+      // A planned topic carries its own focus (one drug class, one part of a subtopic); otherwise rotate the parts.
+      const focus = topic.focus ?? (parts.length > 1 ? parts[idx % parts.length] : undefined);
+      questionsInProgress += 1;
+      const q = await generateSingleQuestion(topic, 0, focus, itemShape(idx, exam)).finally(() => { questionsInProgress -= 1; });
+      completedCount += 1;
+      if (q) questions.push(q);
+      onProgress?.(questions.length, count, completedCount, Math.max(completedCount, slotCounter));
+      if (onBatch && questions.length > 0 && completedCount % Math.max(1, Math.floor(count / 2)) === 0) {
         const p = onBatch(questions.slice());
         if (p && batchPromises) batchPromises.push(Promise.resolve(p));
       }
-      return q;
-    });
-  });
-  const results = await Promise.all(questionPromises);
+    }
+  };
+  await Promise.all(Array.from({ length: GENERATION_CONCURRENCY }, () => worker()));
 
   // Dedup by stem (already done in generateSingleQuestion, but double-check).
   const unique = questions.filter((q, i) => questions.findIndex((x) => x.stem === q.stem) === i);

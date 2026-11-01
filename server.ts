@@ -297,6 +297,8 @@ async function runCompletion(opts: {
   images?: string[];
   /** Spread this call across the NVIDIA text models in turn, so one model's rate limit does not hold up the run. */
   spread?: boolean;
+  /** Who asked for this call (write, check-solve, check-judge): shown in the server log. */
+  purpose?: string;
 }): Promise<string> {
   const { provider, model, system, messages, json, effort, search, signal, images, spread } = opts;
 
@@ -583,6 +585,7 @@ async function runCompletion(opts: {
           signal: signal ?? AbortSignal.timeout(240_000),
         }));
         raw = await httpRes.text();
+        console.log(`[nvidia] ${new Date().toISOString().slice(11, 23)} ${opts.purpose ?? 'unlabelled'} model=${model_} attempt=${attempt} status=${httpRes.status}`);
         body = {};
         try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
         const rateLimited = httpRes.status === 429;
@@ -698,6 +701,7 @@ function keywordQuery(text: string): string {
 }
 
 app.post('/api/qa/verify-answer', async (req: Request, res: Response) => {
+  const tStart = Date.now();
   const { question, provider, model } = req.body || {};
   if (!question || !Array.isArray(question.options) || !question.correctOption || !provider) {
     return res.status(400).json({ error: 'question (with options and correctOption) and provider are required.' });
@@ -705,6 +709,7 @@ app.post('/api/qa/verify-answer', async (req: Request, res: Response) => {
   // The provider rate-limits parallel calls (HTTP 429). Wait and retry rather than failing the question.
   // effort: 'min' for steps that only write text (the PubMed query). The judging steps keep reasoning.
   const complete = async (system: string, content: string, effort?: string) => {
+    const purpose = system.includes('expert exam examiner') ? 'check-solve' : system.includes('check whether medical evidence') ? 'check-judge' : 'check-other';
     // NVIDIA's limit can last a minute or more when several requests run together, so wait longer between tries.
     const waits = [5000, 15000, 30000, 60000, 90000];
     for (let attempt = 0; ; attempt++) {
@@ -717,10 +722,12 @@ app.post('/api/qa/verify-answer', async (req: Request, res: Response) => {
           json: true,
           effort,
           spread: true,
+          purpose,
         }));
       } catch (err: any) {
         const rateLimited = /429|rate.?limit|too many requests/i.test(String(err?.message || err));
         if (!rateLimited || attempt >= waits.length) throw err;
+        console.log(`[wait] ${new Date().toISOString().slice(11, 23)} ${purpose} refused, waiting ${waits[attempt] / 1000}s before attempt ${attempt + 2}`);
         await new Promise((resolve) => setTimeout(resolve, waits[attempt]));
       }
     }
@@ -739,19 +746,27 @@ app.post('/api/qa/verify-answer', async (req: Request, res: Response) => {
 
     // 2. The search: the item's key fact when it has one (a better query than one written here); otherwise a short query.
     const queryPromise = question.keyFact && String(question.keyFact).trim()
-      ? Promise.resolve({ query: keywordQuery(String(question.keyFact)) || String(question.keyFact).trim().slice(0, 120) })
+      ? Promise.resolve({ query: String(question.keyFact).trim().slice(0, 300), fallback: keywordQuery(String(question.keyFact)) || String(question.keyFact).trim().slice(0, 120) })
       : complete(
         'You write PubMed search queries. Return only JSON.',
         `Question: ${stem}\nCorrect option: ${keyed}. ${keyedText}\n\nWrite one PubMed search query of 6-12 words that would find evidence for the correct option. Return JSON {"query":"..."}.`,
         'min',
       );
     const [s1, queryOut] = await Promise.all([solveOut, queryPromise]);
+    const tSolved = Date.now();
+    let tSearched = tSolved;
     const solves = [String(s1?.answer || '').toUpperCase()];
     const solvesAgree = solves.every((a) => a === keyed);
     const query = String(queryOut?.query || '').trim();
+    const fallbackQuery = String(queryOut?.fallback || '').trim();
     let sources: { title: string; url: string; text: string }[] = [];
     if (query) {
+      // The exact key-fact sentence first; the short keyword search only if that finds fewer than two abstracts.
       try { sources = await literatureSources(query, question.subject); } catch { sources = []; }
+      if (sources.length < 2 && fallbackQuery && fallbackQuery !== query) {
+        try { sources = await literatureSources(fallbackQuery, question.subject); } catch { /* keep what we have */ }
+      }
+      tSearched = Date.now();
     }
 
     // 3 and 4: the evidence judgement and the item's defect check read the same question, so with sources
@@ -781,6 +796,7 @@ app.post('/api/qa/verify-answer', async (req: Request, res: Response) => {
       );
     }
     // A key can be right and the item still broken, so the defect check counts too.
+    const tJudged = Date.now();
     const wellFormed = quality?.wellFormed === true;
     const issues: string[] = Array.isArray(quality?.issues) ? quality.issues.map(String).slice(0, 5) : [];
 
@@ -791,7 +807,8 @@ app.post('/api/qa/verify-answer', async (req: Request, res: Response) => {
       : solvedAgainst && verdict === 'CONTRADICTED'
         ? 'CONTESTED'
         : 'UNVERIFIED';
-    return res.json({ proof, keyed, solves, query, evidence: { verdict, cited }, wellFormed, issues });
+    const timings = { solveMs: tSolved - tStart, searchMs: tSearched - tSolved, judgeMs: tJudged - tSearched, totalMs: Date.now() - tStart };
+    return res.json({ proof, keyed, solves, query, evidence: { verdict, cited }, wellFormed, issues, timings });
   } catch (err: any) {
     return res.status(502).json({ error: err?.message || 'Answer check failed.' });
   }
@@ -1723,7 +1740,7 @@ app.post('/api/ai/complete', async (req: Request, res: Response) => {
     if (!res.writableFinished) controller.abort();
   });
   try {
-    const text = await runCompletion({ provider, model, system, messages, json, effort, spread: spread === true, signal: controller.signal, session: req.header('x-opencode-session') || undefined });
+    const text = await runCompletion({ provider, model, system, messages, json, effort, spread: spread === true, purpose: 'write', signal: controller.signal, session: req.header('x-opencode-session') || undefined });
     if (controller.signal.aborted) return;
     if (!text || !text.trim()) {
       return res.status(502).json({ error: 'The AI provider returned an empty response. Try again.' });

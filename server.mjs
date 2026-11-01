@@ -529,21 +529,20 @@ async function ddg(q) {
   }
   return out;
 }
-async function pubmed(q) {
-  const base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/";
-  const ids = (await (await get(`${base}esearch.fcgi?db=pubmed&retmode=json&retmax=3&sort=relevance&term=${encodeURIComponent(q)}`)).json()).esearchresult?.idlist ?? [];
-  if (!ids.length) return [];
-  const xml = await (await get(`${base}efetch.fcgi?db=pubmed&retmode=xml&id=${ids.join(",")}`)).text();
-  return [...xml.matchAll(/<PubmedArticle>([\s\S]*?)<\/PubmedArticle>/g)].map((m) => {
-    const a = m[1];
-    const pick = (re) => strip((a.match(re) || [])[1] || "");
-    const abs = [...a.matchAll(/<AbstractText([^>]*)>([\s\S]*?)<\/AbstractText>/g)].map((x) => {
-      const label = (x[1].match(/Label="([^"]+)"/) || [])[1];
-      return (label ? label + ": " : "") + strip(x[2]);
-    }).join(" ");
-    const id = pick(/<PMID[^>]*>(\d+)<\/PMID>/);
-    return { title: pick(/<ArticleTitle>([\s\S]*?)<\/ArticleTitle>/), url: `https://pubmed.ncbi.nlm.nih.gov/${id}/`, text: `${pick(/<Journal>[\s\S]*?<Title>([\s\S]*?)<\/Title>/)} ${pick(/<PubDate>[\s\S]*?<Year>(\d+)<\/Year>/)}. ${abs}`.slice(0, 2500) };
-  }).filter((s) => s.text.length > 40);
+var EUROPE_PMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search";
+async function europePmc(query, journals = []) {
+  const terms = String(query || "").replace(/["\\]/g, " ").trim().slice(0, 300);
+  if (!terms) return [];
+  const journalPart = journals.length ? `(${journals.map((j) => `JOURNAL:"${j}"`).join(" OR ")}) AND ` : "";
+  const url = `${EUROPE_PMC}?query=${encodeURIComponent(`${journalPart}(${terms}) AND HAS_ABSTRACT:y`)}&format=json&pageSize=3&resultType=core`;
+  const res = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(15e3) });
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => ({}));
+  return (data?.resultList?.result || []).filter((r) => r.abstractText).map((r) => ({
+    title: strip(r.title || "").slice(0, 300),
+    url: r.doi ? `https://doi.org/${r.doi}` : `https://europepmc.org/article/${r.source || "MED"}/${r.id}`,
+    text: `${r.journalTitle || ""} ${r.pubYear || ""}. ${strip(r.abstractText)}`.slice(0, 1500)
+  }));
 }
 async function pageText(url, chars = 2500) {
   const r = await get(url);
@@ -554,20 +553,78 @@ async function pageText(url, chars = 2500) {
 async function research(query, pageChars = 2500) {
   const q = String(query || "").trim().slice(0, 300);
   if (!q) throw new Error("Nothing to search for.");
-  const [w, p] = await Promise.allSettled([ddg(q), pubmed(q)]);
+  const [w, p] = await Promise.allSettled([ddg(q), europePmc(q)]);
   const web = (w.status === "fulfilled" ? w.value : []).sort((a, b) => Number(TRUSTED.test(b.url)) - Number(TRUSTED.test(a.url))).slice(0, 3);
-  const pm = p.status === "fulfilled" ? p.value : [];
+  const papers = p.status === "fulfilled" ? p.value : [];
   const pages = await Promise.allSettled(web.map((x) => pageText(x.url, pageChars)));
   const sources = [
     ...web.map((x, i) => ({ title: x.title, url: x.url, text: (pages[i].status === "fulfilled" && pages[i].value.length > 200 ? pages[i].value : x.snippet) || x.snippet, kind: "web" })),
-    ...pm.map((x) => ({ ...x, kind: "pubmed" }))
+    ...papers.map((x) => ({ ...x, kind: "europepmc" }))
   ].filter((s) => s.text).map((s, i) => ({ n: i + 1, ...s }));
   if (!sources.length) throw new Error("No sources found (check your internet connection, or try different wording).");
   return { sources, retrievedAt: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10) };
 }
-async function pubmedSearch(query) {
-  return pubmed(String(query || "").slice(0, 300));
+var SUBJECT_JOURNALS = [
+  [/physiolog/i, ["Indian J Physiol Pharmacol"]],
+  [/biochem/i, ["Indian J Biochem Biophys"]],
+  [/patholog/i, ["Indian J Pathol Microbiol"]],
+  [/pharmacolog/i, ["Indian J Pharmacol"]],
+  [/microbiolog/i, ["Indian J Med Microbiol"]],
+  [/forensic/i, ["Indian J Forensic Med Toxicol"]],
+  [/community|preventive|\bpsm\b/i, ["Indian J Community Med"]],
+  [/general medicine|internal medicine/i, ["J Assoc Physicians India", "Indian J Med Res"]],
+  [/surg/i, ["Indian J Surg"]],
+  [/obstet|gynae/i, ["J Obstet Gynaecol India"]],
+  [/pediatric|paediatric/i, ["Indian Pediatr"]],
+  [/orthop/i, ["Indian J Orthop"]],
+  [/\bENT\b|oto-?rhino|otolaryng/i, ["Indian J Otolaryngol Head Neck Surg"]],
+  [/ophthalm/i, ["Indian J Ophthalmol"]],
+  [/dermatolog/i, ["Indian J Dermatol Venereol Leprol"]],
+  [/psychiatr/i, ["Indian J Psychiatry"]],
+  [/anesth|anaesth/i, ["Indian J Anaesth"]],
+  [/radio/i, ["Indian J Radiol Imaging"]]
+];
+function journalsFor(subject) {
+  const s = String(subject || "");
+  const hit = SUBJECT_JOURNALS.find(([re]) => re.test(s));
+  return hit ? hit[1] : [];
 }
+async function openFdaLabel(query) {
+  const phrase = String(query || "").replace(/["\\]/g, " ").trim();
+  if (!phrase) return [];
+  const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(`indications_and_usage:"${phrase}"`)}&limit=1`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(15e3) });
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => ({}));
+  const hit = data?.results?.[0];
+  if (!hit) return [];
+  const name = hit.openfda?.generic_name?.[0] || hit.openfda?.brand_name?.[0] || "Drug label";
+  const text = [hit.indications_and_usage?.[0], hit.warnings?.[0] || hit.boxed_warning?.[0]].filter(Boolean).join(" ").replace(/\s+/g, " ");
+  if (!text) return [];
+  return [{ title: `${name} (FDA drug label)`, url: "https://open.fda.gov/apis/drug/label/", text: text.slice(0, 1200) }];
+}
+function usesDrugLabels(subject) {
+  return !subject || /pharmacolog|medicine|therap|drug|anesth|anaesth|toxicolog/i.test(String(subject));
+}
+async function literatureSources(query, subject) {
+  const [label, subjectPapers] = await Promise.all([
+    usesDrugLabels(subject) ? openFdaLabel(query).catch(() => []) : Promise.resolve([]),
+    europePmc(query, journalsFor(subject)).catch(() => [])
+  ]);
+  let papers = subjectPapers;
+  if (subjectPapers.length < 2) {
+    const wider = await europePmc(query, []).catch(() => []);
+    const seen = new Set(subjectPapers.map((p) => p.title));
+    papers = [...subjectPapers, ...wider.filter((p) => !seen.has(p.title))];
+  }
+  return [...label, ...papers].slice(0, 4);
+}
+var SOURCE_REGISTRY = [
+  { id: "europepmc", name: "Europe PMC abstracts (subject Indian journals)", licence: "Abstracts free; full text varies by article", fetch: "Europe PMC REST API", status: "live" },
+  { id: "openfda", name: "openFDA drug labels", licence: "US government data (openFDA terms)", fetch: "api.fda.gov", status: "live" },
+  { id: "bookshelf", name: "NCBI Bookshelf (StatPearls and open textbooks)", licence: "Varies per book; StatPearls is free to read", fetch: "NCBI web pages", status: "blocked: NCBI shows a bot check instead of chapter text" },
+  { id: "reference-pages", name: "Reference websites (TeachMeAnatomy, CV Physiology, LibreTexts, WebPath, DermNet, EyeWiki, NHSRC treatment guidelines and others)", licence: "Varies per site; check before quoting", fetch: "page text only; no search yet", status: "reference: readable pages, not searched per question" }
+];
 
 // server/images.mjs
 import { createHash } from "node:crypto";
@@ -1892,6 +1949,8 @@ function serverDebugLog(hypothesis, message) {
 }
 
 // src/lib/ai.ts
+var stageLog = [];
+globalThis.__stageLog = stageLog;
 function extractJson(raw) {
   if (!raw) return null;
   let text = raw.trim();
@@ -2078,7 +2137,7 @@ var NVIDIA_SPREAD_MODELS = [
   "nvidia/nemotron-3.5-lightning-30b-a3b"
 ];
 var nvidiaSpreadCursor = 0;
-var NVIDIA_SLOTS = Number(process.env.NVIDIA_MAX_IN_FLIGHT || 3);
+var NVIDIA_SLOTS = Number(process.env.NVIDIA_MAX_IN_FLIGHT || Infinity);
 var nvidiaInFlight = 0;
 var nvidiaWaiting = [];
 async function nvidiaSlot(task) {
@@ -2355,6 +2414,7 @@ async function runCompletion(opts) {
           signal: signal ?? AbortSignal.timeout(24e4)
         }));
         raw = await httpRes.text();
+        console.log(`[nvidia] ${(/* @__PURE__ */ new Date()).toISOString().slice(11, 23)} ${opts.purpose ?? "unlabelled"} model=${model_} attempt=${attempt} status=${httpRes.status}`);
         body = {};
         try {
           body = raw ? JSON.parse(raw) : {};
@@ -2426,6 +2486,20 @@ app.get("/api/oauth/status", (req, res) => {
     defaults: DEFAULT_MODELS
   });
 });
+app.get("/api/ai/source-registry", (_req, res) => {
+  return res.json({ sources: SOURCE_REGISTRY });
+});
+app.post("/api/ai/topic-sources", async (req, res) => {
+  const query = String(req.body?.query || "").trim().slice(0, 200);
+  const subject = String(req.body?.subject || "");
+  if (!query) return res.json({ sources: [] });
+  try {
+    const found = await literatureSources(query, subject);
+    return res.json({ sources: found.map((s) => ({ title: s.title, url: s.url, text: String(s.text || "").slice(0, 700) })) });
+  } catch {
+    return res.json({ sources: [] });
+  }
+});
 var SEARCH_STOP = /* @__PURE__ */ new Set(["that", "with", "from", "this", "have", "were", "their", "which", "also", "after", "before", "than", "such", "only", "other", "most", "some", "used", "will", "does", "into", "when", "while", "there", "these", "those", "about", "among", "through", "where", "being", "given", "shows", "reduce", "reduces", "patient", "patients", "drug", "drugs", "should", "could", "would", "they", "them", "does", "have", "been", "make", "makes"]);
 function keywordQuery(text) {
   const picked = [];
@@ -2436,11 +2510,13 @@ function keywordQuery(text) {
   return picked.join(" ");
 }
 app.post("/api/qa/verify-answer", async (req, res) => {
+  const tStart = Date.now();
   const { question, provider, model } = req.body || {};
   if (!question || !Array.isArray(question.options) || !question.correctOption || !provider) {
     return res.status(400).json({ error: "question (with options and correctOption) and provider are required." });
   }
   const complete = async (system, content, effort) => {
+    const purpose = system.includes("expert exam examiner") ? "check-solve" : system.includes("check whether medical evidence") ? "check-judge" : "check-other";
     const waits = [5e3, 15e3, 3e4, 6e4, 9e4];
     for (let attempt = 0; ; attempt++) {
       try {
@@ -2451,11 +2527,13 @@ app.post("/api/qa/verify-answer", async (req, res) => {
           messages: [{ role: "user", content }],
           json: true,
           effort,
-          spread: true
+          spread: true,
+          purpose
         }));
       } catch (err) {
         const rateLimited = /429|rate.?limit|too many requests/i.test(String(err?.message || err));
         if (!rateLimited || attempt >= waits.length) throw err;
+        console.log(`[wait] ${(/* @__PURE__ */ new Date()).toISOString().slice(11, 23)} ${purpose} refused, waiting ${waits[attempt] / 1e3}s before attempt ${attempt + 2}`);
         await new Promise((resolve) => setTimeout(resolve, waits[attempt]));
       }
     }
@@ -2472,7 +2550,7 @@ ${optionLines3}
 
 Return JSON {"answer":"<option letter>","confidence":<0-100>,"reason":"<one sentence>"}.`;
     const solveOut = complete(solveSystem, solveBody, "min");
-    const queryPromise = question.keyFact && String(question.keyFact).trim() ? Promise.resolve({ query: keywordQuery(String(question.keyFact)) || String(question.keyFact).trim().slice(0, 120) }) : complete(
+    const queryPromise = question.keyFact && String(question.keyFact).trim() ? Promise.resolve({ query: String(question.keyFact).trim().slice(0, 300), fallback: keywordQuery(String(question.keyFact)) || String(question.keyFact).trim().slice(0, 120) }) : complete(
       "You write PubMed search queries. Return only JSON.",
       `Question: ${stem}
 Correct option: ${keyed}. ${keyedText}
@@ -2481,16 +2559,26 @@ Write one PubMed search query of 6-12 words that would find evidence for the cor
       "min"
     );
     const [s1, queryOut] = await Promise.all([solveOut, queryPromise]);
+    const tSolved = Date.now();
+    let tSearched = tSolved;
     const solves = [String(s1?.answer || "").toUpperCase()];
     const solvesAgree = solves.every((a) => a === keyed);
     const query = String(queryOut?.query || "").trim();
+    const fallbackQuery = String(queryOut?.fallback || "").trim();
     let sources = [];
     if (query) {
       try {
-        sources = await pubmedSearch(query);
+        sources = await literatureSources(query, question.subject);
       } catch {
         sources = [];
       }
+      if (sources.length < 2 && fallbackQuery && fallbackQuery !== query) {
+        try {
+          sources = await literatureSources(fallbackQuery, question.subject);
+        } catch {
+        }
+      }
+      tSearched = Date.now();
     }
     const defectRules = "Check the item: (1) exactly one option is the single best answer; (2) if the question asks which is NOT / INCORRECT / FALSE / EXCEPT, exactly one option is that; (3) every number or result needed to answer is given in the stem; (4) no other option is also correct.";
     let verdict = "INSUFFICIENT";
@@ -2509,7 +2597,8 @@ Keyed answer: ${keyed}. ${keyedText}
 Sources:
 ${numbered}
 
-Return JSON {"verdict":"SUPPORTED|CONTRADICTED|INSUFFICIENT","citedSources":[<source numbers>],"reason":"<one sentence>","wellFormed":true|false,"issues":["<short issue>"]}. Use SUPPORTED only if a source directly supports the keyed answer. ${defectRules}`
+Return JSON {"verdict":"SUPPORTED|CONTRADICTED|INSUFFICIENT","citedSources":[<source numbers>],"reason":"<one sentence>","wellFormed":true|false,"issues":["<short issue>"]}. Use SUPPORTED only if a source directly supports the keyed answer. ${defectRules}`,
+        "min"
       );
       verdict = ["SUPPORTED", "CONTRADICTED", "INSUFFICIENT"].includes(quality?.verdict) ? quality.verdict : "INSUFFICIENT";
       const nums = Array.isArray(quality?.citedSources) ? quality.citedSources : [];
@@ -2523,14 +2612,17 @@ ${optionLines3}
 
 Keyed answer: ${keyed}.
 
-${defectRules} Return JSON {"wellFormed":true|false,"issues":["<short issue>"]}.`
+${defectRules} Return JSON {"wellFormed":true|false,"issues":["<short issue>"]}.`,
+        "min"
       );
     }
+    const tJudged = Date.now();
     const wellFormed = quality?.wellFormed === true;
     const issues = Array.isArray(quality?.issues) ? quality.issues.map(String).slice(0, 5) : [];
     const solvedAgainst = solves.every((a) => a && a !== keyed);
     const proof = solvesAgree && verdict === "SUPPORTED" && cited.length > 0 && wellFormed ? "VERIFIED" : solvedAgainst && verdict === "CONTRADICTED" ? "CONTESTED" : "UNVERIFIED";
-    return res.json({ proof, keyed, solves, query, evidence: { verdict, cited }, wellFormed, issues });
+    const timings = { solveMs: tSolved - tStart, searchMs: tSearched - tSolved, judgeMs: tJudged - tSearched, totalMs: Date.now() - tStart };
+    return res.json({ proof, keyed, solves, query, evidence: { verdict, cited }, wellFormed, issues, timings });
   } catch (err) {
     return res.status(502).json({ error: err?.message || "Answer check failed." });
   }
@@ -2545,8 +2637,14 @@ app.get(/^\/api\/bank-figures\/(.+)$/, (req, res) => {
   if (!fs.existsSync(full)) return res.status(404).end();
   res.sendFile(full);
 });
+var rankCache = /* @__PURE__ */ new Map();
+function subtopicParts(subtopic) {
+  const after = subtopic.includes(":") ? subtopic.split(":").slice(1).join(":") : subtopic;
+  return after.split(/,|&| and /).map((s) => s.trim().split(":").pop().trim()).filter(Boolean);
+}
 app.post("/api/ai/plan-topics", async (req, res) => {
-  const { subjectSubtopics, count, difficultyTier, provider, model, exam, effort } = req.body || {};
+  const { subjectSubtopics, count, difficultyTier, provider, model, exam, effort, exclude } = req.body || {};
+  const excluded = new Set(Array.isArray(exclude) ? exclude.map(String) : []);
   if (!subjectSubtopics || !Array.isArray(subjectSubtopics) || subjectSubtopics.length === 0) {
     return res.status(400).json({ error: "subjectSubtopics is required" });
   }
@@ -2572,13 +2670,20 @@ app.post("/api/ai/plan-topics", async (req, res) => {
       `Include approximately ${countN} entries total. If there are fewer unique pairs than ${countN}, repeat important ones.`,
       `Output ONLY the JSON array.`
     ].join("\n");
-    const raw = await runCompletion({
-      provider: provider || "gemini",
-      model: model || DEFAULT_MODELS.nvidia,
-      messages: [{ role: "user", content: planPrompt }],
-      json: true,
-      effort: effort || void 0
-    });
+    const rankKey = JSON.stringify({ exam, provider, model, subjectSubtopics });
+    let raw = rankCache.get(rankKey) ?? "";
+    if (!raw) {
+      raw = await runCompletion({
+        provider: provider || "gemini",
+        model: model || DEFAULT_MODELS.nvidia,
+        messages: [{ role: "user", content: planPrompt }],
+        json: true,
+        // Ranking subtopics is a short judgement, so it runs without reasoning, like the rest of the pipeline.
+        effort: "min"
+      });
+      if (rankCache.size >= 50) rankCache.delete(rankCache.keys().next().value);
+      rankCache.set(rankKey, raw);
+    }
     const parsed = extractJson(raw);
     const allowed = /* @__PURE__ */ new Map();
     for (const s of subjectSubtopics) {
@@ -2587,24 +2692,42 @@ app.post("/api/ai/plan-topics", async (req, res) => {
     const ranked = (Array.isArray(parsed) ? parsed : []).filter(
       (entry) => allowed.get(entry?.subject)?.has(String(entry?.subtopic ?? "").trim())
     );
-    const weighted = [];
+    const bestByTopic = /* @__PURE__ */ new Map();
     for (const entry of ranked) {
-      const repeats = Math.max(1, Math.min(entry.priority || 5, 10));
-      for (let i = 0; i < repeats; i++) {
+      const key = `${entry.subject}|${String(entry.subtopic).trim()}`;
+      const prior = bestByTopic.get(key);
+      if (!prior || (entry.priority || 0) > (prior.priority || 0)) bestByTopic.set(key, entry);
+    }
+    const sorted = [...bestByTopic.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0));
+    const weighted = [];
+    for (let round = 0; sorted.length > 0 && weighted.length < countN && round < 20; round++) {
+      for (const entry of sorted) {
+        if (weighted.length >= countN) break;
+        const parts = subtopicParts(entry.subtopic);
+        const focus = parts.length > 1 ? parts[round % parts.length] : void 0;
+        if (excluded.has(`${entry.subtopic}|${focus ?? ""}`)) continue;
         weighted.push({
           subject: entry.subject,
           subtopic: entry.subtopic,
+          focus,
           difficultyTier: tier
         });
       }
     }
     if (weighted.length === 0) {
-      for (let i = 0; i < countN; i++) {
-        weighted.push({
-          subject: pool[i % pool.length].subject,
-          subtopic: pool[i % pool.length].subtopic,
-          difficultyTier: tier
-        });
+      const units = [];
+      for (let round = 0; round < 20; round++) {
+        for (const entry of pool) {
+          const parts = subtopicParts(entry.subtopic);
+          const focus = parts.length > 1 ? parts[round % parts.length] : void 0;
+          if (round > 0 && parts.length <= 1) continue;
+          units.push({ subject: entry.subject, subtopic: entry.subtopic, focus });
+        }
+      }
+      for (const unit of units) {
+        if (weighted.length >= countN) break;
+        if (excluded.has(`${unit.subtopic}|${unit.focus ?? ""}`)) continue;
+        weighted.push({ ...unit, difficultyTier: tier });
       }
     }
     const finalTopics = weighted.slice(0, countN);
@@ -3266,7 +3389,7 @@ app.post("/api/ai/complete", async (req, res) => {
     if (!res.writableFinished) controller.abort();
   });
   try {
-    const text = await runCompletion({ provider, model, system, messages, json, effort, spread: spread === true, signal: controller.signal, session: req.header("x-opencode-session") || void 0 });
+    const text = await runCompletion({ provider, model, system, messages, json, effort, spread: spread === true, purpose: "write", signal: controller.signal, session: req.header("x-opencode-session") || void 0 });
     if (controller.signal.aborted) return;
     if (!text || !text.trim()) {
       return res.status(502).json({ error: "The AI provider returned an empty response. Try again." });
@@ -3440,11 +3563,19 @@ Known trap note: ${String(contextQuestion.trapExplanation).slice(0, 400)}` : ""}
   ].filter(Boolean).join("\n");
   const history = Array.isArray(body.history) ? body.history.filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string").slice(-8).map((m) => ({ role: m.role, content: m.content })) : [];
   const messages = [...history, { role: "user", content: message }];
+  const evidence = await literatureSources(message.slice(0, 200), typeof body.subject === "string" ? body.subject : "").catch(() => []);
+  const groundedSystem = evidence.length ? [
+    system,
+    "Evidence retrieved for this question (use it where it applies, cite it by its title, and say when a point is from your own knowledge rather than these sources):",
+    ...evidence.map((s, i) => `[${i + 1}] ${s.title}
+${s.url}
+${String(s.text || "").slice(0, 1200)}`)
+  ].join("\n\n") : system;
   try {
     const raw = await runCompletion({
       provider,
       model: typeof body.model === "string" ? body.model : void 0,
-      system,
+      system: groundedSystem,
       messages,
       json: true,
       effort: typeof body.effort === "string" ? body.effort : void 0,
@@ -3459,6 +3590,7 @@ Known trap note: ${String(contextQuestion.trapExplanation).slice(0, 400)}` : ""}
       reply = raw.trim();
     }
     const result = { success: true, reply, modelUsed: body.model || DEFAULT_MODELS[provider] };
+    if (evidence.length) result.sources = evidence.map((s) => ({ title: s.title, url: s.url }));
     if (parsed && !Array.isArray(parsed)) {
       if (Array.isArray(parsed.reasoningSteps)) {
         const steps = parsed.reasoningSteps.filter((s) => s && typeof s.step === "string" && typeof s.detail === "string" && s.step.trim() && s.detail.trim()).map((s) => ({ step: s.step, detail: s.detail })).slice(0, 6);

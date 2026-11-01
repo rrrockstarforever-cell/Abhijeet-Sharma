@@ -149,10 +149,18 @@ function usesDrugLabels(subject) {
  * drug label where the subject uses drugs. Capped at four items. Each source fails on its own.
  */
 export async function literatureSources(query, subject) {
-  const [label, papers] = await Promise.all([
+  const [label, subjectPapers] = await Promise.all([
     usesDrugLabels(subject) ? openFdaLabel(query).catch(() => []) : Promise.resolve([]),
     europePmc(query, journalsFor(subject)).catch(() => []),
   ]);
+  // The subject's journals often hold nothing on a specific claim. If they give fewer than two abstracts,
+  // widen the search to all of Europe PMC, so the judge has something that addresses the claim.
+  let papers = subjectPapers;
+  if (subjectPapers.length < 2) {
+    const wider = await europePmc(query, []).catch(() => []);
+    const seen = new Set(subjectPapers.map((p) => p.title));
+    papers = [...subjectPapers, ...wider.filter((p) => !seen.has(p.title))];
+  }
   return [...label, ...papers].slice(0, 4);
 }
 

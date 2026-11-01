@@ -128,6 +128,10 @@ export async function findLiveImage(
   });
 
   const deadline = Date.now() + Math.max(timeoutMs, 12000);
+  // One budget of vision checks for the whole picture search, across all query variants: a question never
+  // costs more than this many vision calls, however many variants were tried.
+  const MAX_VISION_CHECKS_PER_QUESTION = 4;
+  let visionChecks = 0;
   for (const tryQ of tries) {
     const remaining = deadline - Date.now();
     if (remaining < 2500) break;
@@ -197,11 +201,9 @@ export async function findLiveImage(
       // Each verification is a vision call, so cap how many candidates we are willing
       // to check per query variant — a topic with many metadata-close-but-wrong rows
       // must not stall the whole generation.
-      const MAX_VERIFY_PER_VARIANT = Number(3);
-      let checked = 0;
       for (const candidate of candidates) {
-        if (checked >= MAX_VERIFY_PER_VARIANT) break;
-        checked += 1;
+        if (visionChecks >= MAX_VISION_CHECKS_PER_QUESTION) break;
+        visionChecks += 1;
         const verdict = await verifyImageMatches(candidate, tryQ);
         if (verdict.pass) {
           debugLog('H8', `query "${tryQ}" -> VERIFIED ${candidate.id} ${candidate.title} — ${verdict.reason}`);

@@ -1,7 +1,7 @@
 // Answer proof: each question's keyed answer is checked (blind solves plus PubMed evidence) before it
 // may reach the Test Runner. Results are stored per question, so a question is checked once.
 import type { ClinicalQuestion } from '../types.ts';
-import { CHECK_ROUTE, getActiveProvider, parallelRequestLimit } from './ai.ts';
+import { acquireLane, getActiveProvider, isMixedMode, logStage, parallelRequestLimit, timed, writeRoute } from './ai.ts';
 
 export type ProofStatus = 'VERIFIED' | 'UNVERIFIED' | 'CONTESTED';
 
@@ -41,13 +41,37 @@ export function proofOf(questionId: string): ProofRecord | null {
 
 /** Runs the answer check for one question and stores the result. */
 export async function checkAnswer(question: ClinicalQuestion): Promise<ProofRecord> {
+  // Mixed mode: the check takes a free lane (DeepSeek or NVIDIA). Otherwise it uses the selected engine.
+  if (isMixedMode()) {
+    // Checks always go to NVIDIA's single lane: one check at a time, so the limit is not burst.
+    const lane = await timed('lane-wait', () => acquireLane('nvidia'));
+    try {
+      return await timed('check', () => checkAnswerOn(question, { provider: lane.provider, model: lane.model }), lane.provider);
+    } finally {
+      lane.release();
+    }
+  }
+  const route = writeRoute();
+  if (!route) throw new Error('No AI provider is active, so the answer cannot be checked.');
+  return checkAnswerOn(question, route);
+}
+
+async function checkAnswerOn(question: ClinicalQuestion, route: { provider: string; model: string }): Promise<ProofRecord> {
   const res = await fetch('/api/qa/verify-answer', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, provider: CHECK_ROUTE.provider, model: CHECK_ROUTE.model }),
+    body: JSON.stringify({ question, provider: route.provider, model: route.model }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `Answer check failed (HTTP ${res.status}).`);
+  // The server times its own steps (solve, search, judge); keep them in the same log as the app's steps.
+  if (data?.timings) {
+    const { solveMs, searchMs, judgeMs, totalMs } = data.timings;
+    logStage('check-solve', solveMs, route.provider);
+    logStage('check-search', searchMs, route.provider);
+    logStage('check-judge', judgeMs, route.provider);
+    logStage('check-server-total', totalMs, route.provider);
+  }
   const record: ProofRecord = { ...data, checkedAt: new Date().toISOString() };
   writeStore({ ...readStore(), [question.id]: record });
   return record;
