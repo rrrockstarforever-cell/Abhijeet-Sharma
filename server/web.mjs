@@ -1,6 +1,7 @@
 // Web research for the "Use web sources" option and for question evidence: DuckDuckGo results and Europe PMC
 // abstracts, fetched here (not in the page). Every source is returned with its URL so the answer can cite it.
 // Only public http(s) pages are fetched. PubMed is not used.
+import { bookPassages } from './books.mjs';
 const UA = 'Mozilla/5.0 (X11; Linux x86_64) PulseMed/0.2 (study tool)';
 const TRUSTED = /(nih\.gov|ncbi\.nlm|who\.int|cdc\.gov|nice\.org\.uk|medlineplus|mayoclinic|msdmanuals|statpearls|radiopaedia|cochrane|bmj\.com|thelancet|nejm|jamanetwork|icmr|mohfw|aiims)/i;
 
@@ -149,8 +150,11 @@ function usesDrugLabels(subject) {
  * drug label where the subject uses drugs. Capped at four items. Each source fails on its own.
  */
 export async function literatureSources(query, subject) {
+  const drugSubject = usesDrugLabels(subject);
+  // Every subject first reads passages from the owned textbook library, then the drug label, then papers.
+  const book = bookPassages(query, 2, subject);
   const [label, subjectPapers] = await Promise.all([
-    usesDrugLabels(subject) ? openFdaLabel(query).catch(() => []) : Promise.resolve([]),
+    drugSubject ? openFdaLabel(query).catch(() => []) : Promise.resolve([]),
     europePmc(query, journalsFor(subject)).catch(() => []),
   ]);
   // The subject's journals often hold nothing on a specific claim. If they give fewer than two abstracts,
@@ -161,7 +165,7 @@ export async function literatureSources(query, subject) {
     const seen = new Set(subjectPapers.map((p) => p.title));
     papers = [...subjectPapers, ...wider.filter((p) => !seen.has(p.title))];
   }
-  return [...label, ...papers].slice(0, 4);
+  return [...book, ...label, ...papers].slice(0, 4);
 }
 
 /**
@@ -171,6 +175,7 @@ export async function literatureSources(query, subject) {
 export const SOURCE_REGISTRY = [
   { id: 'europepmc', name: 'Europe PMC abstracts (subject Indian journals)', licence: 'Abstracts free; full text varies by article', fetch: 'Europe PMC REST API', status: 'live' },
   { id: 'openfda', name: 'openFDA drug labels', licence: 'US government data (openFDA terms)', fetch: 'api.fda.gov', status: 'live' },
+  { id: 'library', name: 'Your textbook library (pulse-library.db, 37 books)', licence: 'Books the user owns; excerpts only', fetch: 'local SQLite full-text index', status: 'live' },
   { id: 'bookshelf', name: 'NCBI Bookshelf (StatPearls and open textbooks)', licence: 'Varies per book; StatPearls is free to read', fetch: 'NCBI web pages', status: 'blocked: NCBI shows a bot check instead of chapter text' },
   { id: 'reference-pages', name: 'Reference websites (TeachMeAnatomy, CV Physiology, LibreTexts, WebPath, DermNet, EyeWiki, NHSRC treatment guidelines and others)', licence: 'Varies per site; check before quoting', fetch: 'page text only; no search yet', status: 'reference: readable pages, not searched per question' },
 ];

@@ -141,8 +141,14 @@ export function parallelRequestLimit(): number {
     const forced = Number(localStorage.getItem('pulse.parallelLimit'));
     if (Number.isFinite(forced) && forced >= 1) return forced;
   } catch { /* storage unavailable */ }
-  // Mixed mode: 4 DeepSeek lanes plus 1 NVIDIA lane, so 5 questions at once. NVIDIA alone takes 30.
-  return isMixedMode() ? 5 : 30;
+  // Mixed mode: 4 DeepSeek lanes plus 1 NVIDIA lane, so 5 questions at once. NVIDIA alone gets 40 at a time; refused
+  // calls move to the next model in the spread, then wait 5 seconds and retry on the server. Other providers take 30.
+  if (isMixedMode()) return 5;
+  // OpenCode runs 20 questions at a time. Other paid providers get 5, so each call costs what it must and no more.
+  if (getActiveProvider() === 'opencode') return 20;
+  // Nemotron Bolt E4B is small and fast, so it runs 20 questions at a time.
+  if (getActiveProvider() === 'nvidia' && /bolt/i.test(getEffectiveModel('nvidia'))) return 20;
+  return getActiveProvider() === 'nvidia' ? 5 : 5;
 }
 
 // ---------- provider status ----------
@@ -170,12 +176,12 @@ export interface AiMessage {
 }
 
 export interface AiCompleteOptions {
-  /** Spread the call across the NVIDIA text models (see the server). */
-  spread?: boolean;
   system?: string;
   messages: AiMessage[];
   json?: boolean;
   effort?: string;
+  /** Internet sources for this topic are searched by the server and read with the request, so the answer is checked in the same call. */
+  groundOn?: { query: string; subject: string };
   provider?: AiProviderId;
   model?: string;
   /** Question writing and repair: sent to the selected engine. See writeRoute. */
@@ -202,29 +208,25 @@ function openCodeSessionId(): string {
   }
 }
 
-interface TopicSource { title: string; url: string; text: string }
-
 /** One planned question slot: the subject, subtopic, the part of it to focus on, and the difficulty. */
 interface PlannedTopic { subject: string; subtopic: string; focus?: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }
 
-// PubMed abstracts per topic, fetched once and shared by every question written on that topic.
-const topicEvidenceCache = new Map<string, Promise<TopicSource[]>>();
-
-function topicEvidence(query: string, subject: string): Promise<TopicSource[]> {
-  const key = `${subject}|${query.trim().toLowerCase()}`;
-  let hit = topicEvidenceCache.get(key);
-  if (!hit) {
-    hit = fetch('/api/ai/topic-sources', {
+/** Splits a typed topic into its distinct subtopics with the selected engine. Falls back to the topic itself. */
+export async function splitTopic(topic: string, exam: string): Promise<string[]> {
+  const provider = getActiveProvider();
+  if (!provider) return [topic];
+  try {
+    const res = await fetch('/api/ai/split-topic', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, subject }),
-    })
-      .then((r) => (r.ok ? r.json() : { sources: [] }))
-      .then((d) => (Array.isArray(d?.sources) ? (d.sources as TopicSource[]) : []))
-      .catch(() => []);
-    topicEvidenceCache.set(key, hit);
+      body: JSON.stringify({ topic, exam, provider, model: getEffectiveModel(provider) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    const list: string[] = Array.isArray(data?.subtopics) ? data.subtopics : [];
+    return list.length ? list : [topic];
+  } catch {
+    return [topic];
   }
-  return hit;
 }
 
 /** Calls POST /api/ai/complete with the active (or given) provider. Throws typed AiError on failure. */
@@ -235,6 +237,17 @@ export const stageLog: StageTiming[] = [];
 
 export function logStage(stage: string, ms: number, lane?: string, detail?: Record<string, number>): void {
   stageLog.push({ stage, lane, ms: Math.round(ms), endedAt: new Date().toISOString().slice(11, 23), detail });
+  // A dropped question is reported to the progress page with its reason.
+  if (stage.startsWith('drop:')) reportQuestion('dropped', stage.slice(5));
+}
+
+/** Tells the server whether a question was kept, so the progress page counts the same questions the app shows. */
+export function reportQuestion(outcome: 'accepted' | 'dropped', reason?: string): void {
+  void fetch('/api/ai/nvidia-stats/question', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ outcome, reason }),
+  }).catch(() => {});
 }
 
 /** Runs one step and records how long it took. */
@@ -297,6 +310,44 @@ export async function aiComplete(options: AiCompleteOptions): Promise<string> {
   return timed('write', () => completeOn(provider, options.model ?? route?.model ?? getEffectiveModel(provider), options), provider);
 }
 
+/**
+ * Runs a writing call as a server job: starts it, then checks it every 400 ms with a short request. The browser
+ * holds only a short connection at a time, so many questions can wait on the server at once. Returns the same
+ * kind of response /api/ai/complete would, so the caller reads it the same way.
+ */
+async function runCompletionJob(body: unknown, signal?: AbortSignal): Promise<Response> {
+  const headers = { 'Content-Type': 'application/json', 'x-opencode-session': openCodeSessionId() };
+  const start = await fetch('/api/ai/jobs', { method: 'POST', headers, body: JSON.stringify(body), signal });
+  if (!start.ok) return start;
+  const { id } = await start.json();
+  const pause = (ms: number) => new Promise<void>((resolve, reject) => {
+    const onAbort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  let failures = 0;
+  for (;;) {
+    await pause(400);
+    try {
+      const check = await fetch(`/api/ai/jobs/${id}`, { signal });
+      if (!check.ok) throw new Error(`job check failed (HTTP ${check.status})`);
+      failures = 0;
+      const data = await check.json();
+      if (!data.done) continue;
+      return new Response(JSON.stringify(data.body), {
+        status: data.status,
+        headers: data.retryAfter ? { 'retry-after': data.retryAfter } : undefined,
+      });
+    } catch (err: any) {
+      if (signal?.aborted || err?.name === 'AbortError') {
+        void fetch(`/api/ai/jobs/${id}`, { method: 'DELETE' }).catch(() => {});
+        throw err;
+      }
+      if (++failures >= 5) throw err;
+    }
+  }
+}
+
 async function completeOn(provider: AiProviderId, model: string, options: AiCompleteOptions): Promise<string> {
   const body = {
     provider,
@@ -305,17 +356,19 @@ async function completeOn(provider: AiProviderId, model: string, options: AiComp
     messages: options.messages,
     json: options.json,
     effort: options.effort,
-    spread: options.spread,
+    groundOn: options.groundOn,
   };
 
   let res: Response;
   try {
-    res = await fetch('/api/ai/complete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-opencode-session': openCodeSessionId() },
-      body: JSON.stringify(body),
-      signal: options.signal,
-    });
+    res = options.work
+      ? await runCompletionJob(body, options.signal)
+      : await fetch('/api/ai/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-opencode-session': openCodeSessionId() },
+          body: JSON.stringify(body),
+          signal: options.signal,
+        });
   } catch (err: any) {
     if (options.signal?.aborted || err?.name === 'AbortError') {
       throw new AiError('Generation stopped.', 'aborted');
@@ -462,7 +515,110 @@ const TIER_BEHAVIOUR: Record<string, string> = {
 const GENERATION_RULES =
   'Rules: medically accurate and current; do not invent doses or values; no two questions on the same fact; ' +
   'the stem must not contain a clue that gives the answer away; options must be homogeneous and of similar length; ' +
-  'vary which option is correct across the batch (do not favour B or C).';
+  'vary which option is correct across the batch (do not favour B or C). ' +
+  'No hints: the stem and lead-in must not name the drug class, drug, mechanism or diagnosis that the correct option names, ' +
+  'and must not repeat its distinctive words; the correct option must not be the only option with absolute wording ' +
+  '(absolutely, always, never, only, must, all, none) and must not be noticeably longer or more detailed than the others; ' +
+  'distractors must be as specific and as carefully worded as the key. ' +
+  'Use only real, named drugs, trials, guidelines and numbers that you are sure of: never invent a drug code, trial name, percentage or fold-change. ' +
+  'Any item about statements (1, 2, 3, 4) must list every statement inside the stem, and the options refer only to those statements. ' +
+  'The stem must contain the facts needed to answer the question, and the keyed option must be the one the sources support.';
+
+// A topic whose question failed or was dropped is written again this many times before it is given up.
+const MAX_TOPIC_RETRIES = 3;
+
+// Copies of the same question request sent at once. The first copy that passes every check is kept.
+const QUESTION_COPIES = 2;
+
+
+// Words that carry no meaning for the hint check.
+const HINT_STOP = new Set(['patient', 'patients', 'therapy', 'treatment', 'regimen', 'clinical', 'should', 'would', 'could', 'which', 'after', 'before', 'during', 'between', 'within', 'without', 'present', 'presents', 'presenting', 'history', 'known', 'reported', 'showing', 'additional', 'following', 'highest', 'lowest', 'maximum', 'minimum', 'most', 'least', 'first', 'second', 'third', 'current', 'currently', 'recent', 'recently', 'initial', 'initially', 'likely', 'appropriate', 'correct']);
+const ABSOLUTE_WORDS = /\b(absolutely|always|never|only|solely|exclusively|must|all|none)\b/i;
+
+/**
+ * Catches a question whose stem gives the answer away: the key's distinctive words repeat in the stem, the key alone
+ * uses absolute wording, or the key is much longer than the other options. Returns the drop reason, or null.
+ */
+/**
+ * Asks the server to check a candidate against the sources: the keyed answer must be correct, and every fact it
+ * relies on must be supported. Anything it cannot confirm is dropped. A failed check counts as not verified.
+ */
+// Checks run a few at a time, so they do not flood the provider and get refused.
+const VERIFY_LANES = 4;
+let verifyBusy = 0;
+const verifyWaiting: (() => void)[] = [];
+async function withVerifyLane<T>(task: () => Promise<T>): Promise<T> {
+  if (verifyBusy >= VERIFY_LANES) await new Promise<void>((resolve) => verifyWaiting.push(resolve));
+  verifyBusy += 1;
+  try {
+    return await task();
+  } finally {
+    verifyBusy -= 1;
+    verifyWaiting.shift()?.();
+  }
+}
+
+/**
+ * Asks the server to check a candidate against the sources. Returns 'supported' or 'unsupported' from the verdict.
+ * A check that the server could not complete (refused or failed) is retried, so a busy provider does not count as
+ * a wrong answer. Returns 'error' only if every try fails.
+ */
+async function verifyItem(q: ClinicalQuestion, groundOn: { query: string; subject: string }, signal?: AbortSignal): Promise<'supported' | 'unsupported' | 'error'> {
+  const provider = getActiveProvider();
+  if (!provider) return 'error';
+  return withVerifyLane(async () => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (signal?.aborted) return 'error';
+      try {
+        const res = await fetch('/api/ai/verify-item', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          // The checker is a stronger model than the writer, so a weak writer cannot approve its own mistakes.
+      body: JSON.stringify({ provider, model: provider === 'nvidia' ? DEFAULT_MODELS.nvidia : getEffectiveModel(provider), question: q, groundOn }),
+          signal,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          return data?.verdict === 'supported' ? 'supported' : 'unsupported';
+        }
+      } catch (err: any) {
+        if (signal?.aborted || err?.name === 'AbortError') return 'error';
+      }
+      await new Promise((resolve) => setTimeout(resolve, 4000 * attempt));
+    }
+    return 'error';
+  });
+}
+
+/**
+ * Catches a question that cannot be answered as written: an empty or one-line stem with no vignette, or options that
+ * refer to numbered statements that the question does not list. Returns the drop reason, or null.
+ */
+export function structureReason(q: ClinicalQuestion): string | null {
+  const text = `${q.stem ?? ''} ${(q as { questionText?: string }).questionText ?? ''}`.trim();
+  if ((q.stem ?? '').trim().length < 20 && text.length < 80) return 'empty-stem';
+  const optionText = q.options.map((o) => o.text).join(' ');
+  const refersToStatements = /\bstatements?\b|\b\d\s*(,|and|&)\s*\d\b.*\bonly\b/i.test(optionText);
+  const listsStatements = /(^|\s)1[.)]\s/.test(text) || /\bstatements?\s+(1|one)\b/i.test(text);
+  if (refersToStatements && !listsStatements) return 'missing-statements';
+  return null;
+}
+
+export function hintReason(q: ClinicalQuestion): string | null {
+  const key = q.options.find((o) => o.id === q.correctOption);
+  const others = q.options.filter((o) => o.id !== q.correctOption);
+  if (!key || others.length === 0) return null;
+  const words = (s: string) => (s.toLowerCase().match(/[a-z][a-z-]{5,}/g) || []).filter((w) => !HINT_STOP.has(w));
+  const stemWords = new Set(words(`${q.stem} ${(q as { questionText?: string }).questionText ?? ''}`));
+  const keyWords = [...new Set(words(key.text))];
+  const shared = keyWords.filter((w) => stemWords.has(w));
+  // The key's words mostly repeat the stem's: a clue. Shared subject words alone (the drug or disease both name) are normal.
+  if (shared.length >= 3 && shared.length / Math.max(1, keyWords.length) >= 0.5) return 'hint-stem-words';
+  if (ABSOLUTE_WORDS.test(key.text) && !others.some((o) => ABSOLUTE_WORDS.test(o.text))) return 'hint-absolute';
+  const avgOther = others.reduce((sum, o) => sum + o.text.length, 0) / others.length;
+  if (key.text.length > avgOther * 1.5 && key.text.length - avgOther > 40) return 'hint-length';
+  return null;
+}
 
 // Options that must keep their order (combination codes, "all of the above", ...) are never shuffled.
 const NO_SHUFFLE = /\b(all|none|both|neither)\b.*\b(above|these|of the)\b|\b(a|b|c|d|e)\s*(and|&|,)\s*(a|b|c|d|e)\b|^\s*(a|b|c|d|e)\s*[,&]|\bonly\s*$|^\s*\d(\s*(,|and|&)\s*\d)+/i;
@@ -502,6 +658,8 @@ interface BatchQuestionSpec {
   targetAccuracy?: number;
   figureModality?: string;
   figureQuery?: string;
+  /** "supported" when the keyed option is backed by the internet sources the writer read; otherwise a question is not kept. */
+  sourceCheck?: string;
 }
 
 export interface GenerateQuestionsOptions {
@@ -538,8 +696,6 @@ export interface GenerateQuestionsOptions {
   batchPromises?: Promise<void>[];
   /** Checked between batches; return true to stop early and keep everything generated so far. */
   shouldStop?: () => boolean;
-  /** Runs right after each question is written; a question that returns false is dropped. */
-  verify?: (q: ClinicalQuestion) => Promise<boolean>;
   /** Questions already kept in this module; new questions must not repeat them. */
   existing?: ClinicalQuestion[];
   /** Topic units ("subtopic|focus") already written in this module. Shared across rounds and updated here. */
@@ -678,7 +834,7 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
 export async function generateExamQuestions(options: GenerateQuestionsOptions): Promise<{ questions: ClinicalQuestion[]; dropped: number; stopped: boolean; failure: string | null; imagesAttached: number }> {
   const {
     exam, count, subjectSubtopics, difficultyTier, difficultySubLevel, effort,
-    onProgress, onBatch, batchPromises, shouldStop, verify, existing, usedUnits: unitsUsed, signal, onRetry,
+    onProgress, onBatch, batchPromises, shouldStop, existing, usedUnits: unitsUsed, signal, onRetry,
     questionTypes, stemPatterns, evidenceSources, patientGroup, presentingProblems,
     sourceMaterial, customInstructions, includeImages,
   } = options;
@@ -715,15 +871,16 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // ---------- Step 1: Topic Planning ----------
   // Ask the backend to plan topic distribution with importance weighting.
   // Higher priority topics are repeated more often across concurrent batches.
-  const planTopics = async (): Promise<PlannedTopic[] | null> => {
+  // The first plan lists exactly one topic per question. Later plans list twice the number, so there are spare
+  // topics when some questions fail their check.
+  const planTopics = async (size = count * 2): Promise<PlannedTopic[] | null> => {
     try {
       const res = await fetch('/api/ai/plan-topics', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           subjectSubtopics,
-          // Plan twice the number asked for, so there are spare slots when some questions fail their check.
-          count: count * 2,
+          count: size,
           difficultyTier,
           provider: activeProvider || 'gemini',
           model: getEffectiveModel(activeProvider || 'gemini'),
@@ -745,7 +902,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }
   };
 
-  const plannedTopics = await planTopics();
+  // The progress page counts one run, so the NVIDIA counts start again here.
+  void fetch('/api/ai/nvidia-stats/reset', { method: 'POST' }).catch(() => {});
+  const plannedTopics = await planTopics(count);
 
   // Build the subject/subtopic pool as fallback.
   const pool: { subject: string; subtopic: string }[] = [];
@@ -771,8 +930,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string): Promise<ClinicalQuestion | null> => {
     if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
-    // The writer reads PubMed on the topic first, so the key rests on the literature rather than memory alone.
-    const evidence = await timed('evidence', () => topicEvidence(focus ?? focusParts(topic.subtopic)[0] ?? topic.subtopic, topic.subject));
+    // The server reads the internet on this topic with the request, and the writer checks its key against
+    // those sources in the same call, so no separate check runs afterwards.
+    const groundQuery = focus ?? focusParts(topic.subtopic)[0] ?? topic.subtopic;
     const prompt = [
       `Write ONE exam-standard MCQ for ${pattern.name}.`,
       `Subject: ${topic.subject}`,
@@ -790,36 +950,61 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       patientGroup ? `Patient group: ${patientGroup}.` : '',
       presentingProblems?.length ? `Presenting problems: ${presentingProblems.join('; ')}.` : '',
       sourceMaterial ? `Base on these notes: """${sourceMaterial.slice(0, 6000)}""".` : '',
-      evidence.length
-        ? `Read these PubMed abstracts on the topic first. Base the correct option on them where they apply, state the fact in keyFact, and do not copy their wording: """${evidence.map((s, i) => `[${i + 1}] ${s.title}\n${s.text}`).join('\n\n')}"""`
-        : '',
+      'Internet sources on this topic are attached after this request. Base the correct option on them where they apply, state the fact in keyFact, and do not copy their wording. Set "sourceCheck" to "supported" only if one of those sources directly backs the keyed option; otherwise set it to "not supported" and change the item to a fact that they do back.',
       includeImages
         ? 'If this item is image-based (about one in five items must be), describe the finding in the stem AND set "figureModality" and "figureQuery" so a real picture can be fetched: "figureModality" is one of ECG | X-ray | CT | MRI | ultrasound | histology | fundus | clinical photo, and "figureQuery" is a 3-6 word English search phrase naming the diagnosis + modality (e.g. "atrial fibrillation ECG", "lobar pneumonia chest X-ray", "membranous nephropathy histology"). For items that are NOT image-based, set both to an empty string — never invent a picture.'
         : '',
-      `JSON shape — return exactly one object: { "examType": "${exam}", "subject": "${topic.subject}", "subtopic": "${topic.subtopic}", "cognitiveTier": "Direct Recall | Clinical 2-Step | Multi-Step & IBQ", "difficultyTier": "${topic.difficultyTier}", "stem": "...", "questionText": "...", "options": {${'ABCDE'.slice(0, pattern.opts).split('').map(k => `"${k}": "text"`).join(', ')}}, "correctOption": "A|B|C|D|E", "explanation": "...", "keyFact": "one sentence: the textbook or guideline fact that makes the correct option right, stated so a student could look it up", "boardPearl": "...", "citations": [...], "trapType": "...", "trapExplanation": "...", "targetAccuracy": 0-100${includeImages ? ', "figureModality": "", "figureQuery": ""' : ''} }`,
+      `JSON shape — return exactly one object: { "examType": "${exam}", "subject": "${topic.subject}", "subtopic": "${topic.subtopic}", "cognitiveTier": "Direct Recall | Clinical 2-Step | Multi-Step & IBQ", "difficultyTier": "${topic.difficultyTier}", "stem": "...", "questionText": "...", "options": {${'ABCDE'.slice(0, pattern.opts).split('').map(k => `"${k}": "text"`).join(', ')}}, "correctOption": "A|B|C|D|E", "explanation": "...", "keyFact": "one sentence: the textbook or guideline fact that makes the correct option right, stated so a student could look it up", "boardPearl": "...", "citations": [...], "trapType": "...", "trapExplanation": "...", "targetAccuracy": 0-100, "sourceCheck": "supported|not supported"${includeImages ? ', "figureModality": "", "figureQuery": ""' : ''} }`,
       learnerProfile ? `Learner instructions: """${learnerProfile}"""` : '',
       'Output ONLY the JSON object.',
     ].join('\n');
 
+    // Several copies of the same request run at once. The first copy that passes every check is kept, and the others are stopped.
+    const outerSignal = signal;
+    // NVIDIA sends several copies and keeps the first that passes. Paid providers send one copy, to keep cost down.
+    const paid = getActiveProvider() !== 'nvidia';
+    const copies = Array.from({ length: paid ? 1 : QUESTION_COPIES }, () => new AbortController());
+    let claimed = false;
+    const runCopy = async (own: AbortController): Promise<ClinicalQuestion | null> => {
+    const signal = outerSignal ? AbortSignal.any([outerSignal, own.signal]) : own.signal;
     const MAX_ATTEMPTS = 3;
     for (let a = attempt; a <= MAX_ATTEMPTS; a++) {
-      if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
+      if (outerSignal?.aborted || shouldStop?.()) { stopped = true; return null; }
+      if (own.signal.aborted) return null;
       try {
         const raw = await aiComplete({
           system: GENERATOR_SYSTEM,
           messages: [{ role: 'user', content: prompt }],
           json: true,
           work: true,
-          // Writing keeps its reasoning pass: a key written without it is less reliable, and the check runs on it next.
-          effort: effort ?? 'min',
-          spread: true,
+          // The thinking pass writes the item and checks its key against the internet sources in one call.
+          // Paid providers reason less: the sources are already in the request, so long reasoning mostly adds cost.
+          effort: getActiveProvider() === 'nvidia' ? 'high' : 'low',
+          groundOn: { query: groundQuery, subject: topic.subject },
           signal,
         });
         const parsed = extractJson<BatchQuestionSpec>(raw);
         if (!parsed) { logStage('drop:unparsed', 0); return null; }
+        if (String(parsed.sourceCheck ?? '').trim().toLowerCase() === 'not supported') { logStage('drop:unsupported', 0); return null; }
 
         const q = buildQuestion(parsed, exam, [{ subject: topic.subject, subtopic: topic.subtopic }], topic.difficultyTier, difficultySubLevel, pattern.opts);
         if (!q) { logStage('drop:invalid', 0); return null; }
+        const shape = structureReason(q);
+        if (shape) { logStage(`drop:${shape}`, 0); return null; }
+        const hint = hintReason(q);
+        if (hint) { logStage(`drop:${hint}`, 0); return null; }
+
+        // The first copy to pass the structure checks claims the question. The claim is then checked against the
+        // sources once, so the checker runs once per question, not once per copy. A rejected claim releases the question.
+        if (claimed) { logStage('drop:late-copy', 0); return null; }
+        claimed = true;
+        const verdict = await verifyItem(q, { query: groundQuery, subject: topic.subject }, signal);
+        if (verdict !== 'supported') {
+          claimed = false;
+          logStage(verdict === 'error' ? 'drop:verify-error' : 'drop:unverified', 0);
+          return null;
+        }
+        copies.forEach((c) => { if (c !== own) c.abort(); });
 
         // Dedup against already-accepted questions: exact stems, then near-identical scenarios
         // (same patient and regimen with the words reshuffled).
@@ -830,8 +1015,6 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // The same key fact asked in other words (same drug, same finding) is a repeat, even when the stem differs.
         const keyFact = (q.keyFact || '').trim();
         if (keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { logStage('drop:repeat-fact', 0); return null; }
-        // Check the keyed answer right after it is written. A question that fails is not kept.
-        if (verify && !(await verify(q))) { logStage('drop:failed-check', 0); return null; }
         seenStems.add(key);
         acceptedStems.push(fullStem);
         if (keyFact) acceptedKeyFacts.push(keyFact);
@@ -860,7 +1043,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         used.add(`${topic.subtopic}|${focus ?? ''}`);
         return q;
       } catch (err: any) {
-        if (signal?.aborted || (err instanceof AiError && err.kind === 'aborted') || err?.name === 'AbortError') {
+        // A copy stopped because another copy won is not a stop of the whole run.
+        if (own.signal.aborted && !outerSignal?.aborted) return null;
+        if (outerSignal?.aborted || (err instanceof AiError && err.kind === 'aborted') || err?.name === 'AbortError') {
           stopped = true;
           return null;
         }
@@ -873,6 +1058,19 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       }
     }
     return null;
+    };
+    // The first copy to return a question wins. If every copy fails, the question is null.
+    return new Promise<ClinicalQuestion | null>((resolve) => {
+      let pending = copies.length;
+      let done = false;
+      const settle = (q: ClinicalQuestion | null) => {
+        pending -= 1;
+        if (done) return;
+        if (q) { done = true; resolve(q); }
+        else if (pending === 0) { done = true; resolve(null); }
+      };
+      copies.forEach((own) => { runCopy(own).then(settle, () => settle(null)); });
+    });
   };
 
   // ---------- Step 4: Fire all question-generation requests in parallel ----------
@@ -896,7 +1094,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   });
   // A pool of workers takes planned topics from a queue. When the queue runs low, more topics are planned right
   // away, so a question starts as soon as a lane is free, while others are still in progress.
-  const queue: { topic: PlannedTopic; idx: number }[] = topics.map((topic, idx) => ({ topic, idx }));
+  const queue: { topic: PlannedTopic; idx: number; retries: number }[] = topics.map((topic, idx) => ({ topic, idx, retries: 0 }));
   let slotCounter = topics.length;
   let refilling: Promise<boolean> | null = null;
   const refill = (): Promise<boolean> => {
@@ -908,7 +1106,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           ...workingPool[(slotCounter + i) % workingPool.length],
           difficultyTier: tier,
         }));
-        for (const topic of extra) queue.push({ topic, idx: slotCounter++ });
+        for (const topic of extra) queue.push({ topic, idx: slotCounter++, retries: 0 });
         return extra.length > 0;
       })().finally(() => { refilling = null; });
     }
@@ -917,21 +1115,32 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const worker = async (): Promise<void> => {
     for (;;) {
       if (stopped || shouldStop?.() || signal?.aborted || questions.length >= count) return;
+      // Plan more topics as soon as the queue is shorter than the number of lanes, so every lane has a topic to start on.
+      if (queue.length < GENERATION_CONCURRENCY && questions.length < count) void refill();
       if (queue.length === 0) {
         if (questionsInProgress > 0) { await new Promise((r) => setTimeout(r, 300)); continue; }
         if (!(await refill())) return;
         continue;
       }
-      const allowedInProgress = Math.ceil(1.5 * Math.max(0, count - questions.length));
-      if (questionsInProgress >= allowedInProgress) { await new Promise((r) => setTimeout(r, 300)); continue; }
-      const { topic, idx } = queue.shift()!;
+      // Every worker lane runs a question at once, so the speed does not drop as the set nears its full count.
+      if (questionsInProgress >= GENERATION_CONCURRENCY) { await new Promise((r) => setTimeout(r, 300)); continue; }
+      const { topic, idx, retries } = queue.shift()!;
       const parts = focusParts(topic.subtopic);
       // A planned topic carries its own focus (one drug class, one part of a subtopic); otherwise rotate the parts.
       const focus = topic.focus ?? (parts.length > 1 ? parts[idx % parts.length] : undefined);
       questionsInProgress += 1;
       const q = await generateSingleQuestion(topic, 0, focus, itemShape(idx, exam)).finally(() => { questionsInProgress -= 1; });
       completedCount += 1;
-      if (q) questions.push(q);
+      if (q && questions.length >= count) {
+        // Questions still in flight when the target was reached are discarded, so the set never goes over the count asked for.
+        logStage('drop:over-target', 0);
+      } else if (q) {
+        questions.push(q);
+        reportQuestion('accepted');
+      } else if (retries < MAX_TOPIC_RETRIES && !stopped && !signal?.aborted) {
+        // The call failed or the question was dropped: the same topic goes back in the queue, so it is written again.
+        queue.push({ topic, idx, retries: retries + 1 });
+      }
       onProgress?.(questions.length, count, completedCount, Math.max(completedCount, slotCounter));
       if (onBatch && questions.length > 0 && completedCount % Math.max(1, Math.floor(count / 2)) === 0) {
         const p = onBatch(questions.slice());

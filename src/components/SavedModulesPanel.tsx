@@ -1,8 +1,7 @@
 // Saved question banks: every generated module, kept whole, so it can be finished later.
 // Resuming reopens the same questions in the Test Runner, which restores the answers and position.
 import React, { useEffect, useState } from 'react';
-import { BookOpen, Play, Trash2, RefreshCw, Copy, ShieldCheck } from 'lucide-react';
-import { checkMany, proofOf } from '../lib/answerProof.ts';
+import { BookOpen, Play, Trash2, RefreshCw, Copy } from 'lucide-react';
 import { cleanQuestions } from '../lib/questionCleanup.ts';
 import type { ClinicalQuestion, ExamType } from '../types.ts';
 import {
@@ -22,30 +21,6 @@ export const SavedModulesPanel: React.FC<SavedModulesPanelProps> = ({ onLaunchTe
   const [busyId, setBusyId] = useState<string | null>(null);
   const [duplicates, setDuplicates] = useState<ReturnType<typeof findDuplicates> | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [verifying, setVerifying] = useState(false);
-  const [verifyProgress, setVerifyProgress] = useState('');
-
-  // Checks every stored question's answer with evidence. Results are kept, so this runs once per question.
-  const verifyStored = async () => {
-    setError(null);
-    setNotice(null);
-    setVerifying(true);
-    setVerifyProgress('Checking…');
-    try {
-      const items = await storedQuestions();
-      const proofs = await checkMany(items.map((i) => i.question), (done, total) => setVerifyProgress(`Checking ${done}/${total}…`));
-      const ids = [...new Set(items.map((i) => i.question.id))];
-      const tally = { VERIFIED: 0, UNVERIFIED: 0, CONTESTED: 0, 'NOT CHECKED': 0 } as Record<string, number>;
-      for (const id of ids) tally[proofs.get(id)?.proof ?? 'NOT CHECKED'] += 1;
-      setNotice(`Answer check on ${ids.length} questions: ${tally.VERIFIED} verified, ${tally.CONTESTED} contested, ${tally.UNVERIFIED} unverified, ${tally['NOT CHECKED']} not checked (retry later).`);
-      if (duplicates) setDuplicates(findDuplicates(items));
-    } catch (err: any) {
-      setError(err?.message || 'Answer check failed.');
-    } finally {
-      setVerifying(false);
-    }
-  };
-
   const findRepeats = async () => {
     setError(null);
     try {
@@ -72,15 +47,9 @@ export const SavedModulesPanel: React.FC<SavedModulesPanelProps> = ({ onLaunchTe
     try {
       const saved = await getModule(id);
       if (!saved) throw new Error('This question bank is no longer stored.');
-      // Only questions whose answer has proof are shown; the rest need a check first.
-      const proven = cleanQuestions(saved.questions).filter((q) => proofOf(q.id)?.proof === 'VERIFIED');
-      if (proven.length === 0) {
-        throw new Error('None of this bank’s answers has proof yet. Run "Verify answers" first.');
-      }
-      if (proven.length < saved.questions.length) {
-        setNotice(`${saved.questions.length - proven.length} question(s) without proof were left out.`);
-      }
-      onLaunchTest(proven, saved.mode, saved.exam);
+      const questions = cleanQuestions(saved.questions);
+      if (questions.length === 0) throw new Error('This question bank has no questions.');
+      onLaunchTest(questions, saved.mode, saved.exam);
     } catch (err: any) {
       setError(err?.message || 'Could not reopen this question bank.');
     } finally {
@@ -110,9 +79,6 @@ export const SavedModulesPanel: React.FC<SavedModulesPanelProps> = ({ onLaunchTe
             Every generated bank is kept as it was. Resume to continue where you stopped.
           </div>
         </div>
-        <button onClick={verifyStored} disabled={verifying} className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 disabled:opacity-40 flex items-center gap-1">
-          <ShieldCheck className="w-3 h-3" /> {verifying ? verifyProgress : 'Verify answers'}
-        </button>
         <button onClick={findRepeats} className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 flex items-center gap-1">
           <Copy className="w-3 h-3" /> Find duplicates
         </button>
@@ -142,10 +108,6 @@ export const SavedModulesPanel: React.FC<SavedModulesPanelProps> = ({ onLaunchTe
                   <div className="text-slate-700">{(side.question.stem || side.question.questionText || '').slice(0, 160)}</div>
                   <div className="text-slate-500">
                     From <span className="font-semibold">{side.source}</span> · Key {side.question.correctOption}: {side.question.options.find((o) => o.id === side.question.correctOption)?.text ?? '—'}
-                    {' · '}
-                    <span className={`font-bold ${proofOf(side.question.id)?.proof === 'VERIFIED' ? 'text-emerald-700' : 'text-rose-700'}`}>
-                      {proofOf(side.question.id)?.proof ?? 'not checked'}
-                    </span>
                   </div>
                 </div>
               ))}

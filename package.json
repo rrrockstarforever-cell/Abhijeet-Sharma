@@ -13,7 +13,7 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "app": "npm run build && npm run bundle:server && npm run check:secrets && electron .",
-    "appdist": "npm run build && npm run bundle:server && npm run check:secrets && electron-builder --win nsis --x64",
+    "appdist": "npm run build && npm run bundle:server && npm run check:secrets && node tools/copy-library.mjs && electron-builder --win nsis --x64",
     "bundle:server": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=server.mjs --external:vite",
     "debug:center": "node tools/debug-center/server.mjs",
     "debug:center:launch": "node tools/debug-center/launch.mjs",
@@ -100,7 +100,12 @@
       "deleteAppDataOnUninstall": false,
       "artifactName": "PulseMed-Setup-${version}.exe"
     },
-    "extraResources": []
+    "extraResources": [
+      {
+        "from": "build/library",
+        "to": "library"
+      }
+    ]
   },
   "description": "Pulse Med - AI-assisted NEET-PG / INI-CET / AMC CAT exam preparation desktop app",
   "author": {

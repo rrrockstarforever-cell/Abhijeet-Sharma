@@ -14,3 +14,5 @@ image-first-test-parallel.txt
 bank-build-result.json
 bank-build-2.json
 tools/image-first-results.json
+
+build/library/

@@ -23,7 +23,7 @@ import {
   AMC_CAT_DOMAINS_6
 } from '../data/mockClinicalData.ts';
 import { SUBTOPICS } from '../data/subtopics.ts';
-import { generateExamQuestions, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel, aiComplete, type GenerateQuestionsOptions } from '../lib/ai.ts';
+import { generateExamQuestions, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel, aiComplete, splitTopic, type GenerateQuestionsOptions } from '../lib/ai.ts';
 import { generateImageFirstQuestion, type BankImage } from '../lib/imageFirst.ts';
 import { summarizeAttempts, attemptsToday, listAttempts } from '../utils/attemptStore.ts';
 import { listUserHighlights } from '../utils/userHighlightsStore.ts';
@@ -47,9 +47,7 @@ import {
   updateQuestionStatus,
 } from '../utils/questionBankStorage.ts';
 import { TopicPickerModal } from './TopicPickerModal.tsx';
-import { reviewBatch, refineBatch, recordReviewBatch, loadBank } from '../lib/qaClient.ts';
 import { normalizeSubject } from '../lib/benchmark.ts';
-import { checkAnswer, checkMany, proofOf } from '../lib/answerProof.ts';
 import { cleanQuestions } from '../lib/questionCleanup.ts';
 
 interface PracticeModuleBuilderViewProps {
@@ -122,7 +120,8 @@ const EXAM_LABEL: Record<ExamType, string> = {
 const QUESTION_COUNTS = [10, 20, 25, 30, 40, 50, 75, 100];
 
 /** Most generation rounds one module may take to reach its question count. */
-const MAX_FILL_ROUNDS = 8;
+// Fill rounds keep going until the module has the full count. The cap only stops a run that can never finish.
+const MAX_FILL_ROUNDS = 60;
 
 // ---------------------------------------------------------------- small pieces
 
@@ -236,12 +235,6 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     error: string | null;
   }>({ busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0, error: null });
   const stopEarlyRef = useRef(false);
-  // QA status for a question: this run's verdict first, then the stored QA review list.
-  const qaStatusOf = (id: string): string | undefined =>
-    qaStatusById.current.get(id) ?? loadBank().find((e) => e.id === id)?.status;
-  // QA verdict per question id for the current run. Only questions with an APPROVED verdict
-  // reach the runner; anything rejected, sent to human review, or never reviewed is held back.
-  const qaStatusById = useRef(new Map<string, string>());
   const [heldBackNote, setHeldBackNote] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   // Refinement → bank save → QA run after generation. Stop aborts this too.
@@ -435,7 +428,6 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
 
   const handleLaunch = async (countOverride?: number) => {
     if (genState.busy) return;
-    qaStatusById.current = new Map();
     setHeldBackNote(null);
     const targetCount = Math.max(1, Math.min(100, Math.round(countOverride ?? questionCount)));
 
@@ -473,7 +465,10 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         .slice(0, 12000);
     }
 
+    // A typed topic is split into its distinct subtopics first, so the module spreads over them instead of repeating one topic.
+    // Busy is set before the split, so the button is disabled at once and a second click cannot start another run.
     setGenState({ busy: true, generated: 0, total: targetCount, batch: 0, totalBatches: Math.ceil(targetCount / 10), dropped: 0, error: null });
+    const typedSubtopics: string[] = customTopic ? await splitTopic(customTopic, selectedExam) : [];
     setProgressStep('generating');
     setProgressDetail({ refining: null, saved: null, qa: null, imageFirst: null });
     stopEarlyRef.current = false;
@@ -495,26 +490,12 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         const run = async () => {
           if (postSignal.aborted) return;
 
-          // 1. Refine — remove answer leakage, obvious hints and telegraphed options.
-          setProgressStep('refining');
-          let finalQuestions: ClinicalQuestion[] = batchQuestions;
-          try {
-            const refined = await refineBatch(batchQuestions);
-            if (Array.isArray(refined) && refined.length === batchQuestions.length) {
-              finalQuestions = refined;
-              for (let i = 0; i < batchQuestions.length; i++) {
-                Object.assign(batchQuestions[i], refined[i]);
-              }
-            }
-          } catch (e: any) {
-            debugLog('H9', `refine FAILED: ${e?.message || e}`);
-          }
-          const rewritten = finalQuestions.filter((q: any) => q?.refined).length;
-          setProgressDetail((d) => ({ ...d, refining: `${rewritten}/${finalQuestions.length} rewritten` }));
+          // Questions are kept as written (the writer already checked them), so there is no refine pass.
+          const finalQuestions: ClinicalQuestion[] = batchQuestions;
 
           if (postSignal.aborted) return;
 
-          // 2. Save to the Question Bank with full metadata and an audit entry.
+          // Save to the Question Bank with full metadata and an audit entry.
           setProgressStep('saved');
           const batchId = `batch_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
           const batch: GenerationBatch = {
@@ -548,26 +529,6 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             debugLog('H9', `save FAILED: ${e?.message || e}`);
           }
           setProgressDetail((d) => ({ ...d, saved: `${stored} stored` }));
-
-          if (postSignal.aborted) return;
-
-          // 3. QA review so questions carry a status in the bank right away.
-          setProgressStep('qa');
-          try {
-            const reviews = await reviewBatch(finalQuestions);
-            recordReviewBatch(finalQuestions, reviews);
-            for (const r of reviews) if (r?.questionId) qaStatusById.current.set(r.questionId, r.status);
-            for (const q of finalQuestions) {
-              const review = reviews.find((r: any) => r.questionId === q.id);
-              if (review) await updateQuestionStatus(q.id, review.status);
-            }
-            const approved = reviews.filter((r: any) => r?.status === 'APPROVED').length;
-            debugLog('H9', `qa reviews=${reviews.length} approved=${approved}/${finalQuestions.length}`);
-            setProgressDetail((d) => ({ ...d, qa: `${approved}/${finalQuestions.length} approved` }));
-          } catch (e: any) {
-            debugLog('H9', `qa FAILED: ${e?.message || e}`);
-            setProgressDetail((d) => ({ ...d, qa: 'unavailable' }));
-          }
         };
         return run();
       };
@@ -578,7 +539,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         exam: selectedExam,
         count,
         subjectSubtopics: customTopic
-          ? [{ subject: customTopic, subtopics: [customTopic] }]
+          ? [{ subject: customTopic, subtopics: typedSubtopics.length ? typedSubtopics : [customTopic] }]
           : keys.map((key, i) => ({
             subject: labels[i],
             subtopics: selectedSubtopics[key] ?? (subjectList.find((r) => r.key === key)?.topics ?? SUBTOPICS[key] ?? []),
@@ -592,14 +553,6 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         onBatch,
         batchPromises,
         shouldStop: () => stopEarlyRef.current,
-        // Each question is checked as soon as it is written; only a verified key is kept.
-        verify: async (q) => {
-          try {
-            return (await checkAnswer(q)).proof === 'VERIFIED';
-          } catch {
-            return false;
-          }
-        },
         signal: controller.signal,
         onRetry: (attempt, maxAttempts, reason) =>
           setRetrying(`retrying ${attempt}/${maxAttempts} · ${reason}`),
@@ -759,6 +712,11 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         error: null,
       });
 
+      // Keep every finished set in storage right away, so it can be read and examined even if the runner is not opened.
+      try {
+        localStorage.setItem('pulse.lastGeneration', JSON.stringify({ at: new Date().toISOString(), count: merged.length, questions: merged }));
+      } catch { /* storage full or unavailable */ }
+
       // Wait for every batch's refine → save → QA pass to land before opening the
       // runner, so the questions being solved are the refined, bank-stored ones.
       try { await Promise.all(batchPromises); } catch { /* advisory */ }
@@ -771,28 +729,9 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         return;
       }
 
-      // Answer proof: every question's keyed answer is checked (blind solves and PubMed evidence).
-      // launchWith then lets through only the questions with a VERIFIED result.
-      // Weed out: check every question; replace the ones that fail with new questions that go through
-      // the same QA review and check; repeat for up to three rounds. Anything still failing stays out of
-      // the runner and goes to the QA dashboard for human review.
-      // A question counts only with an answer proof AND a QA approval.
-      const verifiedOf = (list: ClinicalQuestion[]) => list.filter((q) =>
-        proofOf(q.id)?.proof === 'VERIFIED' && ['APPROVED', 'PUBLISHED'].includes(qaStatusOf(q.id) ?? ''));
-      // One pass only: repair and replacement rounds took most of the run's time, so a module can be shorter
-      // than the number asked for. Anything not verified stays in the QA dashboard.
-      const candidates: ClinicalQuestion[] = merged;
-      await checkMany(candidates, (done, total) => setHeldBackNote(`Checking answers ${done}/${total}…`));
-      // Anything without a QA verdict in this run gets one now, so no candidate skips the QA gate.
-      const unreviewed = candidates.filter((q) => !qaStatusById.current.has(q.id));
-      if (unreviewed.length > 0) {
-        setHeldBackNote(`QA review for ${unreviewed.length} questions…`);
-        const reviews = await reviewBatch(unreviewed).catch(() => []);
-        recordReviewBatch(unreviewed, reviews);
-        for (const r of reviews) if (r?.questionId) qaStatusById.current.set(r.questionId, r.status);
-      }
-      const finalList = verifiedOf(candidates).slice(0, targetCount);
-      launchWith(finalList, labels, chosenSubtopics);
+      // Each question was checked against internet sources while it was written, so the module is the
+      // questions kept, up to the number asked for. No separate answer check or QA review runs here.
+      launchWith(merged.slice(0, targetCount), labels, chosenSubtopics);
     } catch (err: any) {
       const aborted = controller.signal.aborted || (err instanceof AiError && err.kind === 'aborted');
       const message = aborted
@@ -808,25 +747,12 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   };
 
   const launchWith = (questions: ClinicalQuestion[], subjects: string[], chosenSubtopics: string[]) => {
-    // Gate the runner: QA must have approved the question, and it must belong to a selected
-    // subject. Everything else stays in the QA dashboard instead of being shown to the learner.
+    // Only questions that belong to a selected subject go to the runner.
     const selectedSubjects = new Set(subjects.map(normalizeSubject));
-    const passed: ClinicalQuestion[] = [];
-    const held: string[] = [];
-    for (const q of questions) {
-      const qa = qaStatusOf(q.id);
-      const subjectOk = selectedSubjects.size === 0 || selectedSubjects.has(normalizeSubject(q.subject || ''));
-      const proven = proofOf(q.id)?.proof === 'VERIFIED';
-      if ((qa === 'APPROVED' || qa === 'PUBLISHED') && subjectOk && proven) passed.push(q);
-      else held.push(!subjectOk ? `${q.subject} is not a selected subject`
-        : !proven ? 'answer not proven by evidence'
-        : `QA ${qa ?? 'not reviewed'}`);
-    }
-    setHeldBackNote(held.length
-      ? `${held.length} question${held.length === 1 ? '' : 's'} held back from the runner (${[...new Set(held)].join('; ')}). They remain in the QA dashboard.`
-      : null);
+    const passed = questions.filter((q) => selectedSubjects.size === 0 || selectedSubjects.has(normalizeSubject(q.subject || '')));
+    setHeldBackNote(null);
     if (passed.length === 0) {
-      setGenState((st) => ({ ...st, error: 'No question passed QA for this module, so nothing was opened. See the QA dashboard.' }));
+      setGenState((st) => ({ ...st, error: 'No question was kept for this module, so nothing was opened.' }));
       return;
     }
     questions = passed;

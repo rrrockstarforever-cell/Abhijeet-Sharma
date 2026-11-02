@@ -1,8 +1,8 @@
 // server.ts
 import express from "express";
-import path from "path";
-import os from "os";
-import fs from "fs";
+import path2 from "path";
+import os2 from "os";
+import fs2 from "fs";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
@@ -482,6 +482,78 @@ async function chat({ provider, model, system, messages, json, effort, search, s
   return text;
 }
 
+// server/books.mjs
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+var DATA_DIR = process.env.PULSE_DATA_DIR || path.join(os.homedir(), ".pulse-med");
+var LIBRARY_PATH = process.env.PULSE_LIBRARY_DB || path.join(DATA_DIR, "books", "pulse-library.db");
+var db = null;
+function library() {
+  if (db) return db;
+  if (!fs.existsSync(LIBRARY_PATH)) return null;
+  db = new DatabaseSync(LIBRARY_PATH, { readOnly: true });
+  return db;
+}
+var SUBJECT_MAP = [
+  [/forensic/i, ["Forensic Medicine"]],
+  [/pharmacolog/i, ["Pharmacology"]],
+  [/physiolog/i, ["Physiology"]],
+  [/biochem/i, ["Biochemistry"]],
+  [/patholog/i, ["Pathology"]],
+  [/microbiolog/i, ["Microbiology"]],
+  [/community|preventive|\bpsm\b/i, ["Community Medicine"]],
+  [/anatom/i, ["Anatomy"]],
+  [/general medicine|internal medicine/i, ["General Medicine"]],
+  [/surg/i, ["General Surgery"]],
+  [/obstet|gynae/i, ["Obstetrics & Gynaecology"]],
+  [/pediatric|paediatric/i, ["Pediatrics"]],
+  [/orthop/i, ["Orthopedics"]],
+  [/\bENT\b|oto-?rhino|otolaryng/i, ["ENT"]],
+  [/ophthalm/i, ["Ophthalmology"]],
+  [/dermatolog/i, ["Dermatology"]],
+  [/psychiatr/i, ["Psychiatry"]],
+  [/radio/i, ["Radiology"]]
+];
+function librarySubjects(subject) {
+  const s = String(subject || "");
+  const hit = SUBJECT_MAP.find(([re]) => re.test(s));
+  return hit ? hit[1] : [];
+}
+var STOP = /* @__PURE__ */ new Set(["with", "from", "that", "this", "have", "were", "their", "which", "also", "after", "before", "than", "such", "only", "other", "most", "some", "used", "will", "does", "into", "when", "while", "there", "these", "those", "about", "among", "through", "where", "being", "given", "shows", "patient", "patients", "should", "could", "would", "they", "them", "been", "make", "makes", "drug", "drugs"]);
+function searchLibrary(query, subject = "", limit = 2, excerptChars = 700) {
+  const database = library();
+  if (!database) return [];
+  const terms = [...new Set(String(query || "").toLowerCase().match(/[a-z][a-z-]{3,}/g) || [])].filter((t) => !STOP.has(t));
+  if (!terms.length) return [];
+  const subjects = librarySubjects(subject);
+  const subjectSql = subjects.length ? ` AND b.subject IN (${subjects.map(() => "?").join(",")})` : "";
+  const select = `SELECT b.id AS book_id, b.title AS title, p.page_no AS page_no, p.text AS text, bm25(pages_fts) AS rank
+    FROM pages_fts JOIN pages p ON p.id = pages_fts.rowid JOIN books b ON b.id = p.book_id
+    WHERE pages_fts MATCH ?${subjectSql} ORDER BY rank LIMIT ?`;
+  const attempts = [terms.map((t) => `"${t}"`).join(" AND ")];
+  if (terms.length > 1) attempts.push(terms.map((t) => `"${t}"`).join(" OR "));
+  let rows = [];
+  for (const match of attempts) {
+    rows = database.prepare(select).all(match, ...subjects, limit);
+    if (rows.length) break;
+  }
+  return rows.map((r) => {
+    const lower = String(r.text).toLowerCase();
+    const hits = terms.map((t) => lower.indexOf(t)).filter((i) => i >= 0);
+    const start = Math.max(0, (hits.length ? Math.min(...hits) : 0) - 150);
+    return {
+      title: `${r.title}, page ${r.page_no}`,
+      url: `book:${r.book_id}#page=${r.page_no}`,
+      text: String(r.text).slice(start, start + excerptChars)
+    };
+  });
+}
+function bookPassages(query, limit = 2, subject = "") {
+  return searchLibrary(query, subject, limit);
+}
+
 // server/web.mjs
 var UA = "Mozilla/5.0 (X11; Linux x86_64) PulseMed/0.2 (study tool)";
 var TRUSTED = /(nih\.gov|ncbi\.nlm|who\.int|cdc\.gov|nice\.org\.uk|medlineplus|mayoclinic|msdmanuals|statpearls|radiopaedia|cochrane|bmj\.com|thelancet|nejm|jamanetwork|icmr|mohfw|aiims)/i;
@@ -607,8 +679,10 @@ function usesDrugLabels(subject) {
   return !subject || /pharmacolog|medicine|therap|drug|anesth|anaesth|toxicolog/i.test(String(subject));
 }
 async function literatureSources(query, subject) {
+  const drugSubject = usesDrugLabels(subject);
+  const book = bookPassages(query, 2, subject);
   const [label, subjectPapers] = await Promise.all([
-    usesDrugLabels(subject) ? openFdaLabel(query).catch(() => []) : Promise.resolve([]),
+    drugSubject ? openFdaLabel(query).catch(() => []) : Promise.resolve([]),
     europePmc(query, journalsFor(subject)).catch(() => [])
   ]);
   let papers = subjectPapers;
@@ -617,11 +691,12 @@ async function literatureSources(query, subject) {
     const seen = new Set(subjectPapers.map((p) => p.title));
     papers = [...subjectPapers, ...wider.filter((p) => !seen.has(p.title))];
   }
-  return [...label, ...papers].slice(0, 4);
+  return [...book, ...label, ...papers].slice(0, 4);
 }
 var SOURCE_REGISTRY = [
   { id: "europepmc", name: "Europe PMC abstracts (subject Indian journals)", licence: "Abstracts free; full text varies by article", fetch: "Europe PMC REST API", status: "live" },
   { id: "openfda", name: "openFDA drug labels", licence: "US government data (openFDA terms)", fetch: "api.fda.gov", status: "live" },
+  { id: "library", name: "Your textbook library (pulse-library.db, 37 books)", licence: "Books the user owns; excerpts only", fetch: "local SQLite full-text index", status: "live" },
   { id: "bookshelf", name: "NCBI Bookshelf (StatPearls and open textbooks)", licence: "Varies per book; StatPearls is free to read", fetch: "NCBI web pages", status: "blocked: NCBI shows a bot check instead of chapter text" },
   { id: "reference-pages", name: "Reference websites (TeachMeAnatomy, CV Physiology, LibreTexts, WebPath, DermNet, EyeWiki, NHSRC treatment guidelines and others)", licence: "Varies per site; check before quoting", fetch: "page text only; no search yet", status: "reference: readable pages, not searched per question" }
 ];
@@ -1970,17 +2045,18 @@ function extractJson(raw) {
 // server.ts
 dotenv.config();
 var __filename = fileURLToPath(import.meta.url);
-var __dirname = path.dirname(__filename);
+var __dirname = path2.dirname(__filename);
 var app = express();
 var PORT = parseInt(process.env.PORT || "3000", 10);
-var DATA_DIR = process.env.PULSE_DATA_DIR || path.join(os.homedir(), ".pulse-med");
-var ENV_FILE = path.join(DATA_DIR, ".env");
+var DATA_DIR2 = process.env.PULSE_DATA_DIR || path2.join(os2.homedir(), ".pulse-med");
+var ENV_FILE = path2.join(DATA_DIR2, ".env");
 try {
   dotenv.config({ path: ENV_FILE });
 } catch {
 }
 app.use("/api/ai/complete-images", express.json({ limit: "30mb" }));
 app.use("/api/ocr/nemotron", express.json({ limit: "1mb" }));
+app.use("/api/export/questions", express.json({ limit: "5mb" }));
 app.use(express.json());
 var OPENCODE_DEFAULT_MODEL = "deepseek-v4.1-flash";
 var DEFAULT_MODELS = {
@@ -2040,22 +2116,22 @@ function getGemini() {
   return geminiClient.client;
 }
 function writeEnvValue(name, value) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs2.mkdirSync(DATA_DIR2, { recursive: true });
   let lines = [];
-  if (fs.existsSync(ENV_FILE)) {
-    const existing = fs.readFileSync(ENV_FILE, "utf8").split(/\r?\n/);
+  if (fs2.existsSync(ENV_FILE)) {
+    const existing = fs2.readFileSync(ENV_FILE, "utf8").split(/\r?\n/);
     const matcher = new RegExp(`^${name}\\s*=`);
     lines = existing.filter((l) => l.trim() !== "" && !matcher.test(l));
   }
   lines.push(`${name}=${value}`, "");
-  fs.writeFileSync(ENV_FILE, lines.join("\n"), "utf8");
+  fs2.writeFileSync(ENV_FILE, lines.join("\n"), "utf8");
   process.env[name] = value;
 }
 function clearEnvValue(name) {
-  if (fs.existsSync(ENV_FILE)) {
+  if (fs2.existsSync(ENV_FILE)) {
     const matcher = new RegExp(`^${name}\\s*=`);
-    const lines = fs.readFileSync(ENV_FILE, "utf8").split(/\r?\n/).filter((l) => l.trim() !== "" && !matcher.test(l));
-    fs.writeFileSync(ENV_FILE, lines.length ? lines.join("\n") + "\n" : "", "utf8");
+    const lines = fs2.readFileSync(ENV_FILE, "utf8").split(/\r?\n/).filter((l) => l.trim() !== "" && !matcher.test(l));
+    fs2.writeFileSync(ENV_FILE, lines.length ? lines.join("\n") + "\n" : "", "utf8");
   }
   delete process.env[name];
 }
@@ -2068,11 +2144,11 @@ var OPENCODE_SESSION = `pulsemed-${Math.random().toString(36).slice(2)}`;
 var OPENCODE_MODELS_URL = "https://opencode.ai/inference/v1/models";
 var OPENCODE_GO_MODELS_URL = "https://opencode.ai/inference/go/v1/models";
 function opencodeAuthFile() {
-  return process.env.OPENCODE_AUTH_FILE || path.join(os.homedir(), ".local", "share", "opencode", "auth.json");
+  return process.env.OPENCODE_AUTH_FILE || path2.join(os2.homedir(), ".local", "share", "opencode", "auth.json");
 }
 function opencodeKeyFromCli() {
   try {
-    const raw = JSON.parse(fs.readFileSync(opencodeAuthFile(), "utf8"));
+    const raw = JSON.parse(fs2.readFileSync(opencodeAuthFile(), "utf8"));
     const entry = raw?.opencode ?? raw?.["opencode-go"] ?? raw?.["opencode-zen"];
     const key = entry?.key ?? entry?.apiKey ?? entry?.access;
     return typeof key === "string" ? key.trim() : "";
@@ -2125,33 +2201,37 @@ function notConnectedMessage(providerId) {
   }
   return `${providerId.charAt(0).toUpperCase() + providerId.slice(1)} is not signed in. Connect an AI provider in Settings \u2192 AI Subscription Hub.`;
 }
-var NVIDIA_CHAT_MODELS = [
-  "nvidia/nemotron-3.5-super-vl-120b-a12b",
-  "nvidia/nemotron-3-ultra-550b-a55b",
-  "nvidia/nemotron-3.5-lightning-30b-a3b",
-  "nvidia/nemotron-3.5-bolt-e4b"
-];
+var nvidiaNoJsonFormat = /* @__PURE__ */ new Set();
 var NVIDIA_SPREAD_MODELS = [
-  "nvidia/nemotron-3.5-super-vl-120b-a12b",
-  "nvidia/nemotron-3-ultra-550b-a55b",
-  "nvidia/nemotron-3.5-lightning-30b-a3b"
+  "nvidia/nemotron-3.5-super-vl-120b-a12b"
 ];
 var nvidiaSpreadCursor = 0;
-var NVIDIA_SLOTS = Number(process.env.NVIDIA_MAX_IN_FLIGHT || Infinity);
-var nvidiaInFlight = 0;
-var nvidiaWaiting = [];
-async function nvidiaSlot(task) {
-  if (nvidiaInFlight >= NVIDIA_SLOTS) await new Promise((resolve) => nvidiaWaiting.push(resolve));
-  nvidiaInFlight += 1;
-  try {
-    return await task();
-  } finally {
-    nvidiaInFlight -= 1;
-    nvidiaWaiting.shift()?.();
-  }
+var nvidiaStats = {
+  started: 0,
+  inFlight: 0,
+  finished: { ok: 0, failed: 0, stopped: 0 },
+  // Questions the app kept, and those it dropped by reason (after the model replied).
+  accepted: 0,
+  dropped: {},
+  byModel: {},
+  events: []
+};
+function nvidiaEvent(model, outcome, detail = "") {
+  nvidiaStats.events.push({ at: (/* @__PURE__ */ new Date()).toISOString().slice(11, 19), model: model.replace("nvidia/", ""), outcome, detail });
+  if (nvidiaStats.events.length > 40) nvidiaStats.events.shift();
+}
+function nvidiaAttempt(model, outcome, detail = "") {
+  const counts = nvidiaStats.byModel[model] ??= { ok: 0, refused: 0, error: 0, timeout: 0 };
+  counts[outcome] += 1;
+  nvidiaEvent(model, outcome, detail);
+}
+function nvidiaFinish(model, outcome, detail = "") {
+  nvidiaStats.inFlight = Math.max(0, nvidiaStats.inFlight - 1);
+  nvidiaStats.finished[outcome] += 1;
+  nvidiaEvent(model, `question ${outcome}`, detail);
 }
 async function runCompletion(opts) {
-  const { provider, model, system, messages, json, effort, search, signal, images, spread } = opts;
+  const { provider, model, system, messages, json, effort, search, signal, images } = opts;
   if (provider === "opencode") {
     const key = opencodeKey();
     if (!key) throw new ApiError(notConnectedMessage("opencode"), 401);
@@ -2369,7 +2449,12 @@ async function runCompletion(opts) {
   if (provider === "nvidia") {
     const key = nvidiaKey();
     if (!key) throw new ApiError(notConnectedMessage("nvidia"), 401);
-    let model_ = model || DEFAULT_MODELS.nvidia;
+    nvidiaStats.started += 1;
+    nvidiaStats.inFlight += 1;
+    const pinned = Boolean(model);
+    const spreadStart = nvidiaSpreadCursor++ % NVIDIA_SPREAD_MODELS.length;
+    let spreadIndex = spreadStart;
+    let model_ = pinned ? String(model) : images?.length ? DEFAULT_MODELS.nvidia : NVIDIA_SPREAD_MODELS[spreadIndex];
     const payloadMessages = [
       ...system ? [{ role: "system", content: system }] : [],
       ...messages.map((m, i) => ({
@@ -2377,70 +2462,86 @@ async function runCompletion(opts) {
         content: images?.length && i === messages.length - 1 ? [{ type: "text", text: m.content }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))] : m.content
       }))
     ];
-    let chain;
-    if (images?.length) {
-      chain = [model_];
-    } else if (spread) {
-      const start = nvidiaSpreadCursor++ % NVIDIA_SPREAD_MODELS.length;
-      const rotated = [...NVIDIA_SPREAD_MODELS.slice(start), ...NVIDIA_SPREAD_MODELS.slice(0, start)];
-      chain = rotated.slice(0, 3);
-    } else {
-      chain = [model_, ...NVIDIA_CHAT_MODELS.filter((m) => m !== model_)].slice(0, 3);
-    }
+    const buildPayload = (withFormat2) => JSON.stringify({
+      model: model_,
+      messages: payloadMessages,
+      // Reading pages is transcription as much as writing, so keep it close to the source.
+      temperature: images?.length ? 0.3 : 0.7,
+      // Let a long clinical answer finish rather than starving the reasoning trace.
+      max_tokens: nvidiaTokenBudget(effort),
+      chat_template_kwargs: nvidiaReasoningKwargs(effort),
+      ...json && withFormat2 ? { response_format: { type: "json_object" } } : {}
+    });
+    let withFormat = Boolean(json) && !nvidiaNoJsonFormat.has(model_);
+    let payload = buildPayload(withFormat);
     let httpRes = null;
     let raw = "";
     let body = {};
-    for (const candidate of chain) {
-      model_ = candidate;
-      const payload = JSON.stringify({
-        model: model_,
-        messages: payloadMessages,
-        // Reading pages is transcription as much as writing, so keep it close to the source.
-        temperature: images?.length ? 0.3 : 0.7,
-        // Let a long clinical answer finish rather than starving the reasoning trace.
-        max_tokens: nvidiaTokenBudget(effort),
-        chat_template_kwargs: nvidiaReasoningKwargs(effort),
-        ...json ? { response_format: { type: "json_object" } } : {}
-      });
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        httpRes = await nvidiaSlot(() => fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      try {
+        httpRes = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${key}`
-          },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
           body: payload,
-          // A call that never returns would hold its question forever; give up after four minutes instead.
-          signal: signal ?? AbortSignal.timeout(24e4)
-        }));
-        raw = await httpRes.text();
-        console.log(`[nvidia] ${(/* @__PURE__ */ new Date()).toISOString().slice(11, 23)} ${opts.purpose ?? "unlabelled"} model=${model_} attempt=${attempt} status=${httpRes.status}`);
-        body = {};
-        try {
-          body = raw ? JSON.parse(raw) : {};
-        } catch {
+          // A call that never returns would hold its question forever; give up after 60 seconds, or sooner if the client stops.
+          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(6e4)]) : AbortSignal.timeout(6e4)
+        });
+      } catch (err) {
+        if (signal?.aborted) {
+          nvidiaFinish(model_, "stopped");
+          throw err;
         }
-        const rateLimited = httpRes.status === 429;
-        if (httpRes.ok || httpRes.status < 500 && !rateLimited) break;
-        aiLog({ provider: "nvidia", model: model_, status: httpRes.status, error: true, retry: attempt });
-        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, (rateLimited ? 4e3 : 1200) * attempt));
+        nvidiaAttempt(model_, err?.name === "TimeoutError" ? "timeout" : "error", err?.name ?? "error");
+        console.log(`[nvidia] ${(/* @__PURE__ */ new Date()).toISOString().slice(11, 23)} ${opts.purpose ?? "unlabelled"} model=${model_} failed=${err?.name ?? "error"}`);
+        httpRes = null;
+        if (attempt >= 3) break;
+        await new Promise((resolve) => setTimeout(resolve, 2e3 * attempt));
+        continue;
       }
-      if (httpRes.ok || httpRes.status !== 429) break;
-      aiLog({ provider: "nvidia", model: model_, status: 429, error: true, fallback: true });
+      raw = await httpRes.text();
+      console.log(`[nvidia] ${(/* @__PURE__ */ new Date()).toISOString().slice(11, 23)} ${opts.purpose ?? "unlabelled"} model=${model_} attempt=${attempt} status=${httpRes.status}`);
+      body = {};
+      try {
+        body = raw ? JSON.parse(raw) : {};
+      } catch {
+      }
+      if (httpRes.status === 400 && withFormat && /response_format/i.test(raw)) {
+        nvidiaNoJsonFormat.add(model_);
+        withFormat = false;
+        payload = buildPayload(false);
+        attempt -= 1;
+        continue;
+      }
+      const rateLimited = httpRes.status === 429;
+      nvidiaAttempt(model_, httpRes.ok ? "ok" : rateLimited ? "refused" : "error", String(httpRes.status));
+      if (httpRes.ok || httpRes.status < 500 && !rateLimited) break;
+      aiLog({ provider: "nvidia", model: model_, status: httpRes.status, error: true, retry: attempt });
+      if (!rateLimited && attempt >= 3) break;
+      if (rateLimited && !images?.length && !pinned) {
+        spreadIndex = (spreadIndex + 1) % NVIDIA_SPREAD_MODELS.length;
+        model_ = NVIDIA_SPREAD_MODELS[spreadIndex];
+        withFormat = Boolean(json) && !nvidiaNoJsonFormat.has(model_);
+        payload = buildPayload(withFormat);
+        if (spreadIndex !== spreadStart) continue;
+      }
+      if (attempt < 6) await new Promise((resolve) => setTimeout(resolve, rateLimited ? 5e3 : 1200 * attempt));
     }
     if (!httpRes || !httpRes.ok) {
       const status2 = httpRes?.status ?? 502;
       aiLog({ provider: "nvidia", model: model_, status: status2, error: true });
+      nvidiaFinish(model_, "failed", String(status2));
       const detail = providerErrorText(body, status2);
-      const extra = detail === `HTTP ${status2}` && raw ? ` \u2014 ${raw.replace(/\s+/g, " ").slice(0, 160)}` : "";
+      const extra = detail === `HTTP ${status2}` && raw ? ` \u2014 ${raw.replace(/s+/g, " ").slice(0, 160)}` : "";
       throw new ApiError(`NVIDIA: ${detail}${extra}`, status2 === 401 ? 401 : 502);
     }
     const content = body?.choices?.[0]?.message?.content;
     const text = typeof content === "string" ? content : "";
     aiLog({ provider: "nvidia", model: model_, status: httpRes.status, text_len: text.length, json: !!json });
     if (!text.trim()) {
+      nvidiaFinish(model_, "failed", "empty");
       throw new ApiError(`NVIDIA returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || "unknown"}).`, 502);
     }
+    nvidiaFinish(model_, "ok");
     return text;
   }
   const internal = INTERNAL_PROVIDER[provider];
@@ -2486,161 +2587,100 @@ app.get("/api/oauth/status", (req, res) => {
     defaults: DEFAULT_MODELS
   });
 });
+var splitCache = /* @__PURE__ */ new Map();
+app.post("/api/ai/split-topic", async (req, res) => {
+  const topic = String(req.body?.topic || "").trim().slice(0, 120);
+  const exam = String(req.body?.exam || "NEET-PG");
+  const provider = String(req.body?.provider || "");
+  const model = String(req.body?.model || "");
+  if (!topic || !provider) return res.json({ subtopics: [] });
+  const key = JSON.stringify({ topic, exam, provider, model });
+  const cached = splitCache.get(key);
+  if (cached) return res.json({ subtopics: cached });
+  const prompt = [
+    `You are an expert medical exam item writer for ${exam}.`,
+    `Split the topic "${topic}" into its distinct subtopics, sorted as an examiner would sort them:`,
+    "for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. Give 8 to 12 subtopics.",
+    "Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.",
+    "Give each subtopic a priority from 1 to 10 for how often it is tested.",
+    `Return only a JSON array of {"subject": "${topic}", "subtopic": "<name: items>", "priority": <1-10>}.`,
+    "Do not repeat any entry."
+  ].join("\n");
+  const splitWith = async (useModel) => {
+    const raw = await runCompletion({ provider, model: useModel, messages: [{ role: "user", content: prompt }], json: true, effort: "min" });
+    const parsed = extractJson(raw);
+    const asList = Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" ? Object.values(parsed).find(Array.isArray) ?? [parsed] : [];
+    console.log("[split-topic] model", useModel, "raw", String(raw).slice(0, 120), "items:", asList.length);
+    const list = asList.map((e) => typeof e === "string" ? e : e?.subtopic).filter((s) => typeof s === "string" && s.trim());
+    return [...new Set(list.map((s) => s.trim()))].slice(0, 12);
+  };
+  try {
+    let subtopics = await splitWith(model || void 0).catch(() => []);
+    if (!subtopics.length && provider === "nvidia") subtopics = await splitWith(DEFAULT_MODELS.nvidia).catch(() => []);
+    if (!subtopics.length) subtopics = [topic];
+    if (splitCache.size >= 50) splitCache.delete(splitCache.keys().next().value);
+    splitCache.set(key, subtopics);
+    return res.json({ subtopics });
+  } catch (err) {
+    console.log("[split-topic] failed:", err?.message || err);
+    return res.json({ subtopics: [topic] });
+  }
+});
 app.get("/api/ai/source-registry", (_req, res) => {
   return res.json({ sources: SOURCE_REGISTRY });
 });
-app.post("/api/ai/topic-sources", async (req, res) => {
-  const query = String(req.body?.query || "").trim().slice(0, 200);
-  const subject = String(req.body?.subject || "");
-  if (!query) return res.json({ sources: [] });
-  try {
-    const found = await literatureSources(query, subject);
-    return res.json({ sources: found.map((s) => ({ title: s.title, url: s.url, text: String(s.text || "").slice(0, 700) })) });
-  } catch {
-    return res.json({ sources: [] });
-  }
-});
-var SEARCH_STOP = /* @__PURE__ */ new Set(["that", "with", "from", "this", "have", "were", "their", "which", "also", "after", "before", "than", "such", "only", "other", "most", "some", "used", "will", "does", "into", "when", "while", "there", "these", "those", "about", "among", "through", "where", "being", "given", "shows", "reduce", "reduces", "patient", "patients", "drug", "drugs", "should", "could", "would", "they", "them", "does", "have", "been", "make", "makes"]);
-function keywordQuery(text) {
-  const picked = [];
-  for (const w of text.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) ?? []) {
-    if (!SEARCH_STOP.has(w) && !picked.includes(w)) picked.push(w);
-    if (picked.length >= 6) break;
-  }
-  return picked.join(" ");
-}
-app.post("/api/qa/verify-answer", async (req, res) => {
-  const tStart = Date.now();
-  const { question, provider, model } = req.body || {};
-  if (!question || !Array.isArray(question.options) || !question.correctOption || !provider) {
-    return res.status(400).json({ error: "question (with options and correctOption) and provider are required." });
-  }
-  const complete = async (system, content, effort) => {
-    const purpose = system.includes("expert exam examiner") ? "check-solve" : system.includes("check whether medical evidence") ? "check-judge" : "check-other";
-    const waits = [5e3, 15e3, 3e4, 6e4, 9e4];
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return extractJson(await runCompletion({
-          provider,
-          model: model || DEFAULT_MODELS[provider] || DEFAULT_MODELS.opencode,
-          system,
-          messages: [{ role: "user", content }],
-          json: true,
-          effort,
-          spread: true,
-          purpose
-        }));
-      } catch (err) {
-        const rateLimited = /429|rate.?limit|too many requests/i.test(String(err?.message || err));
-        if (!rateLimited || attempt >= waits.length) throw err;
-        console.log(`[wait] ${(/* @__PURE__ */ new Date()).toISOString().slice(11, 23)} ${purpose} refused, waiting ${waits[attempt] / 1e3}s before attempt ${attempt + 2}`);
-        await new Promise((resolve) => setTimeout(resolve, waits[attempt]));
-      }
-    }
-  };
-  const keyed = String(question.correctOption).toUpperCase();
-  const keyedText = String((question.options.find((o) => String(o.id).toUpperCase() === keyed) || {}).text || "");
-  const stem = [question.stem, question.questionText].filter(Boolean).join("\n");
-  const optionLines3 = question.options.map((o) => `${o.id}. ${o.text}`).join("\n");
-  try {
-    const solveSystem = "You are an expert exam examiner. Answer the multiple-choice question from medical knowledge alone. Return only JSON.";
-    const solveBody = `${stem}
-
-${optionLines3}
-
-Return JSON {"answer":"<option letter>","confidence":<0-100>,"reason":"<one sentence>"}.`;
-    const solveOut = complete(solveSystem, solveBody, "min");
-    const queryPromise = question.keyFact && String(question.keyFact).trim() ? Promise.resolve({ query: String(question.keyFact).trim().slice(0, 300), fallback: keywordQuery(String(question.keyFact)) || String(question.keyFact).trim().slice(0, 120) }) : complete(
-      "You write PubMed search queries. Return only JSON.",
-      `Question: ${stem}
-Correct option: ${keyed}. ${keyedText}
-
-Write one PubMed search query of 6-12 words that would find evidence for the correct option. Return JSON {"query":"..."}.`,
-      "min"
-    );
-    const [s1, queryOut] = await Promise.all([solveOut, queryPromise]);
-    const tSolved = Date.now();
-    let tSearched = tSolved;
-    const solves = [String(s1?.answer || "").toUpperCase()];
-    const solvesAgree = solves.every((a) => a === keyed);
-    const query = String(queryOut?.query || "").trim();
-    const fallbackQuery = String(queryOut?.fallback || "").trim();
-    let sources = [];
-    if (query) {
-      try {
-        sources = await literatureSources(query, question.subject);
-      } catch {
-        sources = [];
-      }
-      if (sources.length < 2 && fallbackQuery && fallbackQuery !== query) {
-        try {
-          sources = await literatureSources(fallbackQuery, question.subject);
-        } catch {
-        }
-      }
-      tSearched = Date.now();
-    }
-    const defectRules = "Check the item: (1) exactly one option is the single best answer; (2) if the question asks which is NOT / INCORRECT / FALSE / EXCEPT, exactly one option is that; (3) every number or result needed to answer is given in the stem; (4) no other option is also correct.";
-    let verdict = "INSUFFICIENT";
-    let cited = [];
-    let quality;
-    if (sources.length) {
-      const numbered = sources.map((s, i) => `[${i + 1}] ${s.title}
-${s.url}
-${s.text}`).join("\n\n");
-      quality = await complete(
-        "You check whether medical evidence supports an exam answer, and you review exam items for defects. Use only the sources given. Return only JSON.",
-        `Question: ${stem}
-${optionLines3}
-Keyed answer: ${keyed}. ${keyedText}
-
-Sources:
-${numbered}
-
-Return JSON {"verdict":"SUPPORTED|CONTRADICTED|INSUFFICIENT","citedSources":[<source numbers>],"reason":"<one sentence>","wellFormed":true|false,"issues":["<short issue>"]}. Use SUPPORTED only if a source directly supports the keyed answer. ${defectRules}`,
-        "min"
-      );
-      verdict = ["SUPPORTED", "CONTRADICTED", "INSUFFICIENT"].includes(quality?.verdict) ? quality.verdict : "INSUFFICIENT";
-      const nums = Array.isArray(quality?.citedSources) ? quality.citedSources : [];
-      cited = nums.map((n) => sources[Number(n) - 1]).filter((s) => Boolean(s)).map((s) => ({ title: s.title, url: s.url }));
-    } else {
-      quality = await complete(
-        "You review exam questions for defects. Return only JSON.",
-        `${stem}
-
-${optionLines3}
-
-Keyed answer: ${keyed}.
-
-${defectRules} Return JSON {"wellFormed":true|false,"issues":["<short issue>"]}.`,
-        "min"
-      );
-    }
-    const tJudged = Date.now();
-    const wellFormed = quality?.wellFormed === true;
-    const issues = Array.isArray(quality?.issues) ? quality.issues.map(String).slice(0, 5) : [];
-    const solvedAgainst = solves.every((a) => a && a !== keyed);
-    const proof = solvesAgree && verdict === "SUPPORTED" && cited.length > 0 && wellFormed ? "VERIFIED" : solvedAgainst && verdict === "CONTRADICTED" ? "CONTESTED" : "UNVERIFIED";
-    const timings = { solveMs: tSolved - tStart, searchMs: tSearched - tSolved, judgeMs: tJudged - tSearched, totalMs: Date.now() - tStart };
-    return res.json({ proof, keyed, solves, query, evidence: { verdict, cited }, wellFormed, issues, timings });
-  } catch (err) {
-    return res.status(502).json({ error: err?.message || "Answer check failed." });
-  }
-});
-var BANK_FIGURES_DIR = process.env.BANK_FIGURES_DIR || path.join(os.homedir(), ".pulse-med", "bank-figures");
+var BANK_FIGURES_DIR = process.env.BANK_FIGURES_DIR || path2.join(os2.homedir(), ".pulse-med", "bank-figures");
 app.get(/^\/api\/bank-figures\/(.+)$/, (req, res) => {
   const rel = String(req.params[0] ?? "");
   if (!/^[A-Za-z0-9_\-/]+\.(png|jpe?g|webp|gif)$/i.test(rel) || rel.split("/").includes("..")) {
     return res.status(400).end();
   }
-  const full = path.join(BANK_FIGURES_DIR, rel);
-  if (!fs.existsSync(full)) return res.status(404).end();
+  const full = path2.join(BANK_FIGURES_DIR, rel);
+  if (!fs2.existsSync(full)) return res.status(404).end();
   res.sendFile(full);
 });
 var rankCache = /* @__PURE__ */ new Map();
 function subtopicParts(subtopic) {
   const after = subtopic.includes(":") ? subtopic.split(":").slice(1).join(":") : subtopic;
   return after.split(/,|&| and /).map((s) => s.trim().split(":").pop().trim()).filter(Boolean);
+}
+async function listDistinctTopics(subjectSubtopics, count, exam, provider, model, excluded) {
+  const avoid = [...excluded].map((k) => k.split("|")[1]).filter(Boolean).slice(0, 200);
+  const prompt = [
+    `You are an expert medical exam item writer for ${exam || "NEET-PG"}.`,
+    `Allowed subjects and subtopics:`,
+    ...subjectSubtopics.map((s) => `  ${s.subject}: ${(s.subtopics || []).join(", ")}`),
+    "",
+    `List ${count} distinct, specific topics that an exam question can test within these subtopics. Each topic is one concrete focus: one drug, one adverse effect, one mechanism, one investigation, one clinical situation. No two topics may overlap.`,
+    avoid.length ? `Do not repeat these already written topics: ${avoid.join("; ")}.` : "",
+    `Return one JSON object with a single key "topics", whose value is an array of ${count} objects. Each object has "subject", "subtopic" and "focus". Copy "subject" and "subtopic" exactly from the list above. "focus" is 3 to 10 words.`,
+    `Output ONLY the JSON array.`
+  ].filter(Boolean).join("\n");
+  const raw = await runCompletion({
+    provider: provider || "gemini",
+    model: model || DEFAULT_MODELS.nvidia,
+    messages: [{ role: "user", content: prompt }],
+    json: true,
+    effort: "min"
+  });
+  const parsed = extractJson(raw);
+  const list = Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" ? Object.values(parsed).find(Array.isArray) ?? [parsed] : [];
+  const allowed = /* @__PURE__ */ new Map();
+  for (const s of subjectSubtopics) allowed.set(s.subject, new Set((s.subtopics || []).map((sub) => String(sub).trim())));
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const entry of list) {
+    const subject = String(entry?.subject ?? "");
+    const subtopic = String(entry?.subtopic ?? "").trim();
+    const focus = String(entry?.focus ?? "").trim();
+    if (!focus || !allowed.get(subject)?.has(subtopic)) continue;
+    const key = focus.toLowerCase();
+    if (seen.has(key) || excluded.has(`${subtopic}|${focus}`)) continue;
+    seen.add(key);
+    out.push({ subject, subtopic, focus });
+    if (out.length >= count) break;
+  }
+  return out;
 }
 app.post("/api/ai/plan-topics", async (req, res) => {
   const { subjectSubtopics, count, difficultyTier, provider, model, exam, effort, exclude } = req.body || {};
@@ -2730,7 +2770,18 @@ app.post("/api/ai/plan-topics", async (req, res) => {
         weighted.push({ ...unit, difficultyTier: tier });
       }
     }
-    const finalTopics = weighted.slice(0, countN);
+    let planned = weighted;
+    if (weighted.length < countN) {
+      let expanded = await listDistinctTopics(subjectSubtopics, countN, exam, provider, model, excluded);
+      for (let round = 0; expanded.length < countN && round < 2; round++) {
+        const avoidNow = /* @__PURE__ */ new Set([...excluded, ...expanded.map((t) => `${t.subtopic}|${t.focus}`)]);
+        const more = await listDistinctTopics(subjectSubtopics, countN - expanded.length, exam, provider, model, avoidNow);
+        if (more.length === 0) break;
+        expanded = [...expanded, ...more];
+      }
+      if (expanded.length > weighted.length) planned = expanded.map((t) => ({ ...t, difficultyTier: tier }));
+    }
+    const finalTopics = planned.slice(0, countN);
     return res.json({ topics: finalTopics, total: finalTopics.length });
   } catch (err) {
     const fallback = [];
@@ -2898,11 +2949,11 @@ app.post("/api/settings/vyce-key", (req, res) => {
     return res.status(500).json({ error: err?.message || "Could not save the VyceAI API key." });
   }
 });
-var CUSTOM_ENDPOINTS_FILE = path.join(DATA_DIR, "custom-endpoints.json");
+var CUSTOM_ENDPOINTS_FILE = path2.join(DATA_DIR2, "custom-endpoints.json");
 function readCustomEndpoints() {
   try {
-    if (!fs.existsSync(CUSTOM_ENDPOINTS_FILE)) return [];
-    const raw = fs.readFileSync(CUSTOM_ENDPOINTS_FILE, "utf8");
+    if (!fs2.existsSync(CUSTOM_ENDPOINTS_FILE)) return [];
+    const raw = fs2.readFileSync(CUSTOM_ENDPOINTS_FILE, "utf8");
     const data = JSON.parse(raw);
     return Array.isArray(data) ? data : [];
   } catch {
@@ -2910,8 +2961,8 @@ function readCustomEndpoints() {
   }
 }
 function writeCustomEndpoints(endpoints) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(CUSTOM_ENDPOINTS_FILE, JSON.stringify(endpoints, null, 2), "utf8");
+  fs2.mkdirSync(DATA_DIR2, { recursive: true });
+  fs2.writeFileSync(CUSTOM_ENDPOINTS_FILE, JSON.stringify(endpoints, null, 2), "utf8");
 }
 function findCustomEndpoint(id) {
   return readCustomEndpoints().find((e) => e.id === id);
@@ -3376,8 +3427,133 @@ app.get("/api/models/catalog", async (_req, res) => {
     return res.status(502).json({ error: `Could not load the live model catalog (${err?.message || "network error"}).` });
   }
 });
+async function withInternetSources(messages, groundOn) {
+  const query = String(groundOn.query || "").trim().slice(0, 200);
+  if (!query) return messages;
+  const subject = String(groundOn.subject || "");
+  const [web, found] = await Promise.all([
+    research(query, 1200).then((r) => r.sources).catch(() => []),
+    literatureSources(query, subject).catch(() => [])
+  ]);
+  const seen = /* @__PURE__ */ new Set();
+  const sources = [...found, ...web].filter((s) => {
+    if (!s?.text || seen.has(s.url)) return false;
+    seen.add(s.url);
+    return true;
+  }).slice(0, 6);
+  if (!sources.length) return messages;
+  const block = sources.map((s, i) => `[${i + 1}] ${s.title}
+${s.url}
+${String(s.text).slice(0, 1200)}`).join("\n\n");
+  const last = messages[messages.length - 1];
+  return [
+    ...messages.slice(0, -1),
+    { ...last, content: `${last.content}
+
+Internet sources found for this topic. Read them, then check the keyed option against them before you answer: """${block}"""` }
+  ];
+}
+app.get("/nvidia-progress", (_req, res) => {
+  res.type("html").send(fs2.readFileSync(path2.join(process.cwd(), "server", "nvidia-progress.html"), "utf8"));
+});
+app.post("/api/ai/verify-item", async (req, res) => {
+  const { provider, model, question, groundOn } = req.body || {};
+  if (!provider || !question || typeof question !== "object") {
+    return res.status(400).json({ error: "provider and question are required." });
+  }
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) controller.abort();
+  });
+  const item = JSON.stringify({
+    stem: question.stem,
+    questionText: question.questionText,
+    options: question.options,
+    keyedAnswer: question.correctOption,
+    keyFact: question.keyFact
+  });
+  const messages = [{
+    role: "user",
+    content: `Check this exam item against the sources attached after this request.
+
+Item:
+${item}
+
+Answer with one JSON object: {"keyCorrect": true or false, "premiseSupported": true or false, "reason": "one sentence"}.
+- keyCorrect is false only if the sources show the keyed answer is wrong, or another option is clearly better. If the sources simply do not mention the topic, keyCorrect is true.
+- premiseSupported is false only if the sources contradict the item or say the study, product or therapy it relies on does not exist. Mentioning nothing about it is not a contradiction.`
+  }];
+  try {
+    const grounded = groundOn && typeof groundOn === "object" ? await withInternetSources(messages, groundOn) : messages;
+    const text = await runCompletion({
+      provider,
+      model,
+      system: "You are a strict medical fact checker for postgraduate exam items. Answer only with the JSON object.",
+      messages: grounded,
+      json: true,
+      effort: "min",
+      purpose: "verify",
+      signal: controller.signal
+    });
+    const parsed = extractJson(text);
+    const supported = parsed?.keyCorrect !== false && parsed?.premiseSupported !== false;
+    return res.json({ verdict: supported ? "supported" : "unsupported", reason: String(parsed?.reason ?? "").slice(0, 300) });
+  } catch (err) {
+    if (controller.signal.aborted) return;
+    const status2 = err instanceof ApiError ? err.status : 502;
+    return res.status(status2).json({ error: err?.message || "Verification failed." });
+  }
+});
+app.post("/api/export/questions", (req, res) => {
+  const dir = path2.join(process.cwd(), "exports");
+  fs2.mkdirSync(dir, { recursive: true });
+  const name = `questions-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`;
+  fs2.writeFileSync(path2.join(dir, name), JSON.stringify(req.body, null, 2), "utf8");
+  res.json({ ok: true, file: path2.join("exports", name) });
+});
+app.post("/api/ai/nvidia-stats/reset", (_req, res) => {
+  nvidiaStats.started = 0;
+  nvidiaStats.inFlight = 0;
+  nvidiaStats.finished = { ok: 0, failed: 0, stopped: 0 };
+  nvidiaStats.byModel = {};
+  nvidiaStats.events = [];
+  nvidiaStats.accepted = 0;
+  nvidiaStats.dropped = {};
+  res.json({ ok: true });
+});
+app.post("/api/ai/nvidia-stats/question", (req, res) => {
+  const { outcome, reason } = req.body || {};
+  if (outcome === "accepted") nvidiaStats.accepted += 1;
+  else if (outcome === "dropped") {
+    const key = String(reason || "other");
+    nvidiaStats.dropped[key] = (nvidiaStats.dropped[key] ?? 0) + 1;
+  }
+  res.json({ ok: true });
+});
+var lastEngine = null;
+app.get("/api/ai/nvidia-stats", (_req, res) => {
+  const f = nvidiaStats.finished;
+  const totals = Object.values(nvidiaStats.byModel).reduce(
+    (sum, m) => ({ ok: sum.ok + m.ok, refused: sum.refused + m.refused, error: sum.error + m.error, timeout: sum.timeout + m.timeout }),
+    { ok: 0, refused: 0, error: 0, timeout: 0 }
+  );
+  res.json({
+    started: nvidiaStats.started,
+    inFlight: nvidiaStats.inFlight,
+    questionsOk: f.ok,
+    questionsFailed: f.failed,
+    questionsStopped: f.stopped,
+    accepted: nvidiaStats.accepted,
+    dropped: nvidiaStats.dropped,
+    attempts: totals,
+    byModel: Object.fromEntries(Object.entries(nvidiaStats.byModel).map(([k, v]) => [k.replace("nvidia/", ""), v])),
+    events: nvidiaStats.events.slice(-25).reverse(),
+    engine: lastEngine,
+    serverTime: (/* @__PURE__ */ new Date()).toISOString()
+  });
+});
 app.post("/api/ai/complete", async (req, res) => {
-  const { provider, model, system, messages, json, effort, spread } = req.body || {};
+  const { provider, model, system, messages, json, effort, groundOn } = req.body || {};
   if (!provider) {
     return res.status(400).json({ error: "No AI provider selected. Connect an AI provider in Settings." });
   }
@@ -3389,7 +3565,8 @@ app.post("/api/ai/complete", async (req, res) => {
     if (!res.writableFinished) controller.abort();
   });
   try {
-    const text = await runCompletion({ provider, model, system, messages, json, effort, spread: spread === true, purpose: "write", signal: controller.signal, session: req.header("x-opencode-session") || void 0 });
+    const grounded = groundOn && typeof groundOn === "object" ? await withInternetSources(messages, groundOn) : messages;
+    const text = await runCompletion({ provider, model, system, messages: grounded, json, effort, purpose: "write", signal: controller.signal, session: req.header("x-opencode-session") || void 0 });
     if (controller.signal.aborted) return;
     if (!text || !text.trim()) {
       return res.status(502).json({ error: "The AI provider returned an empty response. Try again." });
@@ -3400,6 +3577,72 @@ app.post("/api/ai/complete", async (req, res) => {
     const status2 = err instanceof ApiError ? err.status : 502;
     if (!res.headersSent) return res.status(status2).json({ error: err?.message || "AI request failed." });
   }
+});
+var completionJobs = /* @__PURE__ */ new Map();
+setInterval(() => {
+  const cutoff = Date.now() - 15 * 6e4;
+  for (const [id, job] of completionJobs) if (job.createdAt < cutoff) {
+    job.controller.abort();
+    completionJobs.delete(id);
+  }
+}, 6e4).unref();
+app.post("/api/ai/jobs", (req, res) => {
+  const { provider, model, system, messages, json, effort, groundOn } = req.body || {};
+  if (!provider) return res.status(400).json({ error: "No AI provider selected. Connect an AI provider in Settings." });
+  if (!Array.isArray(messages) || messages.length === 0 || messages.some((m) => !m || typeof m.content !== "string")) {
+    return res.status(400).json({ error: "messages must be an array of {role, content}." });
+  }
+  const id = crypto.randomUUID();
+  const job = { controller: new AbortController(), done: false, status: 200, body: null, createdAt: Date.now() };
+  completionJobs.set(id, job);
+  const session = req.header("x-opencode-session") || void 0;
+  lastEngine = { provider: String(provider), model: String(model || DEFAULT_MODELS[provider] || provider), at: (/* @__PURE__ */ new Date()).toISOString() };
+  const countHere = provider !== "nvidia";
+  if (countHere) {
+    nvidiaStats.started += 1;
+    nvidiaStats.inFlight += 1;
+  }
+  void (async () => {
+    try {
+      const grounded = groundOn && typeof groundOn === "object" ? await withInternetSources(messages, groundOn) : messages;
+      const text = await runCompletion({ provider, model, system, messages: grounded, json, effort, purpose: "write", signal: job.controller.signal, session });
+      if (!text || !text.trim()) {
+        job.status = 502;
+        job.body = { error: "The AI provider returned an empty response. Try again." };
+      } else {
+        job.status = 200;
+        job.body = { success: true, text, model: model || DEFAULT_MODELS[provider] };
+      }
+    } catch (err) {
+      job.status = err instanceof ApiError ? err.status : 502;
+      job.body = { error: err?.message || "AI request failed." };
+    } finally {
+      job.done = true;
+      if (countHere) {
+        nvidiaAttempt(String(model || DEFAULT_MODELS[provider] || provider), job.status === 200 ? "ok" : "error", String(job.status));
+        nvidiaStats.inFlight = Math.max(0, nvidiaStats.inFlight - 1);
+        if (job.status === 200) nvidiaStats.finished.ok += 1;
+        else if (job.controller.signal.aborted) nvidiaStats.finished.stopped += 1;
+        else nvidiaStats.finished.failed += 1;
+      }
+    }
+  })();
+  return res.json({ id });
+});
+app.get("/api/ai/jobs/:id", (req, res) => {
+  const job = completionJobs.get(String(req.params.id));
+  if (!job) return res.status(404).json({ error: "Unknown or expired job." });
+  if (!job.done) return res.json({ done: false });
+  completionJobs.delete(String(req.params.id));
+  return res.json({ done: true, status: job.status, body: job.body, retryAfter: job.retryAfter });
+});
+app.delete("/api/ai/jobs/:id", (req, res) => {
+  const job = completionJobs.get(String(req.params.id));
+  if (job) {
+    job.controller.abort();
+    completionJobs.delete(String(req.params.id));
+  }
+  res.json({ ok: true });
 });
 function nemotronWords(body) {
   const out = [];
@@ -3754,9 +3997,9 @@ app.post("/api/images/bank/build", async (req, res) => {
 });
 app.get("/api/images/qa-results", (_req, res) => {
   try {
-    const file = path.join(DATA_DIR, "image-first-results.json");
-    if (!fs.existsSync(file)) return res.json({ success: true, available: false, run: null });
-    const run = JSON.parse(fs.readFileSync(file, "utf8"));
+    const file = path2.join(DATA_DIR2, "image-first-results.json");
+    if (!fs2.existsSync(file)) return res.json({ success: true, available: false, run: null });
+    const run = JSON.parse(fs2.readFileSync(file, "utf8"));
     return res.json({ success: true, available: true, run });
   } catch (err) {
     return res.status(500).json({ error: err?.message || "Could not read the last image-first run." });
@@ -3883,8 +4126,7 @@ function qaComplete(provider, model) {
       messages,
       json,
       // QA checks are short judgements on a finished question; thinking here made each review take minutes.
-      effort: "min",
-      spread: true
+      effort: "min"
     });
   };
 }
@@ -4105,9 +4347,9 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.resolve(__dirname, "dist")));
+    app.use(express.static(path2.resolve(__dirname, "dist")));
     app.get("*", (req, res) => {
-      res.sendFile(path.resolve(__dirname, "dist", "index.html"));
+      res.sendFile(path2.resolve(__dirname, "dist", "index.html"));
     });
   }
   const HOST = process.env.HOST ?? "::";
