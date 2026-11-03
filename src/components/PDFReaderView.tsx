@@ -597,17 +597,19 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   };
 
   const handleDeleteDoc = async (id: string) => {
+    const doc = docs.find((d) => d.id === id);
+    if (!window.confirm(`Delete "${doc?.title ?? 'this book'}" from the library? This cannot be undone.`)) return;
     try {
       await removeLibraryDocument(id);
       writeSavedNotes(id, []);
-      const all = await refreshLibrary();
+      await refreshLibrary();
       if (id === activeDocId) {
         clearRenderedPages();
         if (pdfRef.current) { try { await pdfRef.current.destroy(); } catch { /* ignore */ } pdfRef.current = null; }
         setActiveDocId(null);
         setNumPages(0);
-        if (all.length) await openDoc(all[0].id);
-        else setShowShelf(true);
+        setHighlights([]);
+        setShowShelf(true);
       }
     } catch (err: any) {
       setLibraryError(err?.message || 'Could not delete the document.');
@@ -1829,20 +1831,29 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
           </div>
           <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-3">
             {books.map((d) => (
-              <button
-                key={d.id}
-                onClick={() => openDoc(d.id)}
-                title={`${d.title} · ${d.numPages} pages`}
-                className="group flex flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:-translate-y-0.5 hover:border-[#0f8b8d]/40 hover:bg-white hover:shadow-md"
-              >
-                <div className="flex h-24 items-center justify-center rounded-lg bg-gradient-to-br from-[#00696b] to-[#0f8b8d] text-white">
-                  <BookOpen className="h-8 w-8 opacity-90" />
-                </div>
-                <span className="line-clamp-2 text-[12px] font-semibold text-slate-900">{d.title}</span>
-                <span className="font-mono text-[10px] text-slate-500">
-                  {(d.fileType ?? 'pdf').toUpperCase()} · {d.numPages} pages
-                </span>
-              </button>
+              <div key={d.id} className="group relative">
+                <button
+                  onClick={() => openDoc(d.id)}
+                  title={`${d.title} · ${d.numPages} pages`}
+                  className="flex w-full flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:-translate-y-0.5 hover:border-[#0f8b8d]/40 hover:bg-white hover:shadow-md"
+                >
+                  <div className="flex h-24 items-center justify-center rounded-lg bg-gradient-to-br from-[#00696b] to-[#0f8b8d] text-white">
+                    <BookOpen className="h-8 w-8 opacity-90" />
+                  </div>
+                  <span className="line-clamp-2 text-[12px] font-semibold text-slate-900">{d.title}</span>
+                  <span className="font-mono text-[10px] text-slate-500">
+                    {(d.fileType ?? 'pdf').toUpperCase()} · {d.numPages} pages
+                  </span>
+                </button>
+                <button
+                  onClick={() => handleDeleteDoc(d.id)}
+                  title="Delete this book"
+                  aria-label={`Delete ${d.title}`}
+                  className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 bg-white/95 text-slate-500 opacity-0 shadow-sm transition hover:border-rose-300 hover:text-rose-600 focus:opacity-100 group-hover:opacity-100"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
             ))}
           </div>
         </section>
@@ -1871,6 +1882,15 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
             >
               <UploadCloud className="h-3.5 w-3.5" /> Import
             </button>
+            {activeDoc && (
+              <button
+                onClick={() => handleDeleteDoc(activeDoc.id)}
+                title="Delete this book from the library"
+                className={`flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-bold transition hover:border-rose-300 hover:text-rose-600 ${T.chip}`}
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Delete
+              </button>
+            )}
             <input
               ref={fileInputRef}
               type="file"
