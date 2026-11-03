@@ -36,7 +36,7 @@ import {
   Mic,
   MicOff
 } from 'lucide-react';
-import { transcribe } from '../lib/speech.ts';
+import { useVoiceInput } from './useVoiceInput.ts';
 import { AppView, ClinicalQuestion, ExamType } from '../types.ts';
 import {
   getActiveProvider as getStoredActiveProvider,
@@ -309,45 +309,10 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
 
   // ----- chat state -----
   const [input, setInput] = useState<string>('');
-  // Voice input: records from the microphone, then transcribes locally with Whisper.
-  const [recording, setRecording] = useState(false);
-  const [voiceStatus, setVoiceStatus] = useState<string | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-
-  const toggleVoice = async () => {
-    if (recording) { recorderRef.current?.stop(); return; }
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-      setVoiceStatus('Voice input needs microphone access, which this window does not have.');
-      return;
-    }
-    let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch {
-      setVoiceStatus('Microphone permission was denied, or no microphone was found.');
-      return;
-    }
-    chunksRef.current = [];
-    const recorder = new MediaRecorder(stream);
-    recorder.ondataavailable = (e) => { if (e.data.size) chunksRef.current.push(e.data); };
-    recorder.onstop = async () => {
-      stream.getTracks().forEach((track) => track.stop());
-      setRecording(false);
-      setVoiceStatus('Transcribing…');
-      try {
-        const text = await transcribe(new Blob(chunksRef.current, { type: recorder.mimeType }), (m) => setVoiceStatus(m));
-        if (text) setInput((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text));
-        setVoiceStatus(text ? null : 'Nothing was heard. Try again.');
-      } catch (err: any) {
-        setVoiceStatus(`Voice input failed: ${err?.message || err}`);
-      }
-    };
-    recorderRef.current = recorder;
-    recorder.start();
-    setRecording(true);
-    setVoiceStatus('Listening… click the mic again to stop.');
-  };
+  // Voice input: see useVoiceInput (records here, transcribes on this device with Whisper).
+  const { recording, status: voiceStatus, toggle: toggleVoice } = useVoiceInput((text) => {
+    setInput((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text));
+  });
   // Waiting for a reply in the active conversation (kept in the store, so it survives navigation).
   const loading = useConversationPending(activeId);
   const [persona, setPersona] = useState<(typeof PERSONAS)[number]['id']>('BOARD_MASTER');

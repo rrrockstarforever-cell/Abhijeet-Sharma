@@ -78,11 +78,17 @@ async function pageText(url, chars = 2500) {
 export async function research(query, pageChars = 2500) {
   const q = String(query || '').trim().slice(0, 300);
   if (!q) throw new Error('Nothing to search for.');
-  const [w, p] = await Promise.allSettled([ddg(q), europePmc(q)]);
+  const [w, p, label] = await Promise.allSettled([ddg(q), europePmc(q), openFdaByDrug(q)]);
   const web = (w.status === 'fulfilled' ? w.value : []).sort((a, b) => Number(TRUSTED.test(b.url)) - Number(TRUSTED.test(a.url))).slice(0, 3);
   const papers = p.status === 'fulfilled' ? p.value : [];
   const pages = await Promise.allSettled(web.map((x) => pageText(x.url, pageChars)));
+  // Textbook passages from the user's own library come first: they are the book the student studies from.
+  const books = bookPassages(q, 6).map((b) => ({ ...b, kind: 'book' }));
+  // The drug label is first when the query names a drug: full label text beats abstracts for adverse-effect facts.
+  const labels = label.status === 'fulfilled' ? label.value.map((x) => ({ ...x, kind: 'label' })) : [];
   const sources = [
+    ...labels,
+    ...books,
     ...web.map((x, i) => ({ title: x.title, url: x.url, text: (pages[i].status === 'fulfilled' && pages[i].value.length > 200 ? pages[i].value : x.snippet) || x.snippet, kind: 'web' })),
     ...papers.map((x) => ({ ...x, kind: 'europepmc' })),
   ].filter((s) => s.text).map((s, i) => ({ n: i + 1, ...s }));
@@ -138,6 +144,32 @@ async function openFdaLabel(query) {
     .replace(/\s+/g, ' ');
   if (!text) return [];
   return [{ title: `${name} (FDA drug label)`, url: 'https://open.fda.gov/apis/drug/label/', text: text.slice(0, 1200) }];
+}
+
+const NOT_A_DRUG = new Set(['adverse', 'effects', 'effect', 'side', 'drug', 'drugs', 'toxicity', 'treatment', 'features', 'feature',
+  'criteria', 'causes', 'cause', 'diagnosis', 'diagnostic', 'management', 'clinical', 'disease', 'syndrome', 'investigation',
+  'investigations', 'the', 'and', 'with', 'from', 'for', 'about', 'overview', 'complications', 'anatomy', 'physiology']);
+
+/**
+ * The FDA label of a named drug in the query (for example "adverse effects of isoniazid"). Its adverse-reactions and
+ * warnings sections are full, label-grade text, which is what an adverse-effect question needs.
+ */
+async function openFdaByDrug(query) {
+  const words = [...new Set(String(query || '').toLowerCase().match(/[a-z][a-z-]{4,}/g) || [])].filter((w) => !NOT_A_DRUG.has(w));
+  for (const word of words.slice(0, 6)) {
+    const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(`openfda.generic_name:"${word}"`)}&limit=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) }).catch(() => null);
+    if (!res || !res.ok) continue;
+    const hit = (await res.json().catch(() => ({})))?.results?.[0];
+    if (!hit) continue;
+    const name = hit.openfda?.generic_name?.[0] || word;
+    const text = [hit.adverse_reactions?.[0], hit.warnings_and_cautions?.[0] || hit.warnings?.[0]]
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ');
+    if (text) return [{ title: `${name} (FDA label: adverse reactions)`, url: 'https://open.fda.gov/apis/drug/label/', text: text.slice(0, 2500) }];
+  }
+  return [];
 }
 
 /** Drug and medicine subjects, plus unknown subjects (the tutor), also read openFDA labels. */

@@ -53,6 +53,8 @@ import {
   RotateCcw,
   Stethoscope,
   Zap,
+  Mic,
+  MicOff,
 } from 'lucide-react';
 import { AppView } from '../types.ts';
 import {
@@ -86,6 +88,7 @@ import { createOcrPool, ocrConcurrency, OcrWord } from '../utils/ocr.ts';
 import { recognizeWithNemotron } from '../utils/nemotronOcr.ts';
 import { startJob, stopJob, type JobControl } from '../utils/jobRegistry.ts';
 import { downloadNotesPdf } from './RevisionNote.tsx';
+import { useVoiceInput } from './useVoiceInput.ts';
 import { runWebCheck, webCheckToText } from '../lib/noteWebCheck.ts';
 import { StructuredNote, PAGE_TRANSCRIBE_SYSTEM, TEACHING_NOTE_SYSTEM, readSavedNotes, teachingNoteToText, toTeachingNote, writeSavedNotes, type SavedNote, type TeachingNote } from './StructuredNote.tsx';
 
@@ -368,6 +371,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   const [copied, setCopied] = useState<boolean>(false);
 
   const [popup, setPopup] = useState<SelectionPopup | null>(null);
+  const [askDialog, setAskDialog] = useState<{ text: string; label: string } | null>(null);
+  const [askDialogPrompt, setAskDialogPrompt] = useState<string>('');
 
   const [showThumbs, setShowThumbs] = useState<boolean>(false);
   const [ocrForce, setOcrForce] = useState<boolean>(false);
@@ -411,6 +416,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   const [askReply, setAskReply] = useState<string>('');
   const [askQuestion, setAskQuestion] = useState<string>('');
   const [askInput, setAskInput] = useState<string>('');
+  // Voice input for the copilot: the transcript is added to the question box.
+  const voice = useVoiceInput((text) => setAskInput((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text)));
+  const voiceStatus = voice.status;
   const [askCopied, setAskCopied] = useState<boolean>(false);
   const [askCitations, setAskCitations] = useState<string[]>([]);
   const [askError, setAskError] = useState<string | null>(null);
@@ -1569,11 +1577,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   // Selection popup actions: open the Ask panel on the selected text and answer straight away.
   const EXPLAIN_PROMPT = 'Teach me this selection from the start: the big idea, the mechanism step by step, an analogy, and the trap students fall into.';
   const NOTES_PROMPT = 'Turn this passage into a short revision note card: one bold title line, 3-6 high-yield bullets, a "High-yield:" line, and a citation.';
-  const askSelection = (prompt?: string, saveNote = false) => {
-    if (!popup) return;
-    const text = popup.text;
-    const label = `selection (p. ${currentPageRef.current})`;
-    setPopup(null);
+  const runSelectionAi = (text: string, label: string, prompt?: string, saveNote = false) => {
     setRightTab('copilot');
     setShowNotes(true);
     setAskError(null);
@@ -1590,6 +1594,32 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
       }));
     } : undefined);
   };
+
+  const askSelection = (prompt?: string, saveNote = false) => {
+    if (!popup) return;
+    const text = popup.text;
+    const label = `selection (p. ${currentPageRef.current})`;
+    setPopup(null);
+    runSelectionAi(text, label, prompt, saveNote);
+  };
+
+  // The Ask AI dialog: options plus a free-text question about the selected text. Nothing runs until one is picked.
+  const closeAskDialog = () => {
+    setAskDialog(null);
+    setAskDialogPrompt('');
+  };
+  const sendAskDialog = (prompt: string) => {
+    if (!askDialog || !prompt.trim()) return;
+    runSelectionAi(askDialog.text, askDialog.label, prompt.trim());
+    closeAskDialog();
+  };
+  const ASK_DIALOG_OPTIONS: { label: string; prompt: string }[] = [
+    { label: 'Explain simply', prompt: EXPLAIN_PROMPT },
+    { label: 'Summarise in 3 lines', prompt: 'Summarise this in 3 short sentences a student can remember.' },
+    { label: 'Give an example', prompt: 'Give one clinical example that uses this text, then explain why it fits.' },
+    { label: 'Simpler words', prompt: 'Rewrite this in very simple English, keeping every number and name exactly as in the text.' },
+    { label: 'Quiz me on it', prompt: 'Ask me one short exam question about this text, wait for my answer, then tell me if I am right and why.' },
+  ];
 
   const generateMcqs = async () => {
     const provider = getActiveProvider();
@@ -1805,6 +1835,15 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
         >
           <UploadCloud className="h-3.5 w-3.5" /> Import
         </button>
+        {/* The shelf needs its own input: the reader's input is not mounted while the shelf is showing. */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/pdf,.pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          multiple
+          className="hidden"
+          onChange={(e) => { handleImportFiles(e.target.files); e.target.value = ''; }}
+        />
       </header>
 
       {libraryError && (
@@ -2317,7 +2356,15 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                   />
                 ))}
                 <div className="mx-0.5 h-4 w-px bg-slate-200" />
-                <button onClick={() => askSelection()} title="Ask AI about this selection" className="rounded px-1.5 py-0.5 text-[10px] font-bold text-[#00696b] hover:bg-teal-50">Ask AI</button>
+                <button
+                  onClick={() => {
+                    setAskDialog({ text: popup.text, label: `selection (p. ${currentPageRef.current})` });
+                    setAskDialogPrompt('');
+                    setPopup(null);
+                  }}
+                  title="Ask AI about this selection"
+                  className="rounded px-1.5 py-0.5 text-[10px] font-bold text-[#00696b] hover:bg-teal-50"
+                >Ask AI</button>
                 <button onClick={() => askSelection(EXPLAIN_PROMPT)} title="Explain this selection" className="rounded px-1.5 py-0.5 text-[10px] font-bold text-[#00696b] hover:bg-teal-50">Explain</button>
                 <button onClick={() => askSelection(NOTES_PROMPT, true)} title="Make an AI note and save it to Highlights" className="rounded px-1.5 py-0.5 text-[10px] font-bold text-[#00696b] hover:bg-teal-50">AI notes</button>
                 <div className="mx-0.5 h-4 w-px bg-slate-200" />
@@ -2325,6 +2372,68 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                   {copied ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
                 </button>
                 <button onClick={() => setPopup(null)} className="rounded p-1 text-slate-400 hover:bg-slate-100"><X className="h-3 w-3" /></button>
+              </div>
+            )}
+            {askDialog && (
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4"
+                onClick={closeAskDialog}
+              >
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Ask AI about the selected text"
+                  onClick={(e) => e.stopPropagation()}
+                  className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"
+                >
+                  <div className="mb-2 flex items-start justify-between gap-2">
+                    <div>
+                      <div className="text-[12px] font-bold text-slate-900">Ask AI about the selected text</div>
+                      <div className="text-[10px] text-slate-500">{askDialog.label}</div>
+                    </div>
+                    <button onClick={closeAskDialog} className="rounded p-1 text-slate-400 hover:bg-slate-100" title="Close">
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <blockquote className="mb-3 max-h-24 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11px] leading-relaxed text-slate-700">
+                    {askDialog.text.length > 400 ? `${askDialog.text.slice(0, 400)}…` : askDialog.text}
+                  </blockquote>
+                  <div className="mb-3 flex flex-wrap gap-1.5">
+                    {ASK_DIALOG_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.label}
+                        onClick={() => sendAskDialog(opt.prompt)}
+                        className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold transition ${T.chip} hover:border-[#0f8b8d]/40 hover:bg-teal-50 hover:text-[#00696b]`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                  <label className="mb-1 block text-[10px] font-semibold text-slate-500" htmlFor="ask-dialog-text">
+                    Or tell me what to do with this text
+                  </label>
+                  <textarea
+                    id="ask-dialog-text"
+                    value={askDialogPrompt}
+                    onChange={(e) => setAskDialogPrompt(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) sendAskDialog(askDialogPrompt);
+                    }}
+                    rows={3}
+                    placeholder="For example: compare this with glycolysis, or list the exceptions"
+                    className={`w-full resize-none rounded-lg border px-2.5 py-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]/30 ${T.input}`}
+                  />
+                  <div className="mt-2 flex items-center justify-between gap-2">
+                    <span className="text-[10px] text-slate-400">Ctrl+Enter to send</span>
+                    <button
+                      onClick={() => sendAskDialog(askDialogPrompt)}
+                      disabled={!askDialogPrompt.trim()}
+                      className={`rounded-lg px-3 py-1.5 text-[11px] font-bold transition disabled:opacity-40 ${T.cta}`}
+                    >
+                      Send
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
             {ocrBusy && ocrTask && (
@@ -2541,9 +2650,13 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                   onClick={(ev) => {
                     ev.preventDefault();
                     ev.stopPropagation();
+                    const to = endPageOf(e);
                     setRightTab('notes');
                     setShowNotes(true);
-                    void makeNotesFromPages({ from: e.page, to: endPageOf(e), label: e.title });
+                    // Fill the panel's From/To too, so Generate notes afterwards covers the same pages.
+                    setNotesFrom(e.page);
+                    setNotesTo(to);
+                    void makeNotesFromPages({ from: e.page, to, label: e.title });
                   }}
                   disabled={notesBusy}
                   title={`Make notes from ${LEVEL_LABEL[e.level].toLowerCase()} "${e.title}"`}
@@ -2904,6 +3017,16 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                     className="max-h-14 min-h-[22px] flex-1 resize-none bg-transparent px-1 py-0.5 text-[10px] focus:outline-none"
                   />
                   <button
+                    onClick={() => voice.toggle()}
+                    title={voice.recording ? 'Stop recording and transcribe' : 'Speak your question (transcribed on this device)'}
+                    aria-pressed={voice.recording}
+                    className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition ${
+                      voice.recording ? 'bg-rose-600 text-white hover:bg-rose-700' : `${T.chip} hover:border-[#0f8b8d]/40`
+                    }`}
+                  >
+                    {voice.recording ? <MicOff className="h-3 w-3" /> : <Mic className="h-3 w-3" />}
+                  </button>
+                  <button
                     onClick={() => {
                       const question = askInput.trim();
                       if (!question || askBusy) return;
@@ -2917,6 +3040,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                     {askBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
                   </button>
                 </div>
+                {voiceStatus && (
+                  <p className={`mt-1 px-1 text-[10px] ${voice.recording ? 'text-rose-700' : T.muted}`}>{voiceStatus}</p>
+                )}
               </div>
             </div>
           </div>

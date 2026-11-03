@@ -30,6 +30,30 @@ function itemShape(idx: number, exam: ExamType): string {
   return 'Use a single best answer lead-in (diagnosis, next step, drug of choice or investigation). Do not use a numbered statements list.';
 }
 
+/** Patients rotated across a typed-topic set, so no two items share the same age, sex and setting. */
+const PATIENT_PROFILES = [
+  'a 68-year-old woman in a general medicine clinic',
+  'a 9-month-old infant on a paediatric ward',
+  'a 34-year-old man in the emergency department',
+  'a 14-year-old girl seen at a school health check',
+  'a 59-year-old farmer in a rural primary care centre',
+  'a 26-year-old pregnant woman at an antenatal visit',
+  'an 81-year-old man in a nursing home',
+  'a 45-year-old woman after a surgical procedure',
+];
+
+/** Item types for a typed topic, rotated across the set. Case stems are only 2 in 8 (about a quarter), so the set is not mostly vignettes. */
+function typedShape(idx: number): string {
+  const slot = idx % 8;
+  const patient = `If the item needs a patient, use ${PATIENT_PROFILES[idx % PATIENT_PROFILES.length]}.`;
+  if (slot === 3 || slot === 6) return `Short case: at most three sentences (age, presentation, one question). The answer must be the named fact itself. ${patient}`;
+  if (slot === 1 || slot === 5) return 'Negative lead-in: "Which of the following is NOT true about ...?" Exactly one option is false; the other three are true statements about the topic.';
+  if (slot === 2) return 'Match-style: the stem names one feature, and the options name the agents or conditions. Exactly one option fits.';
+  if (slot === 4) return 'Direct recall lead-in asking for the most characteristic feature or the most common cause. No patient case: the stem has no age, no sex and no "a patient" or "a child".';
+  if (slot === 7) return 'Direct recall lead-in asking for the most useful test, monitoring step or first-line choice for the named topic. No patient case: the stem has no age, no sex and no "a patient" or "a child".';
+  return 'Direct recall lead-in: "Which of the following is ...?" in one line. No patient case: the stem has no age, no sex and no "a patient" or "a child".';
+}
+
 /** Splits a subtopic such as "Anticancer Chemotherapy: Alkylating Agents, Antimetabolites & MAbs" into its parts. */
 function focusParts(subtopic: string): string[] {
   const after = subtopic.includes(':') ? subtopic.split(':').slice(1).join(':') : subtopic;
@@ -209,12 +233,13 @@ function openCodeSessionId(): string {
 }
 
 /** One planned question slot: the subject, subtopic, the part of it to focus on, and the difficulty. */
-interface PlannedTopic { subject: string; subtopic: string; focus?: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }
+interface PlannedTopic { subject: string; subtopic: string; focus?: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH'; assigned?: AssignedFact }
 
 /** Splits a typed topic into its distinct subtopics with the selected engine. Falls back to the topic itself. */
-export async function splitTopic(topic: string, exam: string): Promise<string[]> {
+export async function splitTopic(topic: string, exam: string): Promise<{ subtopics: string[]; priorities: number[]; facts: number[] }> {
+  const fallback = { subtopics: [topic], priorities: [10], facts: [1] };
   const provider = getActiveProvider();
-  if (!provider) return [topic];
+  if (!provider) return fallback;
   try {
     const res = await fetch('/api/ai/split-topic', {
       method: 'POST',
@@ -223,9 +248,152 @@ export async function splitTopic(topic: string, exam: string): Promise<string[]>
     });
     const data = await res.json().catch(() => ({}));
     const list: string[] = Array.isArray(data?.subtopics) ? data.subtopics : [];
-    return list.length ? list : [topic];
+    if (!list.length) return fallback;
+    const priorities: number[] = list.map((_, i) => Number(data?.priorities?.[i]) || 10);
+    const facts: number[] = list.map((_, i) => Math.min(6, Math.max(1, Number(data?.facts?.[i]) || 1)));
+    return { subtopics: list, priorities, facts };
   } catch {
-    return [topic];
+    return fallback;
+  }
+}
+
+const FACT_PICK_SYSTEM =
+  'You pick one specific fact about the topic that one of the sources states. Prefer a fact about the focus if the sources have one. ' +
+  'Copy the supporting words exactly from that source. Reply with ONLY JSON: ' +
+  '{"fact":"one sentence stating the fact","quote":"exact words from that source","source":<source number>}. ' +
+  'Reply {"fact":"","quote":"","source":0} only if no source states any fact about the topic.';
+
+const squeezeText = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+// Search results kept for a few minutes, so picks for the same topic do not search again.
+const researchCache = new Map<string, { at: number; sources: { title: string; text: string }[] }>();
+const RESEARCH_TTL_MS = 5 * 60_000;
+
+/**
+ * Fact first: finds one fact on the topic in the sources, and checks that the quote is really in the source.
+ * The question is then written around that fact, so its answer can be checked by construction. Returns null when no sourced fact is found.
+ */
+export async function pickSourcedFact(
+  topic: string,
+  focus: string | undefined,
+  provider: AiProviderId,
+  signal?: AbortSignal,
+  avoid: string[] = [],
+): Promise<{ fact: string; quote: string; source: string } | null> {
+  // The search uses the topic alone: the focus alone often finds thin abstracts that do not state the fact.
+  const cacheKey = topic.toLowerCase();
+  const cached = researchCache.get(cacheKey);
+  let sources: { title: string; text: string }[] = cached && Date.now() - cached.at < RESEARCH_TTL_MS ? cached.sources : [];
+  if (!sources.length) {
+    try {
+      const res = await fetch('/api/web/research', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: topic }),
+        signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data.sources)) sources = data.sources;
+      if (sources.length) researchCache.set(cacheKey, { at: Date.now(), sources });
+    } catch {
+      return null;
+    }
+  }
+  if (!sources.length) return null;
+  // The drug label, then textbook passages, are full text and tried first. If they give no usable fact, all sources are tried.
+  const kindOf = (s: unknown) => (s as { kind?: string }).kind;
+  const priority = sources.filter((s) => kindOf(s) === 'label' || kindOf(s) === 'book');
+  const groups = priority.length && priority.length < sources.length ? [priority, sources] : [sources];
+  for (const group of groups) {
+    const evidence = group.map((s, i) => `[source ${i + 1}] ${s.title}\n${s.text}`).join('\n\n').slice(0, 9000);
+    const raw = await aiComplete({
+      system: FACT_PICK_SYSTEM,
+      messages: [{ role: 'user', content: `Topic: ${topic}${focus ? `\nFocus: ${focus}` : ''}${avoid.length ? `\nAlready used, pick a different fact: ${avoid.slice(-20).map((f) => f.slice(0, 120)).join(' | ')}` : ''}\n\nSources:\n${evidence}` }],
+      json: true,
+      effort: 'low',
+      provider,
+      model: getEffectiveModel(provider),
+    }).catch((err) => { console.warn(`[fact] call failed: ${err?.message || err}`); return ''; });
+    const pick = extractJson<{ fact?: string; quote?: string; source?: number }>(raw);
+    const fact = String(pick?.fact ?? '').trim();
+    const quote = String(pick?.quote ?? '').trim();
+    const src = group[Number(pick?.source ?? 0) - 1];
+    if (!fact || !src || squeezeText(quote).length < 20) continue;
+    // The quote must be in the source. A quote the model made up is not a fact from the source.
+    if (!squeezeText(src.text).includes(squeezeText(quote))) continue;
+    return { fact, quote, source: src.title };
+  }
+  return null;
+}
+
+/** A fact planned for one question slot: it is quoted from a source, and the question is written around it. */
+export interface AssignedFact { subtopic: string; fact: string; quote: string; source: string }
+
+const PLAN_FACTS_SYSTEM =
+  'You list distinct, high-yield, exam-testable facts about one subtopic that the sources state. Do not repeat a fact already planned. ' +
+  'Copy the supporting words exactly from one source. Reply with ONLY JSON: ' +
+  '{"facts":[{"fact":"one sentence","quote":"exact words from that source","source":<source number>}]}. ' +
+  'Give at most the number of facts asked for; give fewer if the sources do not support that many.';
+
+/**
+ * Fact assignment: plans the set before any question is written. For each important subtopic, the sources give up to
+ * that many distinct facts, each quoted from a source. Each planned fact becomes one question slot, so questions do not
+ * repeat one another. Facts whose quote is not in the source are dropped.
+ */
+export async function planTopicFacts(
+  topic: string,
+  subtopics: string[],
+  facts: number[],
+  provider: AiProviderId,
+): Promise<AssignedFact[]> {
+  const sources = await fetchTopicSources(topic);
+  if (!sources.length) return [];
+  const kindOf = (s: unknown) => (s as { kind?: string }).kind;
+  const ordered = [...sources.filter((s) => kindOf(s) === 'label' || kindOf(s) === 'book'), ...sources.filter((s) => kindOf(s) !== 'label' && kindOf(s) !== 'book')];
+  const evidence = ordered.map((s, i) => `[source ${i + 1}] ${s.title}\n${s.text}`).join('\n\n').slice(0, 9000);
+  const planned: AssignedFact[] = [];
+  const usedFacts: string[] = [];
+  for (let i = 0; i < subtopics.length; i++) {
+    const want = Math.max(1, facts[i] ?? 1);
+    const raw = await aiComplete({
+      system: PLAN_FACTS_SYSTEM,
+      messages: [{ role: 'user', content: `Topic: ${topic}\nSubtopic: ${subtopics[i]}\nNumber of facts: ${want}${usedFacts.length ? `\nAlready planned, do not repeat: ${usedFacts.slice(-40).map((f) => f.slice(0, 100)).join(' | ')}` : ''}\n\nSources:\n${evidence}` }],
+      json: true,
+      effort: 'low',
+      provider,
+      model: getEffectiveModel(provider),
+    }).catch(() => '');
+    const parsed = extractJson<{ facts?: { fact?: string; quote?: string; source?: number }[] }>(raw);
+    let kept = 0;
+    for (const f of parsed?.facts ?? []) {
+      if (kept >= want) break;
+      const fact = String(f?.fact ?? '').trim();
+      const quote = String(f?.quote ?? '').trim();
+      const src = ordered[Number(f?.source ?? 0) - 1];
+      if (!fact || !src || squeezeText(quote).length < 20) continue;
+      if (!squeezeText(src.text).includes(squeezeText(quote))) continue;
+      if (usedFacts.some((u) => stemSimilarity(u, fact) >= KEY_FACT_SIMILARITY)) continue;
+      planned.push({ subtopic: subtopics[i], fact, quote, source: src.title });
+      usedFacts.push(fact);
+      kept += 1;
+    }
+  }
+  return planned;
+}
+
+/** The web and library sources for a topic, from the research endpoint, kept for a few minutes. */
+async function fetchTopicSources(topic: string): Promise<{ title: string; text: string; kind?: string }[]> {
+  const cacheKey = topic.toLowerCase();
+  const cached = researchCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < RESEARCH_TTL_MS) return cached.sources;
+  try {
+    const res = await fetch('/api/web/research', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: topic }) });
+    const data = await res.json().catch(() => ({}));
+    const sources = res.ok && Array.isArray(data.sources) ? data.sources : [];
+    if (sources.length) researchCache.set(cacheKey, { at: Date.now(), sources });
+    return sources;
+  } catch {
+    return [];
   }
 }
 
@@ -525,7 +693,7 @@ const GENERATION_RULES =
   'The stem must contain the facts needed to answer the question, and the keyed option must be the one the sources support.';
 
 // A topic whose question failed or was dropped is written again this many times before it is given up.
-const MAX_TOPIC_RETRIES = 3;
+const MAX_TOPIC_RETRIES = 2;
 
 // Copies of the same question request sent at once. The first copy that passes every check is kept.
 const QUESTION_COPIES = 2;
@@ -597,6 +765,12 @@ async function verifyItem(q: ClinicalQuestion, groundOn: { query: string; subjec
 export function structureReason(q: ClinicalQuestion): string | null {
   const text = `${q.stem ?? ''} ${(q as { questionText?: string }).questionText ?? ''}`.trim();
   if ((q.stem ?? '').trim().length < 20 && text.length < 80) return 'empty-stem';
+  // A stem that ends mid-sentence (":", ",", ";") was cut off before the question.
+  if (/[:,;]\s*$/.test((q.stem ?? '').trim())) return 'stem-incomplete';
+  // A stem that only repeats the question gives the student no case or context.
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const questionOnly = (q as { questionText?: string }).questionText ?? '';
+  if (questionOnly && norm(q.stem ?? '') === norm(questionOnly)) return 'stem-repeats-question';
   const optionText = q.options.map((o) => o.text).join(' ');
   const refersToStatements = /\bstatements?\b|\b\d\s*(,|and|&)\s*\d\b.*\bonly\b/i.test(optionText);
   const listsStatements = /(^|\s)1[.)]\s/.test(text) || /\bstatements?\s+(1|one)\b/i.test(text);
@@ -666,6 +840,10 @@ export interface GenerateQuestionsOptions {
   exam: ExamType;
   count: number;
   subjectSubtopics: { subject: string; subtopics: string[] }[];
+  /** The learner's typed topic, exactly as they wrote it. Every item must test that content itself. */
+  requestedTopic?: string;
+  /** Facts planned before writing (fact assignment): one question slot per planned fact. */
+  factPlan?: AssignedFact[];
   difficultyTier: DifficultyTier;
   difficultySubLevel?: DifficultySubLevel;
   effort?: string;
@@ -833,7 +1011,7 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
  */
 export async function generateExamQuestions(options: GenerateQuestionsOptions): Promise<{ questions: ClinicalQuestion[]; dropped: number; stopped: boolean; failure: string | null; imagesAttached: number }> {
   const {
-    exam, count, subjectSubtopics, difficultyTier, difficultySubLevel, effort,
+    exam, count, subjectSubtopics, requestedTopic, factPlan, difficultyTier, difficultySubLevel, effort,
     onProgress, onBatch, batchPromises, shouldStop, existing, usedUnits: unitsUsed, signal, onRetry,
     questionTypes, stemPatterns, evidenceSources, patientGroup, presentingProblems,
     sourceMaterial, customInstructions, includeImages,
@@ -904,7 +1082,15 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
 
   // The progress page counts one run, so the NVIDIA counts start again here.
   void fetch('/api/ai/nvidia-stats/reset', { method: 'POST' }).catch(() => {});
-  const plannedTopics = await planTopics(count);
+  // A typed topic is spread evenly across its categories, so the priority weighting is skipped: the planner
+  // would keep choosing the top-priority category, and one category would fill the whole set.
+  // With a fact plan, each planned fact is one slot (facts already used in this module are skipped on later rounds).
+  const plannedFacts = requestedTopic && factPlan?.length
+    ? factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`))
+    : [];
+  const plannedTopics = plannedFacts.length
+    ? plannedFacts.map((f) => ({ subject: requestedTopic ?? '', subtopic: f.subtopic, focus: f.fact, difficultyTier: tier, assigned: f }))
+    : requestedTopic ? null : await planTopics(count);
 
   // Build the subject/subtopic pool as fallback.
   const pool: { subject: string; subtopic: string }[] = [];
@@ -930,6 +1116,16 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string): Promise<ClinicalQuestion | null> => {
     if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
+    // Fact first (typed topics) where the sources have facts: the question is written around a fact the sources state.
+    // If picks keep failing with no success, the fact step is switched off and the earlier writer path is used.
+    // A slot with an assigned fact (from the fact plan) already has its fact, so no per-question pick runs.
+    const assigned = (topic as { assigned?: AssignedFact }).assigned;
+    const factStepOn = !assigned && Boolean(requestedTopic && activeProvider) && (factHits > 0 || factTries < 6);
+    const sourced = assigned ?? (factStepOn
+      ? await pickSourcedFact(requestedTopic!, focus, activeProvider!, signal ?? undefined, acceptedKeyFacts)
+      : null);
+    if (factStepOn) { if (sourced) factHits += 1; else factTries += 1; }
+
     // The server reads the internet on this topic with the request, and the writer checks its key against
     // those sources in the same call, so no separate check runs afterwards.
     const groundQuery = focus ?? focusParts(topic.subtopic)[0] ?? topic.subtopic;
@@ -940,6 +1136,11 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       // Rotate the set across the subtopic's parts (drug classes, systems) so one regimen
       // is not written again and again.
       focus ? `Focus this item on: ${focus}. Use a different drug, regimen or scenario from the usual textbook example.` : '',
+      // A typed topic is what the learner wants to learn: the item must ask about that content, not a downstream decision.
+      sourced ? `Base the correct option on this fact, which source "${sourced.source}" states: "${sourced.fact}". The question must test that fact, and the stem must not give the answer away. Set keyFact to this fact and sourceCheck to "supported".` : '',
+      requestedTopic ? `The learner asked for exactly: "${requestedTopic}". Each item must test that content itself (the named effect, feature, drug or fact). Test mechanism only if the request asks for it, and do not test a workup, diagnosis or management step that follows from it. Keep the stem short and direct; a brief case is fine only when the answer is that fact. The stem must give real context (a patient, a setting or a finding), never a topic label, and must not name or hint at the answer. Stay inside the request: do not write treatment, management or investigation items unless the request names them. The four options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis; otherwise ask for a supporting or most likely finding.` : '',
+      requestedTopic && acceptedStems.length ? `Already in this set, so do not reuse these patients, scenarios or drugs: ${acceptedStems.slice(-8).map((s) => s.slice(0, 160)).join(' | ')}` : '',
+      requestedTopic && acceptedKeyFacts.length ? `Key facts already tested in this set. Do not test any of them again, not even in other words: ${acceptedKeyFacts.slice(-20).map((f) => f.slice(0, 120)).join(' | ')}` : '',
       shape ?? '',
       'Make the four options similar in length and detail. The correct option must not be the longest or the most detailed.',
       `Difficulty: ${topic.difficultyTier}. ${TIER_BEHAVIOUR[topic.difficultyTier]}`,
@@ -989,7 +1190,31 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
 
         const q = buildQuestion(parsed, exam, [{ subject: topic.subject, subtopic: topic.subtopic }], topic.difficultyTier, difficultySubLevel, pattern.opts);
         if (!q) { logStage('drop:invalid', 0); return null; }
-        const shape = structureReason(q);
+        // For a typed topic a stem under six words is usually just a label, not context for the question.
+        const thinStem = requestedTopic && (q.stem ?? '').trim().split(/\s+/).filter(Boolean).length < 6;
+        // Two options that say nearly the same thing make the item ambiguous, so the item is dropped.
+        const optionTexts = (q.options || []).map((o) => o.text);
+        const twinOptions = optionTexts.some((a, i) => optionTexts.some((b, j) => j > i && stemSimilarity(a, b) >= 0.7));
+        // The same age and sex as a patient already in the set makes the items look alike, so the item is dropped.
+        const patientOf = (s: string) => (s.match(/\b\d{1,3}[- ](?:year|month)s?[- ]old\s+(?:man|woman|boy|girl|infant|child|male|female)\b/i)?.[0] ?? '').toLowerCase();
+        const myPatient = patientOf(q.stem ?? '');
+        const repeatedPatient = requestedTopic && myPatient !== '' && acceptedStems.some((s) => patientOf(s) === myPatient);
+        // Patient stems are capped at half the set, so the set is not mostly vignettes. A stricter cap made most attempts fail.
+        const isCase = requestedTopic && /\b\d{1,3}[- ](?:year|month)s?[- ]old\b/i.test(q.stem ?? '');
+        const casesSoFar = acceptedStems.filter((s) => /\b\d{1,3}[- ](?:year|month)s?[- ]old\b/i.test(s)).length;
+        // The cap starts once 8 items are kept; from the first item it stalled sets on topics the verifier finds harder.
+        const tooManyCases = Boolean(isCase) && acceptedStems.length >= 8 && casesSoFar >= Math.ceil(0.5 * (acceptedStems.length + 1));
+        // A typed topic that does not name treatment gets no treatment or management items (hard filter, not a prompt hint).
+        const topicNamesTreatment = /treat|manag|therap|drug|dose|regimen|rescue|prevent/i.test(requestedTopic ?? '');
+        // Only clear treatment phrases count; words like "therapy" or "dose" also appear in side-effect questions.
+        const treatmentItem = /\b(management|treatment of|treatment is|first-line|next step|initial therapy|rescue therapy|drug of choice|prophylaxis)\b/i.test(`${q.stem ?? ''} ${(q as { questionText?: string }).questionText ?? ''}`);
+        const driftsIntoTreatment = Boolean(requestedTopic) && !topicNamesTreatment && treatmentItem;
+        // A generic lead-in ("Choose the single best answer") or a very short question line does not name the fact it tests.
+        const qLine = ((q as { questionText?: string }).questionText ?? '').trim();
+        // A question must stand on its own stem: it cannot point to a list or item the stem does not give.
+        const dependsOnOutside = /\b(that|those|this|these) (list|group|set|pattern|eruption|finding|statement)s?\b|\blisted\b|\bon that\b|\bthat list\b|\bthat statement\b/i.test(`${q.stem ?? ''} ${qLine}`) && !/\b(list|statement|pattern)\b/i.test(q.stem ?? '');
+        const genericLeadIn = Boolean(requestedTopic) && (qLine.length < 40 || /^(choose|select) the (single )?best answer/i.test(qLine) || dependsOnOutside);
+        const shape = structureReason(q) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases ? 'too-many-cases' : null) ?? (driftsIntoTreatment ? 'treatment-drift' : null);
         if (shape) { logStage(`drop:${shape}`, 0); return null; }
         const hint = hintReason(q);
         if (hint) { logStage(`drop:${hint}`, 0); return null; }
@@ -1013,7 +1238,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const fullStem = toBenchItem(q).stem;
         if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) { logStage('drop:similar-stem', 0); return null; }
         // The same key fact asked in other words (same drug, same finding) is a repeat, even when the stem differs.
-        const keyFact = (q.keyFact || '').trim();
+        // Without a written key fact, the correct option's text stands in, so repeats are still caught.
+        const keyFact = (q.keyFact || '').trim() || (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim();
         if (keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { logStage('drop:repeat-fact', 0); return null; }
         seenStems.add(key);
         acceptedStems.push(fullStem);
@@ -1112,6 +1338,11 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }
     return refilling;
   };
+  // Fact-first counters for this run: how many picks worked and how many were tried.
+  let factHits = 0;
+  let factTries = 0;
+  let markTargetReached: () => void = () => {};
+  const targetReached = new Promise<void>((resolve) => { markTargetReached = resolve; });
   const worker = async (): Promise<void> => {
     for (;;) {
       if (stopped || shouldStop?.() || signal?.aborted || questions.length >= count) return;
@@ -1129,7 +1360,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       // A planned topic carries its own focus (one drug class, one part of a subtopic); otherwise rotate the parts.
       const focus = topic.focus ?? (parts.length > 1 ? parts[idx % parts.length] : undefined);
       questionsInProgress += 1;
-      const q = await generateSingleQuestion(topic, 0, focus, itemShape(idx, exam)).finally(() => { questionsInProgress -= 1; });
+      const q = await generateSingleQuestion(topic, 0, focus, requestedTopic ? typedShape(idx) : itemShape(idx, exam)).finally(() => { questionsInProgress -= 1; });
       completedCount += 1;
       if (q && questions.length >= count) {
         // Questions still in flight when the target was reached are discarded, so the set never goes over the count asked for.
@@ -1137,6 +1368,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       } else if (q) {
         questions.push(q);
         reportQuestion('accepted');
+        if (questions.length >= count) markTargetReached();
       } else if (retries < MAX_TOPIC_RETRIES && !stopped && !signal?.aborted) {
         // The call failed or the question was dropped: the same topic goes back in the queue, so it is written again.
         queue.push({ topic, idx, retries: retries + 1 });
@@ -1148,7 +1380,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       }
     }
   };
-  await Promise.all(Array.from({ length: GENERATION_CONCURRENCY }, () => worker()));
+  // The run ends as soon as the target is reached. Calls still in flight would only be discarded, so they are not waited for.
+  await Promise.race([Promise.all(Array.from({ length: GENERATION_CONCURRENCY }, () => worker())), targetReached]);
 
   // Dedup by stem (already done in generateSingleQuestion, but double-check).
   const unique = questions.filter((q, i) => questions.findIndex((x) => x.stem === q.stem) === i);

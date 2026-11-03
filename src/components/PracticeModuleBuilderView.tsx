@@ -23,7 +23,7 @@ import {
   AMC_CAT_DOMAINS_6
 } from '../data/mockClinicalData.ts';
 import { SUBTOPICS } from '../data/subtopics.ts';
-import { generateExamQuestions, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel, aiComplete, splitTopic, type GenerateQuestionsOptions } from '../lib/ai.ts';
+import { generateExamQuestions, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel, aiComplete, splitTopic, planTopicFacts, type AssignedFact, type GenerateQuestionsOptions } from '../lib/ai.ts';
 import { generateImageFirstQuestion, type BankImage } from '../lib/imageFirst.ts';
 import { summarizeAttempts, attemptsToday, listAttempts } from '../utils/attemptStore.ts';
 import { listUserHighlights } from '../utils/userHighlightsStore.ts';
@@ -429,7 +429,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   const handleLaunch = async (countOverride?: number) => {
     if (genState.busy) return;
     setHeldBackNote(null);
-    const targetCount = Math.max(1, Math.min(100, Math.round(countOverride ?? questionCount)));
+    const requestedCount = Math.max(1, Math.min(100, Math.round(countOverride ?? questionCount)));
 
     const keys = resolveSubjects();
     if (keys.length === 0 && !customTopic) {
@@ -467,8 +467,26 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
 
     // A typed topic is split into its distinct subtopics first, so the module spreads over them instead of repeating one topic.
     // Busy is set before the split, so the button is disabled at once and a second click cannot start another run.
-    setGenState({ busy: true, generated: 0, total: targetCount, batch: 0, totalBatches: Math.ceil(targetCount / 10), dropped: 0, error: null });
-    const typedSubtopics: string[] = customTopic ? await splitTopic(customTopic, selectedExam) : [];
+    setGenState({ busy: true, generated: 0, total: requestedCount, batch: 0, totalBatches: Math.ceil(requestedCount / 10), dropped: 0, error: null });
+    const split = customTopic ? await splitTopic(customTopic, selectedExam) : { subtopics: [], priorities: [], facts: [] };
+    const typedSubtopics: string[] = split.subtopics;
+    // Fact assignment: the important facts are planned from the sources before any question is written. Each planned
+    // fact is one question slot, so the set is exactly as big as the facts the sources support.
+    const planProvider = getActiveProvider();
+    const factPlan: AssignedFact[] = customTopic && planProvider && typedSubtopics.length
+      ? await planTopicFacts(customTopic, typedSubtopics, split.facts, planProvider)
+      : [];
+    // The count follows what the sources support. A topic with few important facts gets a smaller set, and the note
+    // says so, rather than forcing filler questions.
+    let targetCount = requestedCount;
+    if (customTopic) {
+      const supportable = Math.max(1, factPlan.length || split.facts.reduce((sum, f) => sum + f, 0));
+      if (requestedCount > supportable) {
+        targetCount = supportable;
+        setHeldBackNote(`Only about ${supportable} relevant questions are available for "${customTopic}" (${typedSubtopics.length} important topics), so this set will have ${supportable} instead of the ${requestedCount} you asked for.`);
+      }
+    }
+    setGenState((prev) => ({ ...prev, total: targetCount, totalBatches: Math.ceil(targetCount / 10) }));
     setProgressStep('generating');
     setProgressDetail({ refining: null, saved: null, qa: null, imageFirst: null });
     stopEarlyRef.current = false;
@@ -538,6 +556,8 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       const genArgs = (count: number, batchPromises: Promise<void>[]): GenerateQuestionsOptions => ({
         exam: selectedExam,
         count,
+        requestedTopic: customTopic || undefined,
+        factPlan: customTopic && factPlan.length ? factPlan.slice(0, targetCount) : undefined,
         subjectSubtopics: customTopic
           ? [{ subject: customTopic, subtopics: typedSubtopics.length ? typedSubtopics : [customTopic] }]
           : keys.map((key, i) => ({

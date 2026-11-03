@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
@@ -200,8 +201,31 @@ function opencodeKeyFromCli(): string {
   }
 }
 
+// The OpenCode desktop install ships its own CLI. `auth export` lists the credentials it stores,
+// including the device sign-in for the OpenCode Console account, which is what "Sign in" gives.
+let signInCache: { key: string; at: number } | null = null;
+function opencodeKeyFromSignIn(): string {
+  if (signInCache && Date.now() - signInCache.at < 5 * 60_000) return signInCache.key;
+  const cli = process.env.OPENCODE_CLI_PATH
+    || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'ai.opencode.desktop', 'resources', 'opencode-cli.exe');
+  let key = '';
+  try {
+    const list = JSON.parse(execFileSync(cli, ['auth', 'export'], { encoding: 'utf8', timeout: 15_000, windowsHide: true }));
+    // Either account's sign-in works: the OpenCode Console login or the OpenCode Go login.
+    const signedIn = (id: string) => list.find((c: any) => c?.integrationID === id && c?.active && c?.value?.type === 'oauth');
+    const fresh = (c: any) => typeof c?.value?.expires === 'number' && c.value.expires > Date.now() && typeof c?.value?.access === 'string';
+    const oauth = [signedIn('opencode-go'), signedIn('opencode')].find(fresh);
+    const goKey = list.find((c: any) => c?.integrationID === 'opencode-go' && c?.active && c?.value?.type === 'key');
+    key = oauth ? oauth.value.access : goKey?.value?.key ?? '';
+  } catch {
+    key = '';
+  }
+  signInCache = { key, at: Date.now() };
+  return key;
+}
+
 function opencodeKey(): string {
-  return (process.env.OPENCODE_API_KEY || opencodeKeyFromCli()).trim();
+  return (opencodeKeyFromSignIn() || process.env.OPENCODE_API_KEY || opencodeKeyFromCli()).trim();
 }
 
 /** Save/replace the OpenCode Console API key (never echoed back to the browser). */
@@ -694,7 +718,7 @@ app.get('/api/oauth/status', (req: Request, res: Response) => {
 });
 
 // POST /api/ai/split-topic: splits a typed topic into distinct subtopics. Runs once per module; cached per session.
-const splitCache = new Map<string, string[]>();
+const splitCache = new Map<string, { subtopic: string; priority: number; facts: number }[]>();
 app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
   const topic = String(req.body?.topic || '').trim().slice(0, 120);
   const exam = String(req.body?.exam || 'NEET-PG');
@@ -703,19 +727,32 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
   if (!topic || !provider) return res.json({ subtopics: [] });
   const key = JSON.stringify({ topic, exam, provider, model });
   const cached = splitCache.get(key);
-  if (cached) return res.json({ subtopics: cached });
+  if (cached) return res.json({ subtopics: cached.map((s) => s.subtopic), priorities: cached.map((s) => s.priority), facts: cached.map((s) => s.facts) });
+  // The split reads the library and the web first, so it lists only subtopics that have content behind them.
+  let evidence = '';
+  try {
+    const found = await webResearch(topic, 1200);
+    evidence = found.sources.map((s: any, i: number) => `[${i + 1}] ${s.title}\n${s.text}`).join('\n').slice(0, 6000);
+  } catch {
+    evidence = '';
+  }
   const prompt = [
     `You are an expert medical exam item writer for ${exam}.`,
+    evidence
+      ? `Evidence from the textbook library and the web on this topic (list only subtopics this evidence supports):\n${evidence}`
+      : 'No evidence was found, so list the subtopics an exam would test.',
     `Split the topic "${topic}" into its distinct subtopics, sorted as an examiner would sort them:`,
     'for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. Give 8 to 12 subtopics.',
     'Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.',
     'Give each subtopic a priority from 1 to 10 for how often it is tested.',
-    `Return only a JSON array of {"subject": "${topic}", "subtopic": "<name: items>", "priority": <1-10>}.`,
+    'Give each subtopic "facts": the number of high-yield, exam-testable facts in it (1 to 6). Count only facts an examiner would ask, not background detail.',
+    // JSON mode returns one object, so the list sits inside it under "subtopics".
+    `Return only a JSON object: {"subtopics": [{"subject": "${topic}", "subtopic": "<name: items>", "priority": <1-10>, "facts": <1-6>}, ...]}.`,
     'Do not repeat any entry.',
   ].join('\n');
   // Reads the subtopic list from one reply. Returns [] when the reply has no usable list.
-  const splitWith = async (useModel: string | undefined): Promise<string[]> => {
-    const raw = await runCompletion({ provider, model: useModel, messages: [{ role: 'user', content: prompt }], json: true, effort: 'min' });
+  const splitWith = async (useModel: string | undefined, text = prompt): Promise<{ subtopic: string; priority: number; facts: number }[]> => {
+    const raw = await runCompletion({ provider, model: useModel, messages: [{ role: 'user', content: text }], json: true, effort: 'min' });
     const parsed = extractJson<any>(raw);
     // Some models return one object, or a list wrapped in an object; both are read as a list.
     const asList: any[] = Array.isArray(parsed)
@@ -724,20 +761,48 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
         ? (Object.values(parsed).find(Array.isArray) as any[] | undefined) ?? [parsed]
         : [];
     console.log('[split-topic] model', useModel, 'raw', String(raw).slice(0, 120), 'items:', asList.length);
-    const list = asList.map((e: any) => (typeof e === 'string' ? e : e?.subtopic)).filter((s: any) => typeof s === 'string' && s.trim());
-    return [...new Set(list.map((s: string) => s.trim()))].slice(0, 12);
+    // Each subtopic carries the exam priority (1-10) the model gave it. The most important come first, and
+    // only those at 5 or above are kept, so the count reflects what is actually tested.
+    const rated = asList
+      .map((e: any) => (typeof e === 'string'
+        ? { subtopic: e, priority: 10, facts: 1 }
+        : { subtopic: e?.subtopic, priority: Number(e?.priority) || 0, facts: Math.min(6, Math.max(1, Math.round(Number(e?.facts) || 1))) }))
+      .filter((r: any) => typeof r.subtopic === 'string' && r.subtopic.trim());
+    const important = rated.filter((r: any) => r.priority >= 5);
+    const chosen = (important.length ? important : rated).sort((a: any, b: any) => b.priority - a.priority);
+    const seen = new Set<string>();
+    const unique: { subtopic: string; priority: number; facts: number }[] = [];
+    for (const r of chosen) {
+      const name = r.subtopic.trim();
+      if (seen.has(name)) continue;
+      seen.add(name);
+      unique.push({ subtopic: name, priority: r.priority, facts: r.facts });
+    }
+    return unique.slice(0, 12);
   };
   try {
     // A small model sometimes gives no list. Retry once with the stronger default model, then fall back to the typed topic.
     let subtopics = await splitWith(model || undefined).catch(() => []);
     if (!subtopics.length && provider === 'nvidia') subtopics = await splitWith(DEFAULT_MODELS.nvidia).catch(() => []);
-    if (!subtopics.length) subtopics = [topic];
+    // One or two categories cannot spread a set, so a thin split is asked again with a stricter brief.
+    if (subtopics.length < 4) {
+      const strict = [
+        prompt,
+        'Your last reply gave too few subtopics. Return at least 8, each a different category.',
+        'For a drug or drug class, cover every organ system and effect type it is known for (for example renal, neurological, sensory, haematological, hepatic, cardiac, metabolic, skin, endocrine, pregnancy), plus its key interactions and monitoring.',
+        'For a disease, cover its causes, clinical features, investigations, treatment, complications and prognosis.',
+        'A single subtopic is not acceptable.',
+      ].join('\n');
+      const more = await splitWith(model || undefined, strict).catch(() => []);
+      if (more.length > subtopics.length) subtopics = more;
+    }
+    if (!subtopics.length) subtopics = [{ subtopic: topic, priority: 10, facts: 1 }];
     if (splitCache.size >= 50) splitCache.delete(splitCache.keys().next().value as string);
     splitCache.set(key, subtopics);
-    return res.json({ subtopics });
+    return res.json({ subtopics: subtopics.map((s) => s.subtopic), priorities: subtopics.map((s) => s.priority), facts: subtopics.map((s) => s.facts) });
   } catch (err: any) {
     console.log('[split-topic] failed:', err?.message || err);
-    return res.json({ subtopics: [topic] });
+    return res.json({ subtopics: [topic], priorities: [10], facts: [1] });
   }
 });
 
