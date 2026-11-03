@@ -1035,6 +1035,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const acceptedStems: string[] = [];
   // Key facts of accepted questions: the same fact asked in other words is still a repeat.
   const acceptedKeyFacts: string[] = [];
+  // Correct answers kept so far in this set (checked so one answer is not asked twice).
+  const acceptedAnswers: string[] = [];
   const stemKey = (stem: string) =>
     stem.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 140);
   // Topic units already written: "subtopic|focus". Planning in a later round skips them.
@@ -1203,7 +1205,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const isCase = requestedTopic && /\b\d{1,3}[- ](?:year|month)s?[- ]old\b/i.test(q.stem ?? '');
         const casesSoFar = acceptedStems.filter((s) => /\b\d{1,3}[- ](?:year|month)s?[- ]old\b/i.test(s)).length;
         // The cap starts once 8 items are kept; from the first item it stalled sets on topics the verifier finds harder.
-        const tooManyCases = Boolean(isCase) && acceptedStems.length >= 8 && casesSoFar >= Math.ceil(0.5 * (acceptedStems.length + 1));
+        const tooManyCases = Boolean(isCase) && acceptedStems.length >= 8 && casesSoFar >= Math.ceil(0.6 * (acceptedStems.length + 1));
         // A typed topic that does not name treatment gets no treatment or management items (hard filter, not a prompt hint).
         const topicNamesTreatment = /treat|manag|therap|drug|dose|regimen|rescue|prevent/i.test(requestedTopic ?? '');
         // Only clear treatment phrases count; words like "therapy" or "dose" also appear in side-effect questions.
@@ -1239,8 +1241,13 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) { logStage('drop:similar-stem', 0); return null; }
         // The same key fact asked in other words (same drug, same finding) is a repeat, even when the stem differs.
         // Without a written key fact, the correct option's text stands in, so repeats are still caught.
-        const keyFact = (q.keyFact || '').trim() || (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim();
-        if (keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { logStage('drop:repeat-fact', 0); return null; }
+        // A planned slot keeps its planned fact as the key fact. The planner already kept those facts distinct.
+        const keyFact = sourced ? sourced.fact : ((q.keyFact || '').trim() || (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim());
+        if (!sourced && keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { logStage('drop:repeat-fact', 0); return null; }
+        // The same correct answer asked again in other words (for example the same imaging test) is also a repeat.
+        const correctText = (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim();
+        if (correctText && requestedTopic && acceptedAnswers.some((a) => stemSimilarity(a, correctText) >= 0.6)) { logStage('drop:repeat-answer', 0); return null; }
+        if (correctText) acceptedAnswers.push(correctText);
         seenStems.add(key);
         acceptedStems.push(fullStem);
         if (keyFact) acceptedKeyFacts.push(keyFact);
