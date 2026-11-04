@@ -100,12 +100,12 @@ export async function runCase(c) {
   try { cached = JSON.parse(localStorage.getItem(cacheKey) || 'null'); } catch { cached = null; }
   let split;
   let plan;
-  if (cached && Date.now() - cached.at < 24 * 3600 * 1000 && cached.plan?.length) {
+  if (cached && Date.now() - cached.at < 24 * 3600 * 1000 && cached.plan?.length >= 6) {
     ({ split, plan } = cached);
   } else {
     split = await splitTopic(c.topic, c.exam);
     plan = split.subtopics.length ? await planTopicFacts(c.topic, split.subtopics, split.facts, provider) : [];
-    try { if (plan.length) localStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), split, plan })); } catch { /* storage full */ }
+    try { if (plan.length >= 6) localStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), split, plan })); } catch { /* storage full */ }
   }
   const factsTotal = split.facts.reduce((a, b) => a + b, 0);
   const target = Math.max(1, Math.min(c.count, plan.length ? Math.min(plan.length, factsTotal) : factsTotal));
