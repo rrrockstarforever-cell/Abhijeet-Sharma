@@ -390,7 +390,27 @@ export async function planTopicFacts(
       kept += 1;
     }
   }
-  return planned;
+  return dedupePlan(planned, provider);
+}
+
+/**
+ * One pass over the whole plan: a fact that makes the same point as an earlier fact (in different words) is removed.
+ * Word matching cannot see that two sentences say the same thing, so the model decides.
+ */
+async function dedupePlan(plan: AssignedFact[], provider: AiProviderId): Promise<AssignedFact[]> {
+  if (plan.length < 2) return plan;
+  const list = plan.map((f, i) => `${i + 1}. ${f.fact}`).join('\n');
+  const raw = await aiComplete({
+    system: 'You check a numbered list of exam facts. Some facts make the same point as an earlier fact, in different words. ' +
+      'Reply with ONLY JSON: {"duplicates":[<numbers of the later facts that repeat an earlier one>]}. Reply {"duplicates":[]} if none.',
+    messages: [{ role: 'user', content: list }],
+    json: true,
+    effort: 'low',
+    provider,
+    model: getEffectiveModel(provider),
+  }).catch(() => '');
+  const drop = new Set((extractJson<{ duplicates?: number[] }>(raw)?.duplicates ?? []).map((n) => Number(n) - 1));
+  return plan.filter((_, i) => !drop.has(i));
 }
 
 /** The web and library sources for a topic, from the research endpoint, kept for a few minutes. */
