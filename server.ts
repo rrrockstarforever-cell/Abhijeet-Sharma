@@ -751,8 +751,8 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
     'Do not repeat any entry.',
   ].join('\n');
   // Reads the subtopic list from one reply. Returns [] when the reply has no usable list.
-  const splitWith = async (useModel: string | undefined, text = prompt): Promise<{ subtopic: string; priority: number; facts: number }[]> => {
-    const raw = await runCompletion({ provider, model: useModel, messages: [{ role: 'user', content: text }], json: true, effort: 'min' });
+  const splitWith = async (useModel: string | undefined, text = prompt, via = provider): Promise<{ subtopic: string; priority: number; facts: number }[]> => {
+    const raw = await runCompletion({ provider: via, model: useModel, messages: [{ role: 'user', content: text }], json: true, effort: 'min' });
     const parsed = extractJson<any>(raw);
     // Some models return one object, or a list wrapped in an object; both are read as a list.
     const asList: any[] = Array.isArray(parsed)
@@ -795,6 +795,11 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
       ].join('\n');
       const more = await splitWith(model || undefined, strict).catch(() => []);
       if (more.length > subtopics.length) subtopics = more;
+    }
+    // VyceAI sometimes cannot answer this brief at all (long evidence); NVIDIA is the fallback for the split.
+    if (subtopics.length < 4 && provider === 'vyce') {
+      const alt = await splitWith(DEFAULT_MODELS.nvidia, prompt, 'nvidia').catch(() => []);
+      if (alt.length > subtopics.length) subtopics = alt;
     }
     // A failed or thin split (the provider was rate-limited or timed out) is never kept: the next request asks again.
     const thin = subtopics.length < 4;
