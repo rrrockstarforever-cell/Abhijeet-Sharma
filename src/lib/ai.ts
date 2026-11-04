@@ -355,14 +355,21 @@ export async function planTopicFacts(
   facts: number[],
   provider: AiProviderId,
 ): Promise<AssignedFact[]> {
-  const sources = await fetchTopicSources(topic);
-  if (!sources.length) return [];
   const kindOf = (s: unknown) => (s as { kind?: string }).kind;
-  const ordered = [...sources.filter((s) => kindOf(s) === 'label' || kindOf(s) === 'book'), ...sources.filter((s) => kindOf(s) !== 'label' && kindOf(s) !== 'book')];
-  const evidence = ordered.map((s, i) => `[source ${i + 1}] ${s.title}\n${s.text}`).join('\n\n').slice(0, 9000);
+  // Each subtopic is searched on its own, so its facts come from text about that subtopic and not from one narrow
+  // set of results for the whole topic. The searches run together.
+  const [topicSources, ...subSourceLists] = await Promise.all([
+    fetchTopicSources(topic),
+    ...subtopics.map((s) => fetchTopicSources(`${topic} ${s.split(':')[0].trim()}`)),
+  ]);
   const planned: AssignedFact[] = [];
   const usedFacts: string[] = [];
   for (let i = 0; i < subtopics.length; i++) {
+    const found = subSourceLists[i];
+    const sources = found.length ? found : topicSources;
+    if (!sources.length) continue;
+    const ordered = [...sources.filter((s) => kindOf(s) === 'label' || kindOf(s) === 'book'), ...sources.filter((s) => kindOf(s) !== 'label' && kindOf(s) !== 'book')];
+    const evidence = ordered.map((s, n) => `[source ${n + 1}] ${s.title}\n${s.text}`).join('\n\n').slice(0, 9000);
     // Spare facts (about half again) let a slot whose question fails its checks be replaced by another planned fact.
     const want = Math.max(1, facts[i] ?? 1);
     const ask = want + Math.ceil(want / 2);
@@ -383,6 +390,10 @@ export async function planTopicFacts(
       const src = ordered[Number(f?.source ?? 0) - 1];
       if (!fact || !src || squeezeText(quote).length < 20) continue;
       if (!squeezeText(src.text).includes(squeezeText(quote))) continue;
+      // A single case report or a paediatric study is not a general exam fact.
+      if (/case report|case series|a case of|successful management|fatal|pediatric|paediatric|in children/i.test(src.title)) continue;
+      // Research-paper detail (statistics, gene or protein expression, open questions) is not a high-yield exam fact.
+      if (/\b(AUC|expression|interleukin|odds ratio|hazard ratio|cohort|95% ?CI|biomarker|incompletely characteri[sz]ed|not well characteri[sz]ed|further studies|remain unclear)\b/i.test(fact)) continue;
       // The same fact planned under two subtopics is one fact: compare with abbreviations and generic words normalised.
       if (usedFacts.some((u) => stemSimilarity(factKey(u), factKey(fact)) >= 0.5)) continue;
       planned.push({ subtopic: subtopics[i], fact, quote, source: src.title });
@@ -1247,7 +1258,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const qLine = ((q as { questionText?: string }).questionText ?? '').trim();
         // A question must stand on its own stem: it cannot point to a list or item the stem does not give.
         const dependsOnOutside = /\b(that|those|this|these) (list|group|set|pattern|eruption|finding|statement)s?\b|\blisted\b|\bon that\b|\bthat list\b|\bthat statement\b/i.test(`${q.stem ?? ''} ${qLine}`) && !/\b(list|statement|pattern)\b/i.test(q.stem ?? '');
-        const genericLeadIn = Boolean(requestedTopic) && (qLine.length < 40 || /^(choose|select) the (single )?best answer/i.test(qLine) || /^which of the following is the most likely diagnosis\??$/i.test(qLine) || dependsOnOutside);
+        // A stem that is itself a question (ends with "?") is not a stem: it gives no case or context.
+        const stemIsQuestion = Boolean(requestedTopic) && /\?\s*$/.test((q.stem ?? '').trim());
+        const genericLeadIn = Boolean(requestedTopic) && (stemIsQuestion || qLine.length < 40 || /^(choose|select) the (single )?best answer/i.test(qLine) || /^which of the following is the most likely diagnosis\??$/i.test(qLine) || dependsOnOutside);
         const shape = structureReason(q) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases ? 'too-many-cases' : null) ?? (driftsIntoTreatment ? 'treatment-drift' : null);
         if (shape) { logStage(`drop:${shape}`, 0); return null; }
         const hint = hintReason(q);
