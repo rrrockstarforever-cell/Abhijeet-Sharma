@@ -6,7 +6,7 @@ import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } f
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
-import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, explainsDistractors, leadInsFromChips, planSlots, pointsAtMissingPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
+import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, explainsDistractors, explanationLeaks, leadInsFromChips, planSlots, pointsAtMissingPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
 
 /**
  * Two key facts this similar are the same fact (word overlap on the key-fact sentences). Set low because
@@ -484,7 +484,7 @@ async function repairExplanation(q: ClinicalQuestion): Promise<void> {
   const provider = getActiveProvider();
   if (!provider) return;
   const raw = await aiComplete({
-    system: 'You improve the explanation of one exam MCQ. Write 90 to 150 words: start with the key fact in **bold**, then one bullet per other option saying why it is wrong ("Option B: ..."), then one line "High-yield: ...". Keep every fact and the marked answer exactly as they are; add no new claims. Reply with ONLY JSON: {"explanation":"..."}.',
+    system: 'You improve the explanation of one exam MCQ. Write 90 to 150 words of clinical reasoning only: start with the key fact in **bold**, then one bullet per other option saying why it is wrong, naming the option by its text and never by its letter, then one line "High-yield: ...". Never mention sources, pages, attachments, the examiner or the question itself. Keep every fact and the marked answer exactly as they are; add no new claims. Reply with ONLY JSON: {"explanation":"..."}.',
     messages: [{ role: 'user', content: [q.stem, (q as { questionText?: string }).questionText ?? '', ...q.options.map((o) => `${o.id}) ${o.text}`), `Marked answer: ${q.correctOption}`, `Current explanation: ${String(q.explanation ?? '')}`].join('\n') }],
     json: true,
     effort: 'low',
@@ -1498,7 +1498,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // textbook layout makes true. Such a question is dropped and another is written in its place.
         if (requestedTopic && await examinerRejects(q, requestedTopic)) { if (ctx) ctx.reason = 'the examiner found the key wrong, two options defensible, or the fact too narrow'; logStage('drop:examiner', 0); return null; }
         // The explanation must say why the key is right and why the others are wrong; if it does not, it is rewritten.
-        if (requestedTopic && slot?.style !== 'calculation' && !explainsDistractors(q)) await repairExplanation(q);
+        if (requestedTopic && ((slot?.style !== 'calculation' && !explainsDistractors(q)) || explanationLeaks(q))) await repairExplanation(q);
         // The correct letters rotate through A-D over the accepted questions, so no letter dominates the set.
         // Coded options (combinations, numbers, assertion-reason) keep their order.
         if (requestedTopic && !codedOptions) placeCorrectAt(q, 'ABCD'[(acceptedStems.length + Math.floor(acceptedStems.length / 4)) % 4]);

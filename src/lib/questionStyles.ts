@@ -19,14 +19,14 @@ export interface Slot {
   related: string[];
 }
 
-const PATIENT = /\b(\d{1,3}[- ](?:year|month|week|day)s?[- ]old|\d{1,3}[- ]yo\b|a (?:man|woman|boy|girl|patient|child|infant|neonate|baby|male|female)\b)/i;
+const PATIENT = /\b(\d{1,3}[- ]?(?:year|month|week|day)s?[- ]?old|\d{1,3}[- ]?(?:yo|y\/o)\b|\b(?:man|woman|boy|girl|patient|child|infant|neonate|baby|male|female|lady|traveller|farmer|worker)\b[^.?]{0,50}\b(?:presents?|presented|comes|came|brought|complains?|complained|admitted|referred|reports?|reported|has|had|returns?|returned|develops?|developed|is being|was found|undergoes?)\b)/i;
 const words = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 
 /** What a lead-in asks, and how to recognise it in the question line. */
 const LEAD_INS: Record<LeadIn, { ask: string; test: RegExp }> = {
   'next-step': { ask: 'The question line asks for the next best step in management ("What is the most appropriate next step in management?").', test: /next (best |appropriate )?step|next step|most appropriate (next )?(step|management|action|initial)|best next|initial management/i },
-  'drug-of-choice': { ask: 'The question line asks for the drug of choice or the most appropriate drug ("Which drug is the drug of choice?").', test: /drug of choice|most appropriate (drug|medication|treatment|therapy|agent|antibiotic)|first[- ]line|best (drug|treatment|agent)|treatment of choice/i },
+  'drug-of-choice': { ask: 'The question line asks for the drug of choice or the most appropriate drug ("Which drug is the drug of choice?").', test: /drug of choice|most appropriate (drug|medication|treatment|therapy|agent|antibiotic|regimen|prophylaxis|dose)|first[- ]line|best (drug|treatment|agent|regimen)|treatment of choice|regimen of choice/i },
   'investigation-of-choice': { ask: 'The question line asks for the investigation of choice or the most appropriate test ("Which investigation is most appropriate?").', test: /investigation|test|imaging|scan|biopsy|gold standard|most (appropriate|useful|sensitive|specific)|best (initial )?(test|investigation)/i },
   'treatment-of-choice': { ask: 'The question line asks for the treatment of choice ("What is the treatment of choice?").', test: /treatment|management|therapy|drug|manage|intervention|procedure/i },
   diagnosis: { ask: 'The question line asks for the most likely diagnosis ("What is the most likely diagnosis?"). The stem must carry enough findings to settle it.', test: /diagnosis|condition|disorder|disease|most likely/i },
@@ -91,7 +91,7 @@ export const STYLES: Record<StyleId, StyleSpec> = {
     id: 'negative', chips: ['NOT / EXCEPT'], needsRelated: true, codedOptions: false,
     judge: 'a NOT/EXCEPT/FALSE question where exactly one option is the false one',
     instruction: (slot) => `Style: negative lead-in. The question line is "Which of the following is NOT true about ...?" (or "All of the following are features of ... EXCEPT"). Exactly three options are true statements about the topic and exactly one is false; the false one is the key.${relatedLine(slot)}`,
-    validate: (q) => (/\b(NOT|EXCEPT|FALSE|INCORRECT|LEAST|UNTRUE)\b/i.test(`${questionLine(q)} ${q.stem ?? ''}`) ? null : 'no-negative-lead-in: the question line must say NOT, EXCEPT or FALSE'),
+    validate: (q) => (/\b(NOT|EXCEPT|FALSE|INCORRECT|LEAST|UNTRUE|exception)\b/i.test(questionLine(q)) || /\b(EXCEPT)\b/.test(q.stem ?? '') ? null : 'no-negative-lead-in: the question line must say NOT, EXCEPT or FALSE'),
   },
   match: {
     id: 'match', chips: ['Match the following'], needsRelated: true, codedOptions: true,
@@ -151,7 +151,7 @@ export const STYLES: Record<StyleId, StyleSpec> = {
     id: 'image', chips: ['ECG / X-ray interpretation', 'Identify the structure'], needsRelated: false, codedOptions: false,
     judge: 'an image-based item: the stem names the picture type and states its findings in words, so it can be answered without seeing the picture',
     instruction: () => 'Style: image-based. The stem names the picture type and states what it shows in plain words, as if the picture were attached ("A chest X-ray shows ...", "An ECG shows ...", "A biopsy section shows ..."). Then ask for the condition, finding or structure. The stem must be answerable from the words alone. Set "figureModality" and "figureQuery" (3-6 words: the diagnosis plus the picture type).',
-    validate: (q) => (/\b(x-?ray|radiograph|ecg|ekg|ct|mri|ultrasound|sonograph|histolog|biopsy|smear|fundus|fundoscop|micrograph|photograph|section|slide|tracing|film|scan|angiogra|endoscop|specimen|lesion|picture|image)\b/i.test(`${q.stem ?? ''}`) || q.figureQuery ? null : 'no-picture-description: name the picture type and describe what it shows'),
+    validate: (q) => (/\b(x-?ray|radiograph|ecg|ekg|ct|mri|ultrasound|sonograph|histolog\w*|biopsy|smear|fundus|fundoscop\w*|micrograph|photograph|section|slide|tracing|film|scan|angiogra\w*|endoscop\w*|specimen|picture|image)\b[^.?]{0,70}\b(shows?|reveals?|demonstrates?|depicts?|displays?|is seen|are seen|seen|noted|visible|reading)\b/i.test(q.stem ?? '') ? null : 'no-picture-description: start the stem with the picture type and say what it shows ("A chest X-ray shows ...")'),
   },
 };
 
@@ -313,7 +313,9 @@ export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], 
     if (need > 0) wantedCount.set(style, need); else wantedCount.delete(style);
   }
   const fallback: StyleId = exam === 'NEET_PG' ? 'one-liner' : 'short-case';
-  for (let i = 0; i < n; i++) if (!slots[i]) slots[i] = { style: exam === 'AMC_CAT' ? 'vignette' : fallback, tier: 'MEDIUM', related: [] };
+  // A style the learner picked is never swapped for another: facts that fit it badly still get it (the writer builds the item
+  // from the concept), and only a mix chosen by the exam falls back to a plain style.
+  for (let i = 0; i < n; i++) if (!slots[i]) slots[i] = { style: picked.length ? picked[i % picked.length] : exam === 'AMC_CAT' ? 'vignette' : fallback, tier: 'MEDIUM', related: [] };
   // Lead-ins and tiers are laid over the final order; related facts come from the same subtopic, then from the rest.
   return slots.map((s, i) => {
     const slot = s as Slot;
@@ -330,7 +332,7 @@ export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], 
 
 /** The exam-specific rules that stay in force whatever the style (option count, wording, sources). */
 /** Style of options and explanation seen in the real papers, appended for every item. */
-export const COMMON_STYLE_RULES = 'Options are short: a term or a phrase of 1 to 6 words, unless the item needs a sentence. Explanation: 90 to 150 words. Start with the key fact in **bold**, then one bullet per other option saying why it is wrong ("Option B: ..."), then one line "High-yield: ...".';
+export const COMMON_STYLE_RULES = 'Options are short: a term or a phrase of 1 to 6 words, unless the item needs a sentence. Explanation: 90 to 150 words of clinical reasoning only. Start with the key fact in **bold**, then one bullet per other option saying why it is wrong, naming the option by its text and never by its letter ("Hyperkalaemia: ..."), then one line "High-yield: ...". Never mention sources, pages, attachments, the examiner or the question itself.';
 
 export const EXAM_RULES: Record<ExamType, string> = {
   NEET_PG: 'NEET PG (NBEMS): exactly 4 options (A-D), one correct. Options are homogeneous and close. Avoid "all of the above" and "none of the above".',
@@ -352,4 +354,9 @@ export function tierText(style: StyleId, tier: 'LOW' | 'MEDIUM' | 'HIGH'): strin
     MEDIUM: 'MEDIUM: needs recall plus one inference; distractors are classic confusions.',
     HIGH: 'HARD: needs precise knowledge; every distractor is individually plausible and the key is not guessable from keywords.',
   }[tier];
+}
+
+/** Meta-commentary that must not appear in an exam explanation (talk of sources, pages, attachments, the examiner). */
+export function explanationLeaks(q: ClinicalQuestion): boolean {
+  return /\b(the (attached |provided |given )?sources?\b[^.]{0,40}\b(do|does|did) not|as per (the )?(attached |provided )?sources?|attached sources?|the examiner|this (item|question) (tests|is testing|asks)|source note|page \d+|not (stated|described|mentioned) in the (attached|provided))/i.test(String(q.explanation ?? ''));
 }
