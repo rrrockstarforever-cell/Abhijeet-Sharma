@@ -103,8 +103,14 @@ export async function runCase(c) {
   if (cached && Date.now() - cached.at < 24 * 3600 * 1000 && cached.plan?.length >= 6) {
     ({ split, plan } = cached);
   } else {
-    split = await splitTopic(c.topic, c.exam);
-    plan = split.subtopics.length ? await planTopicFacts(c.topic, split.subtopics, split.facts, provider) : [];
+    // A provider that is rate-limited gives a one-subtopic split and a tiny plan; planning is tried again after a pause
+    // (up to three times) before the case goes on with whatever it got.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      split = await splitTopic(c.topic, c.exam);
+      plan = split.subtopics.length ? await planTopicFacts(c.topic, split.subtopics, split.facts, provider) : [];
+      if (plan.length >= 6 || attempt === 3) break;
+      await new Promise((resolve) => setTimeout(resolve, 20000 * attempt));
+    }
     try { if (plan.length >= 6) localStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), split, plan })); } catch { /* storage full */ }
   }
   const factsTotal = split.facts.reduce((a, b) => a + b, 0);

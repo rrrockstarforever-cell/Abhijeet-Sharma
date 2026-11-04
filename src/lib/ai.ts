@@ -406,30 +406,34 @@ export async function planTopicFacts(
       provider,
       model: getEffectiveModel(provider),
     }).catch(() => '');
-    return { ordered, ask, parsed: extractJson<{ facts?: { fact?: string; quote?: string; source?: number }[] }>(raw) };
+    return { ordered, ask, raw, parsed: extractJson<{ facts?: { fact?: string; quote?: string; source?: number }[] }>(raw) };
   }));
   for (let i = 0; i < subtopics.length; i++) {
     const got = extractions[i];
     if (!got) continue;
-    const { ordered, ask, parsed } = got;
+    const { ordered, ask, raw: rawText, parsed } = got;
     let kept = 0;
+    const why: Record<string, number> = {};
+    const skip = (reason: string) => { why[reason] = (why[reason] ?? 0) + 1; };
     for (const f of parsed?.facts ?? []) {
       if (kept >= ask) break;
       const fact = String(f?.fact ?? '').trim();
       const quote = String(f?.quote ?? '').trim();
       const src = ordered[Number(f?.source ?? 0) - 1];
-      if (!fact || !src || squeezeText(quote).length < 20) continue;
-      if (!squeezeText(src.text).includes(squeezeText(quote))) continue;
+      if (!fact || !src || squeezeText(quote).length < 20) { skip('no-fact-or-short-quote'); continue; }
+      if (!squeezeText(src.text).includes(squeezeText(quote))) { skip('quote-not-in-source'); continue; }
       // A single case report or a paediatric study is not a general exam fact.
-      if (/case report|case series|a case of|successful management|fatal|pediatric|paediatric|in children/i.test(src.title)) continue;
+      if (/case report|case series|a case of|successful management|fatal|pediatric|paediatric|in children/i.test(src.title)) { skip('case-report'); continue; }
       // Research-paper detail (statistics, gene or protein expression, open questions) is not a high-yield exam fact.
       if (/\b(AUC|expression|interleukin|odds ratio|hazard ratio|cohort|95% ?CI|biomarker|incompletely characteri[sz]ed|not well characteri[sz]ed|further studies|remain unclear|protocol|this study|the study|trial|muscle density|sample size|banked|enrol(l)?ed|follow-up|mendelian|randomi[sz]ation|subjects|participants|were reported|studied|analysis|meta-analysis|observational|compared with|compared to|committee|hospitali[sz]ation|significantly (more|less|higher|lower)|no association|reporting rate|MedDRA|incidence of \d|uncertain|unclear|(has|have) been evaluated|raising the question|awareness|whether|potentially|were more commonly|retrospective|umbrella|meta-analyses|no significant|between groups|few and mostly)\b|\d+\.\d+ ?%/i.test(fact)) continue;
       // The same fact planned under two subtopics is one fact: compare with abbreviations and generic words normalised.
-      if (usedFacts.some((u) => stemSimilarity(factKey(u), factKey(fact)) >= 0.5)) continue;
+      if (usedFacts.some((u) => stemSimilarity(factKey(u), factKey(fact)) >= 0.5)) { skip('duplicate'); continue; }
       planned.push({ subtopic: subtopics[i], fact, quote, source: src.title });
       usedFacts.push(fact);
       kept += 1;
     }
+    // For the quality tests: why a subtopic gave few facts (reply not JSON, quotes not in the sources, trivia filter, ...).
+    (globalThis as { __planDebug?: unknown[] }).__planDebug?.push({ subtopic: subtopics[i].slice(0, 50), asked: ask, replyChars: rawText.length, parsed: Array.isArray(parsed?.facts) ? parsed!.facts!.length : -1, kept, why, sources: ordered.length });
   }
   return tagPicturable(await dedupePlan(planned, provider), provider);
 }
