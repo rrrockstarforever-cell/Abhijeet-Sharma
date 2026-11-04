@@ -45,8 +45,22 @@ const PATIENT_PROFILES = [
 /** Item types for a typed topic, rotated across the set. Case stems are only 2 in 8 (about a quarter), so the set is not mostly vignettes. */
 /** The shape of one typed-topic question, with the letter its answer must sit at, so the correct letters are spread evenly. */
 function typedShape(idx: number): string {
-  const letter = 'ABCD'[(idx + Math.floor(idx / 4)) % 4];
-  return `${typedShapeBase(idx)} The correct answer must be option ${letter}.`;
+  return typedShapeBase(idx);
+}
+
+/**
+ * Moves the correct option to a chosen letter by swapping it with the option now there, so the correct letters of a set
+ * come out even (the writer favours C and D). Letters named in the explanation ("Option B is wrong") are swapped too.
+ */
+function placeCorrectAt(q: ClinicalQuestion, target: string): void {
+  const from = q.correctOption;
+  if (!from || from === target || !q.options.some((o) => o.id === target)) return;
+  const swap = (l: string) => (l === from ? target : l === target ? from : l);
+  type Letter = ClinicalQuestion['correctOption'];
+  q.options = q.options.map((o) => ({ ...o, id: swap(o.id) as Letter })).sort((a, b) => a.id.localeCompare(b.id));
+  q.correctOption = target as Letter;
+  const fix = (text: string | undefined) => text?.replace(/\b([Oo]ptions?|[Cc]hoices?)\s+([A-E](?:\s*(?:,|and|or|&)\s*[A-E])*)\b/g, (_m, word: string, list: string) => `${word} ${list.replace(/[A-E]/g, swap)}`);
+  q.explanation = fix(q.explanation) ?? q.explanation;
 }
 
 function typedShapeBase(idx: number): string {
@@ -1390,6 +1404,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // textbook layout makes true. Such a question is dropped and another is written in its place.
         if (requestedTopic && await examinerRejects(q, requestedTopic)) { logStage('drop:examiner', 0); return null; }
         if (correctKey) acceptedAnswers.push(correctKey);
+        // The correct letters rotate through A-D over the accepted questions, so no letter dominates the set.
+        if (requestedTopic) placeCorrectAt(q, 'ABCD'[(acceptedStems.length + Math.floor(acceptedStems.length / 4)) % 4]);
         seenStems.add(key);
         acceptedStems.push(fullStem);
         if (keyFact) acceptedKeyFacts.push(keyFact);
