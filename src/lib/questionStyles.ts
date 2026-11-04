@@ -312,7 +312,7 @@ export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], 
     // Styles that found no fitting fact fall back below.
     if (need > 0) wantedCount.set(style, need); else wantedCount.delete(style);
   }
-  const fallback: StyleId = exam === 'NEET_PG' ? 'one-liner' : 'short-case';
+  const fallback: StyleId = 'one-liner';
   // A style the learner picked is never swapped for another: facts that fit it badly still get it (the writer builds the item
   // from the concept), and only a mix chosen by the exam falls back to a plain style.
   for (let i = 0; i < n; i++) if (!slots[i]) slots[i] = { style: picked.length ? picked[i % picked.length] : exam === 'AMC_CAT' ? 'vignette' : fallback, tier: 'MEDIUM', related: [] };
@@ -332,7 +332,7 @@ export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], 
 
 /** The exam-specific rules that stay in force whatever the style (option count, wording, sources). */
 /** Style of options and explanation seen in the real papers, appended for every item. */
-export const COMMON_STYLE_RULES = 'Options are short: a term or a phrase of 1 to 6 words, unless the item needs a sentence. Explanation: 90 to 150 words of clinical reasoning only. Start with the key fact in **bold**, then one bullet per other option saying why it is wrong, naming the option by its text and never by its letter ("Hyperkalaemia: ..."), then one line "High-yield: ...". Never mention sources, pages, attachments, the examiner or the question itself.';
+export const COMMON_STYLE_RULES = 'Options are short: a term or a phrase of 1 to 6 words, unless the item needs a sentence. Explanation: 130 to 190 words of clinical reasoning only. Start with the key fact in **bold**, then one bullet per other option saying why it is wrong, naming the option by its text and never by its letter ("Hyperkalaemia: ..."), then one line "High-yield: ...". Never mention sources, pages, attachments, the examiner or the question itself.';
 
 export const EXAM_RULES: Record<ExamType, string> = {
   NEET_PG: 'NEET PG (NBEMS): exactly 4 options (A-D), one correct. Options are homogeneous and close. Avoid "all of the above" and "none of the above".',
