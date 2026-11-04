@@ -570,8 +570,29 @@ export async function aiComplete(options: AiCompleteOptions): Promise<string> {
   if (!provider) {
     throw new AiError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`, 'not_connected');
   }
-  return timed('write', () => completeOn(provider, options.model ?? route?.model ?? getEffectiveModel(provider), options), provider);
+  // When the OpenCode plan is used up, calls go to Claude Haiku 5.5 instead (if Claude is connected), and the plan
+  // is not tried again for ten minutes, so each call does not first fail on OpenCode.
+  const useHaiku = () => completeOn('claude', HAIKU_FALLBACK_MODEL, { ...options, provider: 'claude', model: HAIKU_FALLBACK_MODEL });
+  if (provider === 'opencode' && Date.now() < opencodeExhaustedUntil) {
+    try { return await timed('write', useHaiku, 'claude'); } catch { /* Claude is not available: try OpenCode anyway */ }
+  }
+  try {
+    return await timed('write', () => completeOn(provider, options.model ?? route?.model ?? getEffectiveModel(provider), options), provider);
+  } catch (err: any) {
+    if (provider !== 'opencode' || !/usage limit/i.test(String(err?.message || err))) throw err;
+    opencodeExhaustedUntil = Date.now() + 10 * 60 * 1000;
+    try {
+      return await timed('write', useHaiku, 'claude');
+    } catch {
+      opencodeExhaustedUntil = 0;
+      throw err;
+    }
+  }
 }
+
+/** The model used when the OpenCode plan has no usage left. */
+const HAIKU_FALLBACK_MODEL = 'claude-haiku-5-5';
+let opencodeExhaustedUntil = 0;
 
 /**
  * Runs a writing call as a server job: starts it, then checks it every 400 ms with a short request. The browser
