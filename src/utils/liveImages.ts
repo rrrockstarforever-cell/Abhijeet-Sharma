@@ -111,6 +111,13 @@ export async function findLiveImage(
   // variants that name the modality + the core finding.
   const variants: string[] = [q];
   const words = q.split(/\s+/);
+  // The diagnosis comes first and the modality last ("caseous necrosis granuloma histology"). Commons needs every word
+  // to match, so the diagnosis alone (without the modality word and then with fewer words) finds far more pictures.
+  const MODALITY_WORD = /^(histology|histological|histopathology|biopsy|micrograph|ecg|ekg|x-ray|xray|radiograph|ct|mri|ultrasound|smear|fundus|photo|photograph|clinical|image|picture)$/i;
+  const core = words.filter((w) => !MODALITY_WORD.test(w));
+  if (core.length && core.length < words.length) variants.push(core.join(' '));
+  if (core.length > 3) variants.push(core.slice(0, 3).join(' '));
+  if (core.length > 2) variants.push(core.slice(0, 2).join(' '));
   if (words.length > 4) {
     // Last 3-4 words usually carry the modality + key finding.
     variants.push(words.slice(-4).join(' '));

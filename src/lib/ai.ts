@@ -431,6 +431,29 @@ async function dedupePlan(plan: AssignedFact[], provider: AiProviderId): Promise
  * figureQuery on them. A question about a drug effect or a mechanism gets none. The picture search and the picture
  * check then run as usual, so a picture is attached only when it is found and verified.
  */
+async function examinerRejects(q: ClinicalQuestion, topic: string): Promise<boolean> {
+  const provider = getActiveProvider();
+  if (!provider) return false;
+  const raw = await aiComplete({
+    system:
+      'You are a strict NEET-PG / INI-CET / AMC examiner checking one MCQ before it is used. Mark ok=false if ANY of these is true: ' +
+      '(1) the marked answer is wrong by standard textbooks and guidelines; (2) more than one option is defensible; ' +
+      '(3) the answer only holds for one particular study, cohort, hospital, country or textbook layout, or it is a research detail no exam would ask; ' +
+      '(4) the stem or options are incomplete or contradict themselves. Otherwise ok=true. ' +
+      'Reply with ONLY JSON: {"ok":true,"problem":""} or {"ok":false,"problem":"one short sentence"}.',
+    messages: [{
+      role: 'user',
+      content: `Topic: ${topic}\n${q.stem}\n${q.questionText}\n` + q.options.map((o) => `${o.id}) ${o.text}`).join('\n') + `\nMarked answer: ${q.correctOption}\nExplanation: ${String(q.explanation ?? '').slice(0, 300)}`,
+    }],
+    json: true,
+    effort: 'low',
+    provider,
+    model: getEffectiveModel(provider),
+  }).catch(() => '');
+  // A failed check never blocks a question: only a clear "ok": false drops it.
+  return extractJson<{ ok?: boolean }>(raw)?.ok === false;
+}
+
 async function planFigure(q: ClinicalQuestion, topic: string): Promise<void> {
   const provider = getActiveProvider();
   if (!provider) return;
@@ -1329,6 +1352,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const correctText = (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim();
         const correctKey = answerKey(correctText);
         if (correctKey && requestedTopic && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { logStage('drop:repeat-answer', 0); return null; }
+        // A last look by a second reader: a wrong key, two defensible answers, or a fact that only one study, place or
+        // textbook layout makes true. Such a question is dropped and another is written in its place.
+        if (requestedTopic && await examinerRejects(q, requestedTopic)) { logStage('drop:examiner', 0); return null; }
         if (correctKey) acceptedAnswers.push(correctKey);
         seenStems.add(key);
         acceptedStems.push(fullStem);
@@ -1436,6 +1462,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // Fact-first counters for this run: how many picks worked and how many were tried.
   let factHits = 0;
   let factTries = 0;
+  let nullStreak = 0;
+  const MAX_NULL_STREAK = 60;
   let markTargetReached: () => void = () => {};
   const targetReached = new Promise<void>((resolve) => { markTargetReached = resolve; });
   const worker = async (): Promise<void> => {
@@ -1457,6 +1485,15 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       questionsInProgress += 1;
       const q = await generateSingleQuestion(topic, 0, focus, requestedTopic ? typedShape(idx) : itemShape(idx, exam)).finally(() => { questionsInProgress -= 1; });
       completedCount += 1;
+      // Circuit breaker: when the provider is down every slot fails, and a run that keeps refilling its queue would
+      // send thousands of calls. A long unbroken streak of failures ends the run with a message instead.
+      nullStreak = q ? 0 : nullStreak + 1;
+      if (nullStreak >= MAX_NULL_STREAK && questions.length < count && !stopped) {
+        failure = 'The AI provider kept returning errors, so this set was stopped. Check the connection and try again.';
+        stopped = true;
+        markTargetReached();
+        return;
+      }
       if (q && questions.length >= count) {
         // Questions still in flight when the target was reached are discarded, so the set never goes over the count asked for.
         logStage('drop:over-target', 0);
@@ -1513,5 +1550,5 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }
   }
 
-  return { questions, dropped, stopped, failure: null, imagesAttached: attachedImages };
+  return { questions, dropped, stopped, failure, imagesAttached: attachedImages };
 }
