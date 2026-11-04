@@ -2335,8 +2335,9 @@ async function visionVerify(
     'Look ONLY at the pixels. Decide:',
     '1. Does this image actually depict that finding / condition / diagnosis?',
     '2. Is the modality consistent (an ECG is not a photo; a chest X-ray is not a histology slide)?',
-    'Set pass=true ONLY if you can actually see the claimed finding in THIS image. If the image is unrelated, a random photo, a chart, text, a different body part, or you are unsure, set pass=false.',
-    'Answer with ONLY this JSON object and nothing else: {"pass": true, "reason": "one short sentence"}',
+    'First say, in "shows", what this image specifically shows (the exact condition or finding if you can tell, for example "bovine spongiform encephalopathy, brain histology" or "adrenoleukodystrophy MRI").',
+    'Then set pass=true ONLY if what it shows is the SAME specific condition or finding as the claim. A picture of a different disease in the same modality (a brain slide for a kidney disease, an MRI of another white-matter disease) is pass=false. A picture that is only "consistent with" the claim, or where you cannot tell the specific condition from the pixels alone, is pass=false. If the image is unrelated, a chart, text or a different body part, pass=false.',
+    'Answer with ONLY this JSON object and nothing else: {"shows": "what the image shows", "pass": true, "reason": "one short sentence"}',
   ].join('\n');
   const payload = JSON.stringify({
     model: model_,

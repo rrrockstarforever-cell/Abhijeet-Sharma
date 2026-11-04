@@ -24,6 +24,9 @@ export interface LiveImage {
 
 const LIVE_KEY = 'pulse.images.live';
 
+/** Words that name no particular condition, so a caption containing them says nothing about a match. */
+const GENERIC_TOPIC_WORDS = new Set(['disease', 'diseases', 'syndrome', 'change', 'changes', 'injury', 'injuries', 'lesion', 'lesions', 'finding', 'findings', 'with', 'from', 'case', 'sign', 'signs', 'acute', 'chronic', 'severe', 'image', 'picture', 'common', 'typical']);
+
 // Session cache: image search is slow (Commons + Open-i), so the same query is only
 // ever fetched once per page load.
 const rowsCache = new Map<string, LiveImage[]>();
@@ -176,7 +179,12 @@ export async function findLiveImage(
           t.length <= 3 ? new RegExp(`\\b${t}\\b`, 'i').test(hay) : hay.includes(t);
         // Topic tokens are the non-modality words of the query.
         const topicTokens = expandedTokens.filter((t) => !modalityTokens.includes(t));
-        const topicOk = topicTokens.length === 0 || topicTokens.some(matches);
+        // Words like "disease" or "change" appear in any caption, so they do not count towards a match. Most of the
+        // remaining words must be in the figure's own text ("minimal change disease" must not match a brain slide
+        // that only says "histopathologic changes").
+        const distinctive = topicTokens.filter((t) => !GENERIC_TOPIC_WORDS.has(t));
+        const needed = distinctive.length <= 1 ? distinctive.length : Math.ceil(distinctive.length * 0.6);
+        const topicOk = topicTokens.length === 0 || (distinctive.length ? distinctive.filter(matches).length >= needed : topicTokens.some(matches));
         if (modalityTokens.length > 0) {
           // Both the modality AND at least one topic word must appear in the figure's
           // own title/caption — a histology slide of an adrenal tumour is not a
@@ -234,14 +242,8 @@ export async function findLiveImage(
  * is dropped and only the credit/licence is shown pre-answer.
  */
 export function liveImageCaption(image: LiveImage): string {
-  const raw = (image.caption || image.title || '').trim();
-  // Open-i/Commons captions are frequently nothing but the diagnosis ("Conjunctivitis",
-  // "Prurigo Nodularis"): short, no sentence structure, and often identical to the
-  // figure title. Those are dropped rather than shown before the student answers.
-  const looksLikeDiagnosis =
-    raw.length > 0 && raw.length <= 48 && !/[.!?]/.test(raw) && raw.split(/\s+/).length <= 4;
-  const restatement = raw.length > 0 && raw.toLowerCase() === (image.title || '').trim().toLowerCase();
-  const caption = !looksLikeDiagnosis && !restatement ? raw : '';
-  const parts = [caption, image.credit, image.licence, 'Open-i/NLM'].filter(Boolean);
+  // A source caption usually names the diagnosis ("...radiograph of tetralogy of Fallot... boot-shaped heart"), so no
+  // part of it is shown before the student answers. Only the credit and licence are.
+  const parts = [image.credit, image.licence, image.provider || 'Open-i/NLM'].filter(Boolean);
   return parts.join(' · ');
 }

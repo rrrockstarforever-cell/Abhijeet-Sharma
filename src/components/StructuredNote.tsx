@@ -11,7 +11,12 @@ export type NoteBlock =
   | { type: 'steps'; items: { title: string; detail: string; tag: string }[] }
   | { type: 'table'; columns: string[]; rows: string[][] }
   | { type: 'trap'; text: string }
-  | { type: 'hook'; text: string };
+  | { type: 'hook'; text: string }
+  /** A figure from the book: the page is drawn from the PDF when the note is shown, so no picture is stored. */
+  | { type: 'figure'; page: number; caption: string };
+
+/** Draws one page of the book as an image (a data URL), or null when it cannot. */
+export type RenderPage = (page: number, caption?: string) => Promise<string | null>;
 
 export interface NoteSection {
   heading: string;
@@ -50,6 +55,7 @@ export const TEACHING_NOTE_SYSTEM = [
   '- The first time a technical term appears, add a short plain meaning in brackets, for example "enzyme (a protein that speeds up a reaction)". Do this only once per term.',
   '- Give each major idea one everyday analogy (a faulty brick, gum jammed in a lock), and use it in the section heading when it fits.',
   '- If the pages describe a process, the first section must include a "steps" block showing each step and what acts on it.',
+  '- Pictures help the student. When a page has a figure that the note teaches (a pathway, a structure, a curve, a photo, a table-like diagram), add a "figure" block right after the text that explains it: "page" is the [page N] label that holds the figure and "caption" is its caption as written (for example "FIGURE 23-5 Microsomal elongase system"). Use only figures whose caption appears on the pages, at most one per section and four per note.',
   '- Figure captions are part of the pages. If a caption describes a pathway or a cascade (for example one kinase activating another), teach it as a "steps" block; do not leave it out.',
   '- Text blocks are at most 4 sentences. Facts that can be compared go in tables with short cells. Include every item on the pages. A bare list of names goes in a sentence, not a table.',
   '- Connect ideas where the pages allow it, for example why a regimen changes for a younger child.',
@@ -64,6 +70,7 @@ export const TEACHING_NOTE_SYSTEM = [
   '{"type":"steps","items":[{"title":"1. Step","detail":"what happens","tag":"what acts here"}]},',
   '{"type":"table","columns":["Drug","Why you would use it","What to watch for"],"rows":[["..","..",".."]]},',
   '{"type":"trap","text":"..."},',
+  '{"type":"figure","page":123,"caption":"FIGURE 23-5 Microsomal elongase system"},',
   '{"type":"hook","text":"..."}]}],',
   '"selfCheck":[{"q":"a short clinical question","a":"the answer and the reason"}]}',
   '"page" is the [page N] label where the section starts. Use "steps" only for a real sequence or process. Write 2 to 4 selfCheck questions.',
@@ -75,6 +82,10 @@ function toBlock(raw: any): NoteBlock | null {
   if (raw?.type === 'text' || raw?.type === 'trap' || raw?.type === 'hook') {
     const text = str(raw.text);
     return text ? { type: raw.type, text } : null;
+  }
+  if (raw?.type === 'figure') {
+    const page = Number(raw.page);
+    return Number.isInteger(page) && page > 0 ? { type: 'figure', page, caption: str(raw.caption) } : null;
   }
   if (raw?.type === 'steps' && Array.isArray(raw.items)) {
     const items = raw.items
@@ -163,6 +174,7 @@ export function teachingNoteToText(note: TeachingNote): string {
       if (b.type === 'text') lines.push(b.text);
       if (b.type === 'trap') lines.push(`Exam trap: ${b.text}`);
       if (b.type === 'hook') lines.push(`Memory hook: ${b.text}`);
+      if (b.type === 'figure') lines.push(`Figure (p. ${b.page}): ${b.caption}`);
       if (b.type === 'steps') b.items.forEach((i) => lines.push(`- ${[i.title, i.detail, i.tag].filter(Boolean).join(': ')}`));
       if (b.type === 'table') {
         lines.push(b.columns.join(' | '));
@@ -187,7 +199,33 @@ function inline(text: string): React.ReactNode[] {
   });
 }
 
-const Block: React.FC<{ block: NoteBlock }> = ({ block }) => {
+/** The book page that holds a figure, drawn on demand. Click to enlarge. */
+const FigureBlock: React.FC<{ page: number; caption: string; renderPage?: RenderPage; onOpenPage?: (page: number) => void }> = ({ page, caption, renderPage, onOpenPage }) => {
+  const [src, setSrc] = React.useState<string | null>(null);
+  const [failed, setFailed] = React.useState(false);
+  const [big, setBig] = React.useState(false);
+  React.useEffect(() => {
+    let live = true;
+    if (!renderPage) { setFailed(true); return; }
+    renderPage(page, caption).then((url) => { if (!live) return; if (url) setSrc(url); else setFailed(true); }).catch(() => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [page, caption, renderPage]);
+  return (
+    <figure className="rounded-xl border border-slate-200 bg-slate-50 p-2">
+      {src ? (
+        <img src={src} alt={caption || `Book page ${page}`} onClick={() => setBig((v) => !v)} className={`mx-auto cursor-zoom-in rounded-md border border-slate-200 bg-white ${big ? 'w-full' : 'max-h-96'}`} />
+      ) : (
+        <div className="flex h-24 items-center justify-center text-[11px] text-slate-500">
+          {failed ? (onOpenPage ? <button onClick={() => onOpenPage(page)} className="font-semibold text-[#00696b] hover:underline">Open page {page} to see the figure</button> : `See page ${page}`) : <Loader2 className="h-4 w-4 animate-spin" />}
+        </div>
+      )}
+      <figcaption className="mt-1.5 text-[11.5px] leading-snug text-slate-600">{caption ? inline(caption) : null} <span className="text-slate-400">(page {page})</span></figcaption>
+    </figure>
+  );
+};
+
+const Block: React.FC<{ block: NoteBlock; renderPage?: RenderPage; onOpenPage?: (page: number) => void }> = ({ block, renderPage, onOpenPage }) => {
+  if (block.type === 'figure') return <FigureBlock page={block.page} caption={block.caption} renderPage={renderPage} onOpenPage={onOpenPage} />;
   if (block.type === 'text') return <p className="text-[13.5px] leading-6 text-slate-700">{inline(block.text)}</p>;
   if (block.type === 'trap' || block.type === 'hook') {
     const trap = block.type === 'trap';
@@ -303,7 +341,8 @@ export const StructuredNote: React.FC<{
   webCheck?: WebCheck;
   checking?: boolean;
   onWebCheck?: () => void;
-}> = ({ note, range, readImages, onOpenPage, onDelete, webCheck, checking = false, onWebCheck }) => {
+  renderPage?: RenderPage;
+}> = ({ note, range, readImages, onOpenPage, onDelete, webCheck, checking = false, onWebCheck, renderPage }) => {
   const hasMarks = JSON.stringify(note).includes('†');
   return (
     <article className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -340,7 +379,7 @@ export const StructuredNote: React.FC<{
                 )
               )}
             </h4>
-            {section.blocks.map((block, b) => <Block key={b} block={block} />)}
+            {section.blocks.map((block, b) => <Block key={b} block={block} renderPage={renderPage} onOpenPage={onOpenPage} />)}
           </section>
         ))}
         {note.selfCheck.length > 0 && (

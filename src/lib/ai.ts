@@ -426,6 +426,33 @@ async function dedupePlan(plan: AssignedFact[], provider: AiProviderId): Promise
   return plan.filter((_, i) => !drop.has(i));
 }
 
+/**
+ * Picks the questions (about one in four at most) whose key finding has a real picture and sets figureModality and
+ * figureQuery on them. A question about a drug effect or a mechanism gets none. The picture search and the picture
+ * check then run as usual, so a picture is attached only when it is found and verified.
+ */
+async function planFigure(q: ClinicalQuestion, topic: string): Promise<void> {
+  const provider = getActiveProvider();
+  if (!provider) return;
+  const answer = q.options.find((o) => o.id === q.correctOption)?.text ?? '';
+  const raw = await aiComplete({
+    system:
+      'You decide whether one exam question should carry a real medical picture. It qualifies only if its answer is a finding or condition that has a typical, recognisable picture: an X-ray, CT, MRI, ultrasound, ECG, histology slide, blood smear, fundus photo or clinical photo. ' +
+      'A question about a drug effect, a mechanism, a number or a management step does not qualify. The picture must not give the answer away. ' +
+      'Reply with ONLY JSON: {"modality":"ECG | X-ray | CT | MRI | ultrasound | histology | smear | fundus | clinical photo","query":"3-6 English words: the finding or diagnosis plus the modality"}, or {"modality":"","query":""} if it does not qualify.',
+    messages: [{ role: 'user', content: `Topic: ${topic}\n${q.stem} ${q.questionText}\nAnswer: ${answer}` }],
+    json: true,
+    effort: 'low',
+    provider,
+    model: getEffectiveModel(provider),
+  }).catch(() => '');
+  const pick = extractJson<{ modality?: string; query?: string }>(raw);
+  const query = String(pick?.query ?? '').trim();
+  if (!query) return;
+  q.figureQuery = query;
+  q.figureModality = String(pick?.modality ?? '').trim() || undefined;
+}
+
 /** The web and library sources for a topic, from the research endpoint, kept for a few minutes. */
 async function fetchTopicSources(topic: string): Promise<{ title: string; text: string; kind?: string }[]> {
   const cacheKey = topic.toLowerCase();
@@ -1068,6 +1095,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const liveImages = includeImages && isLiveImageSearchEnabled();
   let attachedImages = 0;
   const usedImages = new Set<string>();
+  let figuresPlanned = 0;
 
   const tier: 'LOW' | 'MEDIUM' | 'HIGH' = difficultyTier === 'ALL' ? 'MEDIUM' : difficultyTier;
   const pattern = EXAM_PATTERNS[exam];
@@ -1311,6 +1339,12 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // string — so it never matched anything. Now we only attach when the model
         // flagged the item as image-based and supplied a search phrase, AND the figure
         // passed the vision check (findLiveImage returns only verified figures).
+        // The writer rarely asks for a picture on its own, so a short check decides whether this question's finding
+        // has a real picture, for at most about one question in four.
+        if (includeImages && liveImages && !q.figureQuery && figuresPlanned < Math.ceil((acceptedStems.length + 1) / 4)) {
+          await planFigure(q, requestedTopic ?? topic.subject);
+          if (q.figureQuery) figuresPlanned += 1;
+        }
         if (includeImages && liveImages && q.figureQuery) {
           const live = await findLiveImage(q.figureQuery, usedImages);
           if (live && !usedImages.has(live.id)) {

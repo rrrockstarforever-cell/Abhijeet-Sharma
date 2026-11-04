@@ -1378,6 +1378,75 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
     });
   };
 
+  // A book page drawn as an image for the figures in a note. Kept in memory only, so nothing is stored.
+  const figurePageCache = useRef(new Map<string, string>());
+  const renderNotePage = useCallback(async (n: number, caption = ''): Promise<string | null> => {
+    const label = (caption.match(/^\s*FIGURES?\s*\d+\s*[–\-.]\s*\d+/i)?.[0] ?? '').replace(/\s+/g, ' ').trim();
+    const key = activeDocId + ':' + n + ':' + label;
+    const hit = figurePageCache.current.get(key);
+    if (hit) return hit;
+    const pdf = pdfRef.current;
+    if (!pdf || n < 1 || n > pdf.numPages) return null;
+    const page = await pdf.getPage(n);
+    const base = page.getViewport({ scale: 1 });
+    const viewport = page.getViewport({ scale: Math.min(2.2, 1100 / Math.max(1, base.width)) });
+    // The figure sits just above its caption. Find the caption line on the page and keep the band from the figure
+    // before it (or the top of the page) down to the end of the caption. A band that is too thin or covers most of
+    // the page means the caption was not found cleanly, so the whole page is shown instead.
+    let top = 0;
+    let bottom = viewport.height;
+    let left = 0;
+    let right = viewport.width;
+    if (label) {
+      try {
+        const content = await page.getTextContent();
+        const norm = (s: string) => s.replace(/\s+/g, '').replace(/[–—]/g, '-').toLowerCase();
+        const want = norm(label);
+        const items = content.items as any[];
+        const toView = (it: any) => viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
+        // Books set in two columns put a figure and its caption in one column, so the picture is cut to that column.
+        const half = viewport.width / 2;
+        const long = items.filter((it) => typeof it?.str === 'string' && it.str.trim().length > 25);
+        const twoColumns = long.filter((it) => toView(it)[0] < half * 0.9).length >= 3 && long.filter((it) => toView(it)[0] >= half * 1.05).length >= 3;
+        const columnOf = (x: number) => (x < half ? 0 : 1);
+        const captions = items
+          .filter((it) => typeof it?.str === 'string' && /^\s*FIGURE\s*\d/.test(it.str))
+          .map((it) => { const [x, y] = toView(it); return { text: norm(it.str), x, y }; })
+          .sort((a, b) => a.y - b.y);
+        const at = captions.findIndex((l) => l.text.startsWith(want) || want.startsWith(l.text.slice(0, 12)));
+        if (at >= 0) {
+          const cap = captions[at];
+          const col = columnOf(cap.x);
+          const sameColumn = twoColumns ? captions.filter((c) => columnOf(c.x) === col) : captions;
+          const idx = sameColumn.indexOf(cap);
+          const bandTop = idx > 0 ? sameColumn[idx - 1].y + 60 * viewport.scale : 0;
+          const bandBottom = Math.min(viewport.height, cap.y + 70 * viewport.scale);
+          const frac = (bandBottom - bandTop) / viewport.height;
+          if (frac >= 0.1 && frac <= 0.85) {
+            top = Math.max(0, bandTop - 12);
+            bottom = bandBottom;
+            if (twoColumns) { left = col === 0 ? 0 : half - 8; right = col === 0 ? half + 8 : viewport.width; }
+          }
+        }
+      } catch { /* keep the whole page */ }
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
+    await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise;
+    const out = document.createElement('canvas');
+    out.width = Math.max(1, Math.floor(right - left));
+    out.height = Math.max(1, Math.floor(bottom - top));
+    out.getContext('2d')!.drawImage(canvas, left, top, out.width, out.height, 0, 0, out.width, out.height);
+    const url = out.toDataURL('image/jpeg', 0.82);
+    canvas.width = 0;
+    canvas.height = 0;
+    out.width = 0;
+    out.height = 0;
+    figurePageCache.current.set(key, url);
+    return url;
+  }, [activeDocId]);
+
   // override: notes for a given page range (a chapter from the index); label names that range in the notes.
   const makeNotesFromPages = async (override?: { from: number; to: number; label?: string }) => {
     if (notesBusy) return;
@@ -2597,7 +2666,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                 )}
                 <div className="mt-3 space-y-4">
                   {madeNotes.map((n, i) => (
-                    <StructuredNote key={`${n.range}-${i}`} note={n.note} range={n.range} readImages={n.readImages} onOpenPage={gotoPage} onDelete={() => deleteNote(n.id)} webCheck={n.webCheck} checking={checkingNotes.has(n.id)} onWebCheck={() => { if (activeDocId) void checkNoteOnWeb(activeDocId, n); }} />
+                    <StructuredNote key={`${n.range}-${i}`} note={n.note} range={n.range} readImages={n.readImages} onOpenPage={gotoPage} onDelete={() => deleteNote(n.id)} webCheck={n.webCheck} checking={checkingNotes.has(n.id)} onWebCheck={() => { if (activeDocId) void checkNoteOnWeb(activeDocId, n); }} renderPage={renderNotePage} />
                   ))}
                   {!madeNotes.length && !notesBusy && (
                     <p className={`text-[10px] leading-relaxed ${T.dim}`}>
