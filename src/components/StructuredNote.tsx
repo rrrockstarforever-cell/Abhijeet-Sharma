@@ -50,6 +50,7 @@ export const TEACHING_NOTE_SYSTEM = [
   '- The first time a technical term appears, add a short plain meaning in brackets, for example "enzyme (a protein that speeds up a reaction)". Do this only once per term.',
   '- Give each major idea one everyday analogy (a faulty brick, gum jammed in a lock), and use it in the section heading when it fits.',
   '- If the pages describe a process, the first section must include a "steps" block showing each step and what acts on it.',
+  '- Figure captions are part of the pages. If a caption describes a pathway or a cascade (for example one kinase activating another), teach it as a "steps" block; do not leave it out.',
   '- Text blocks are at most 4 sentences. Facts that can be compared go in tables with short cells. Include every item on the pages. A bare list of names goes in a sentence, not a table.',
   '- Connect ideas where the pages allow it, for example why a regimen changes for a younger child.',
   '- A "trap" must name the mistake students make, and goes right after what it is about. Do not use it to repeat a table row.',
