@@ -88,8 +88,19 @@ export async function runCase(c) {
   const provider = getActiveProvider();
   if (!provider) throw new Error('No AI provider is active in this page.');
   const t0 = Date.now();
-  const split = await splitTopic(c.topic, c.exam);
-  const plan = split.subtopics.length ? await planTopicFacts(c.topic, split.subtopics, split.facts, provider) : [];
+  // The split and the fact plan are kept for a day per topic, so a rerun goes straight to writing questions.
+  const cacheKey = `pulse.quality.plan.${c.exam}.${c.topic.toLowerCase()}`;
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem(cacheKey) || 'null'); } catch { cached = null; }
+  let split;
+  let plan;
+  if (cached && Date.now() - cached.at < 24 * 3600 * 1000 && cached.plan?.length) {
+    ({ split, plan } = cached);
+  } else {
+    split = await splitTopic(c.topic, c.exam);
+    plan = split.subtopics.length ? await planTopicFacts(c.topic, split.subtopics, split.facts, provider) : [];
+    try { if (plan.length) localStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), split, plan })); } catch { /* storage full */ }
+  }
   const factsTotal = split.facts.reduce((a, b) => a + b, 0);
   const target = Math.max(1, Math.min(c.count, plan.length ? Math.min(plan.length, factsTotal) : factsTotal));
   const moduleUnits = new Set();
@@ -128,7 +139,9 @@ export async function runCase(c) {
 }
 
 /** Runs many cases with a small number at once (the provider rate-limits bursts). */
-export async function runMatrix(cases, { parallel = 3, onDone } = {}) {
+export async function runMatrix(allCases, { parallel = 3, onDone, maxCount = 0 } = {}) {
+  // maxCount shortens every case (for a quick run): 12 questions per topic is enough to see the same problems.
+  const cases = maxCount ? allCases.map((c) => ({ ...c, count: Math.min(c.count, maxCount) })) : allCases;
   const out = new Array(cases.length);
   let next = 0;
   const worker = async () => {

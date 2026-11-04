@@ -43,7 +43,13 @@ const PATIENT_PROFILES = [
 ];
 
 /** Item types for a typed topic, rotated across the set. Case stems are only 2 in 8 (about a quarter), so the set is not mostly vignettes. */
+/** The shape of one typed-topic question, with the letter its answer must sit at, so the correct letters are spread evenly. */
 function typedShape(idx: number): string {
+  const letter = 'ABCD'[(idx + Math.floor(idx / 4)) % 4];
+  return `${typedShapeBase(idx)} The correct answer must be option ${letter}.`;
+}
+
+function typedShapeBase(idx: number): string {
   const slot = idx % 8;
   const patient = `If the item needs a patient, use ${PATIENT_PROFILES[idx % PATIENT_PROFILES.length]}.`;
   if (slot === 3 || slot === 6) return `Short case: at most three sentences (age, presentation, one question). The answer must be the named fact itself. ${patient}`;
@@ -365,10 +371,12 @@ export async function planTopicFacts(
   ]);
   const planned: AssignedFact[] = [];
   const usedFacts: string[] = [];
-  for (let i = 0; i < subtopics.length; i++) {
+  // The model calls for all subtopics run together; their answers are then filtered one subtopic after another, so
+  // a fact repeated under two subtopics is still caught by the comparison below.
+  const extractions = await Promise.all(subtopics.map(async (_, i) => {
     const found = subSourceLists[i];
     const sources = found.length ? found : topicSources;
-    if (!sources.length) continue;
+    if (!sources.length) return null;
     const ordered = [...sources.filter((s) => kindOf(s) === 'label' || kindOf(s) === 'book'), ...sources.filter((s) => kindOf(s) !== 'label' && kindOf(s) !== 'book')];
     const evidence = ordered.map((s, n) => `[source ${n + 1}] ${s.title}\n${s.text}`).join('\n\n').slice(0, 9000);
     // Spare facts (about half again) let a slot whose question fails its checks be replaced by another planned fact.
@@ -377,13 +385,18 @@ export async function planTopicFacts(
     const ask = want + Math.ceil(want / 2);
     const raw = await aiComplete({
       system: PLAN_FACTS_SYSTEM,
-      messages: [{ role: 'user', content: `Topic: ${topic}\nSubtopic: ${subtopics[i]}\nNumber of facts: ${ask}${usedFacts.length ? `\nAlready planned, do not repeat: ${usedFacts.slice(-40).map((f) => f.slice(0, 100)).join(' | ')}` : ''}\n\nSources:\n${evidence}` }],
+      messages: [{ role: 'user', content: `Topic: ${topic}\nSubtopic: ${subtopics[i]}\nNumber of facts: ${ask}\n\nSources:\n${evidence}` }],
       json: true,
       effort: 'low',
       provider,
       model: getEffectiveModel(provider),
     }).catch(() => '');
-    const parsed = extractJson<{ facts?: { fact?: string; quote?: string; source?: number }[] }>(raw);
+    return { ordered, ask, parsed: extractJson<{ facts?: { fact?: string; quote?: string; source?: number }[] }>(raw) };
+  }));
+  for (let i = 0; i < subtopics.length; i++) {
+    const got = extractions[i];
+    if (!got) continue;
+    const { ordered, ask, parsed } = got;
     let kept = 0;
     for (const f of parsed?.facts ?? []) {
       if (kept >= ask) break;

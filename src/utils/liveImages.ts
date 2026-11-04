@@ -137,7 +137,8 @@ export async function findLiveImage(
     return true;
   });
 
-  const deadline = Date.now() + Math.max(timeoutMs, 12000);
+  // The picture sources are slow when several searches run at once (7-10 s each), so the search gets 20 s in all.
+  const deadline = Date.now() + Math.max(timeoutMs, 20000);
   // One budget of vision checks for the whole picture search, across all query variants: a question never
   // costs more than this many vision calls, however many variants were tried.
   const MAX_VISION_CHECKS_PER_QUESTION = 4;
