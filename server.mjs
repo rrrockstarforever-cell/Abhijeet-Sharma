@@ -3,6 +3,7 @@ import express from "express";
 import path2 from "path";
 import os2 from "os";
 import fs2 from "fs";
+import { execFileSync } from "child_process";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
@@ -625,11 +626,15 @@ async function pageText(url, chars = 2500) {
 async function research(query, pageChars = 2500) {
   const q = String(query || "").trim().slice(0, 300);
   if (!q) throw new Error("Nothing to search for.");
-  const [w, p] = await Promise.allSettled([ddg(q), europePmc(q)]);
+  const [w, p, label] = await Promise.allSettled([ddg(q), europePmc(q), openFdaByDrug(q)]);
   const web = (w.status === "fulfilled" ? w.value : []).sort((a, b) => Number(TRUSTED.test(b.url)) - Number(TRUSTED.test(a.url))).slice(0, 3);
   const papers = p.status === "fulfilled" ? p.value : [];
   const pages = await Promise.allSettled(web.map((x) => pageText(x.url, pageChars)));
+  const books = bookPassages(q, 6).map((b) => ({ ...b, kind: "book" }));
+  const labels = label.status === "fulfilled" ? label.value.map((x) => ({ ...x, kind: "label" })) : [];
   const sources = [
+    ...labels,
+    ...books,
     ...web.map((x, i) => ({ title: x.title, url: x.url, text: (pages[i].status === "fulfilled" && pages[i].value.length > 200 ? pages[i].value : x.snippet) || x.snippet, kind: "web" })),
     ...papers.map((x) => ({ ...x, kind: "europepmc" }))
   ].filter((s) => s.text).map((s, i) => ({ n: i + 1, ...s }));
@@ -674,6 +679,65 @@ async function openFdaLabel(query) {
   const text = [hit.indications_and_usage?.[0], hit.warnings?.[0] || hit.boxed_warning?.[0]].filter(Boolean).join(" ").replace(/\s+/g, " ");
   if (!text) return [];
   return [{ title: `${name} (FDA drug label)`, url: "https://open.fda.gov/apis/drug/label/", text: text.slice(0, 1200) }];
+}
+var NOT_A_DRUG = /* @__PURE__ */ new Set([
+  "adverse",
+  "effects",
+  "effect",
+  "side",
+  "drug",
+  "drugs",
+  "toxicity",
+  "treatment",
+  "features",
+  "feature",
+  "criteria",
+  "causes",
+  "cause",
+  "diagnosis",
+  "diagnostic",
+  "management",
+  "clinical",
+  "disease",
+  "syndrome",
+  "investigation",
+  "investigations",
+  "the",
+  "and",
+  "with",
+  "from",
+  "for",
+  "about",
+  "overview",
+  "complications",
+  "anatomy",
+  "physiology"
+]);
+async function openFdaByDrug(query) {
+  const words = [...new Set(String(query || "").toLowerCase().match(/[a-z][a-z-]{4,}/g) || [])].filter((w) => !NOT_A_DRUG.has(w));
+  for (const word of words.slice(0, 6)) {
+    const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(`openfda.generic_name:"${word}"`)}&limit=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15e3) }).catch(() => null);
+    if (!res || !res.ok) continue;
+    const hit = (await res.json().catch(() => ({})))?.results?.[0];
+    if (!hit) continue;
+    const name = hit.openfda?.generic_name?.[0] || word;
+    const text = [hit.adverse_reactions?.[0], hit.warnings_and_cautions?.[0] || hit.warnings?.[0]].filter(Boolean).join(" ").replace(/\s+/g, " ");
+    if (text) return [{ title: `${name} (FDA label: adverse reactions)`, url: "https://open.fda.gov/apis/drug/label/", text: text.slice(0, 2500) }];
+  }
+  const classWords = String(query || "").toLowerCase().match(/[a-z][a-z-]{2,}/g) || [];
+  const phrase = classWords.filter((w) => !NOT_A_DRUG.has(w)).map((w) => w.replace(/s$/, "")).join(" ").trim();
+  if (phrase) {
+    const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(`openfda.pharm_class_epc:"${phrase}"`)}&limit=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15e3) }).catch(() => null);
+    const hit = res && res.ok ? (await res.json().catch(() => ({})))?.results?.[0] : null;
+    if (hit) {
+      const name = hit.openfda?.generic_name?.[0] || phrase;
+      const text = [hit.adverse_reactions?.[0], hit.warnings_and_cautions?.[0] || hit.warnings?.[0]].filter(Boolean).join(" ").replace(/\s+/g, " ");
+      if (text) return [{ title: `${name} (FDA label, ${phrase} class: adverse reactions)`, url: "https://open.fda.gov/apis/drug/label/", text: text.slice(0, 2500) }];
+    }
+  }
+  return [];
 }
 function usesDrugLabels(subject) {
   return !subject || /pharmacolog|medicine|therap|drug|anesth|anaesth|toxicolog/i.test(String(subject));
@@ -2024,6 +2088,7 @@ function serverDebugLog(hypothesis, message) {
 }
 
 // src/lib/ai.ts
+var RESEARCH_TTL_MS = 5 * 6e4;
 var stageLog = [];
 globalThis.__stageLog = stageLog;
 function extractJson(raw) {
@@ -2156,8 +2221,26 @@ function opencodeKeyFromCli() {
     return "";
   }
 }
+var signInCache = null;
+function opencodeKeyFromSignIn() {
+  if (signInCache && Date.now() - signInCache.at < 5 * 6e4) return signInCache.key;
+  const cli = process.env.OPENCODE_CLI_PATH || path2.join(process.env.LOCALAPPDATA || "", "Programs", "ai.opencode.desktop", "resources", "opencode-cli.exe");
+  let key = "";
+  try {
+    const list = JSON.parse(execFileSync(cli, ["auth", "export"], { encoding: "utf8", timeout: 15e3, windowsHide: true }));
+    const signedIn = (id) => list.find((c) => c?.integrationID === id && c?.active && c?.value?.type === "oauth");
+    const fresh = (c) => typeof c?.value?.expires === "number" && c.value.expires > Date.now() && typeof c?.value?.access === "string";
+    const oauth = [signedIn("opencode-go"), signedIn("opencode")].find(fresh);
+    const goKey = list.find((c) => c?.integrationID === "opencode-go" && c?.active && c?.value?.type === "key");
+    key = oauth ? oauth.value.access : goKey?.value?.key ?? "";
+  } catch {
+    key = "";
+  }
+  signInCache = { key, at: Date.now() };
+  return key;
+}
 function opencodeKey() {
-  return (process.env.OPENCODE_API_KEY || opencodeKeyFromCli()).trim();
+  return (opencodeKeyFromSignIn() || process.env.OPENCODE_API_KEY || opencodeKeyFromCli()).trim();
 }
 function saveOpenCodeKey(key) {
   writeEnvValue("OPENCODE_API_KEY", key);
@@ -2596,34 +2679,67 @@ app.post("/api/ai/split-topic", async (req, res) => {
   if (!topic || !provider) return res.json({ subtopics: [] });
   const key = JSON.stringify({ topic, exam, provider, model });
   const cached = splitCache.get(key);
-  if (cached) return res.json({ subtopics: cached });
+  if (cached) return res.json({ subtopics: cached.map((s) => s.subtopic), priorities: cached.map((s) => s.priority), facts: cached.map((s) => s.facts) });
+  let evidence = "";
+  try {
+    const found = await research(topic, 1200);
+    evidence = found.sources.map((s, i) => `[${i + 1}] ${s.title}
+${s.text}`).join("\n").slice(0, 6e3);
+  } catch {
+    evidence = "";
+  }
   const prompt = [
     `You are an expert medical exam item writer for ${exam}.`,
+    evidence ? `Evidence from the textbook library and the web on this topic (list only subtopics this evidence supports):
+${evidence}` : "No evidence was found, so list the subtopics an exam would test.",
     `Split the topic "${topic}" into its distinct subtopics, sorted as an examiner would sort them:`,
     "for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. Give 8 to 12 subtopics.",
     "Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.",
     "Give each subtopic a priority from 1 to 10 for how often it is tested.",
-    `Return only a JSON array of {"subject": "${topic}", "subtopic": "<name: items>", "priority": <1-10>}.`,
+    'Give each subtopic "facts": the number of high-yield, exam-testable facts in it (1 to 6). Count only facts an examiner would ask, not background detail.',
+    // JSON mode returns one object, so the list sits inside it under "subtopics".
+    `Return only a JSON object: {"subtopics": [{"subject": "${topic}", "subtopic": "<name: items>", "priority": <1-10>, "facts": <1-6>}, ...]}.`,
     "Do not repeat any entry."
   ].join("\n");
-  const splitWith = async (useModel) => {
-    const raw = await runCompletion({ provider, model: useModel, messages: [{ role: "user", content: prompt }], json: true, effort: "min" });
+  const splitWith = async (useModel, text = prompt) => {
+    const raw = await runCompletion({ provider, model: useModel, messages: [{ role: "user", content: text }], json: true, effort: "min" });
     const parsed = extractJson(raw);
     const asList = Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" ? Object.values(parsed).find(Array.isArray) ?? [parsed] : [];
     console.log("[split-topic] model", useModel, "raw", String(raw).slice(0, 120), "items:", asList.length);
-    const list = asList.map((e) => typeof e === "string" ? e : e?.subtopic).filter((s) => typeof s === "string" && s.trim());
-    return [...new Set(list.map((s) => s.trim()))].slice(0, 12);
+    const rated = asList.map((e) => typeof e === "string" ? { subtopic: e, priority: 10, facts: 1 } : { subtopic: e?.subtopic, priority: Number(e?.priority) || 0, facts: Math.min(6, Math.max(1, Math.round(Number(e?.facts) || 1))) }).filter((r) => typeof r.subtopic === "string" && r.subtopic.trim());
+    const important = rated.filter((r) => r.priority >= 5);
+    const chosen = (important.length ? important : rated).sort((a, b) => b.priority - a.priority);
+    const seen = /* @__PURE__ */ new Set();
+    const unique = [];
+    for (const r of chosen) {
+      const name = r.subtopic.trim();
+      if (seen.has(name)) continue;
+      seen.add(name);
+      unique.push({ subtopic: name, priority: r.priority, facts: r.facts });
+    }
+    return unique.slice(0, 12);
   };
   try {
     let subtopics = await splitWith(model || void 0).catch(() => []);
     if (!subtopics.length && provider === "nvidia") subtopics = await splitWith(DEFAULT_MODELS.nvidia).catch(() => []);
-    if (!subtopics.length) subtopics = [topic];
+    if (subtopics.length < 4) {
+      const strict = [
+        prompt,
+        "Your last reply gave too few subtopics. Return at least 8, each a different category.",
+        "For a drug or drug class, cover every organ system and effect type it is known for (for example renal, neurological, sensory, haematological, hepatic, cardiac, metabolic, skin, endocrine, pregnancy), plus its key interactions and monitoring.",
+        "For a disease, cover its causes, clinical features, investigations, treatment, complications and prognosis.",
+        "A single subtopic is not acceptable."
+      ].join("\n");
+      const more = await splitWith(model || void 0, strict).catch(() => []);
+      if (more.length > subtopics.length) subtopics = more;
+    }
+    if (!subtopics.length) subtopics = [{ subtopic: topic, priority: 10, facts: 1 }];
     if (splitCache.size >= 50) splitCache.delete(splitCache.keys().next().value);
     splitCache.set(key, subtopics);
-    return res.json({ subtopics });
+    return res.json({ subtopics: subtopics.map((s) => s.subtopic), priorities: subtopics.map((s) => s.priority), facts: subtopics.map((s) => s.facts) });
   } catch (err) {
     console.log("[split-topic] failed:", err?.message || err);
-    return res.json({ subtopics: [topic] });
+    return res.json({ subtopics: [topic], priorities: [10], facts: [1] });
   }
 });
 app.get("/api/ai/source-registry", (_req, res) => {
@@ -3889,8 +4005,9 @@ async function visionVerify(imageUrl, claim, modality, key, attempt = 0) {
     "Look ONLY at the pixels. Decide:",
     "1. Does this image actually depict that finding / condition / diagnosis?",
     "2. Is the modality consistent (an ECG is not a photo; a chest X-ray is not a histology slide)?",
-    "Set pass=true ONLY if you can actually see the claimed finding in THIS image. If the image is unrelated, a random photo, a chart, text, a different body part, or you are unsure, set pass=false.",
-    'Answer with ONLY this JSON object and nothing else: {"pass": true, "reason": "one short sentence"}'
+    'First say, in "shows", what this image specifically shows (the exact condition or finding if you can tell, for example "bovine spongiform encephalopathy, brain histology" or "adrenoleukodystrophy MRI").',
+    'Then set pass=true ONLY if what it shows is the SAME specific condition or finding as the claim. A picture of a different disease in the same modality (a brain slide for a kidney disease, an MRI of another white-matter disease) is pass=false. A picture that is only "consistent with" the claim, or where you cannot tell the specific condition from the pixels alone, is pass=false. If the image is unrelated, a chart, text or a different body part, pass=false.',
+    'Answer with ONLY this JSON object and nothing else: {"shows": "what the image shows", "pass": true, "reason": "one short sentence"}'
   ].join("\n");
   const payload = JSON.stringify({
     model: model_,
