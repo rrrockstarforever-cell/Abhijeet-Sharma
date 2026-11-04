@@ -371,7 +371,8 @@ export async function planTopicFacts(
     const ordered = [...sources.filter((s) => kindOf(s) === 'label' || kindOf(s) === 'book'), ...sources.filter((s) => kindOf(s) !== 'label' && kindOf(s) !== 'book')];
     const evidence = ordered.map((s, n) => `[source ${n + 1}] ${s.title}\n${s.text}`).join('\n\n').slice(0, 9000);
     // Spare facts (about half again) let a slot whose question fails its checks be replaced by another planned fact.
-    const want = Math.max(1, facts[i] ?? 1);
+    // At most four facts per subtopic, so one detail (for example MRCP) does not fill the set.
+    const want = Math.min(4, Math.max(1, facts[i] ?? 1));
     const ask = want + Math.ceil(want / 2);
     const raw = await aiComplete({
       system: PLAN_FACTS_SYSTEM,
@@ -393,7 +394,7 @@ export async function planTopicFacts(
       // A single case report or a paediatric study is not a general exam fact.
       if (/case report|case series|a case of|successful management|fatal|pediatric|paediatric|in children/i.test(src.title)) continue;
       // Research-paper detail (statistics, gene or protein expression, open questions) is not a high-yield exam fact.
-      if (/\b(AUC|expression|interleukin|odds ratio|hazard ratio|cohort|95% ?CI|biomarker|incompletely characteri[sz]ed|not well characteri[sz]ed|further studies|remain unclear)\b/i.test(fact)) continue;
+      if (/\b(AUC|expression|interleukin|odds ratio|hazard ratio|cohort|95% ?CI|biomarker|incompletely characteri[sz]ed|not well characteri[sz]ed|further studies|remain unclear|protocol|this study|the study|trial|muscle density|sample size|banked|enrol(l)?ed|follow-up)\b/i.test(fact)) continue;
       // The same fact planned under two subtopics is one fact: compare with abbreviations and generic words normalised.
       if (usedFacts.some((u) => stemSimilarity(factKey(u), factKey(fact)) >= 0.5)) continue;
       planned.push({ subtopic: subtopics[i], fact, quote, source: src.title });

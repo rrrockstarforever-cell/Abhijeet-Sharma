@@ -474,7 +474,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     // fact is one question slot, so the set is exactly as big as the facts the sources support.
     const planProvider = getActiveProvider();
     // The plan is kept per topic for a day, so the same topic gives the same facts and set size on each run.
-    const planKey = customTopic ? `pulse.factPlan.v7.${selectedExam}.${customTopic.toLowerCase()}` : '';
+    const planKey = customTopic ? `pulse.factPlan.v8.${selectedExam}.${customTopic.toLowerCase()}` : '';
     let factPlan: AssignedFact[] = [];
     if (customTopic && planProvider && typedSubtopics.length) {
       try {
