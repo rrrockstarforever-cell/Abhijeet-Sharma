@@ -618,7 +618,8 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       for (let round = 2; round <= MAX_FILL_ROUNDS && questions.length < targetCount && !stopped && !failure && !stopEarlyRef.current; round++) {
         setHeldBackNote(`Round ${round}: ${questions.length}/${targetCount} kept, writing more…`);
         const more = await generateExamQuestions({
-          ...genArgs(Math.min(2 * (targetCount - questions.length), 100), batchPromises),
+          // A typed topic asks for exactly the missing number (each planned fact is a slot); other runs ask for twice as many to cover drops.
+          ...genArgs(customTopic ? targetCount - questions.length : Math.min(2 * (targetCount - questions.length), 100), batchPromises),
           existing: questions,
         });
         questions = [...questions, ...more.questions];

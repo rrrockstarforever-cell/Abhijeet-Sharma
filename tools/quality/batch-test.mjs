@@ -127,11 +127,12 @@ export async function runCase(c) {
   let questions = result.questions;
   let dropped = result.dropped;
   for (let round = 2; round <= 3 && questions.length < target && !result.failure; round++) {
-    const more = await generateExamQuestions({ ...args, count: Math.min(2 * (target - questions.length), 60), existing: questions });
+    const more = await generateExamQuestions({ ...args, count: target - questions.length, existing: questions });
     questions = [...questions, ...more.questions];
     dropped += more.dropped;
     result = more;
   }
+  questions = questions.slice(0, target);
   const checks = plainChecks(questions, c);
   const judged = await judge(c, questions, provider);
   const verdict = questions.map((q, i) => ({ q, plain: checks.per[i], j: judged.find((x) => Number(x.n) === i + 1) || null }));
