@@ -84,3 +84,13 @@ Judge fields per question: correct, single-best, relevance 1-5, clear, `style_ok
 5. Common rules: dangling picture, explains distractors, option count.
 6. Grid run and the loop.
 7. Installer 1.0.67, push, report.
+
+## What the previous-year papers say (5,938 questions, 2017-2026; `pyq-analyze.py`, `pyq-profile.json`)
+The first mixes in this plan were guesses; the papers replaced them.
+- Always 4 options, short (about 20 characters). The correct option is the longest only 22-25% of the time.
+- Since 2022 the exams differ: NEET-PG is 32% long vignettes, 39% picture items, 5% NOT; INI-CET is 43% one-liners, 16% vignettes, 21% picture items, 16% NOT. Earlier NEET-PG papers (2017-2020) were mostly short; the generator follows the recent ones.
+- The mix changes by subject (Anatomy 61% pictures in NEET-PG, Medicine 54% vignettes, Physiology 41% one-liners, OBG INI-CET 28% NOT). The generator picks the subject of the typed topic and uses that subject's mix (`src/lib/pyqProfile.ts`).
+- Match 2% (INI-CET only), assertion-reason 0.2%, numbered statements about 0: they stay available as chips but are not in the default mix.
+- Lead-ins: diagnosis 10-17%, mechanism 5%, next step 3-4%, drug of choice 1.5%, investigation under 1%; most items ask for a fact or finding.
+- Explanations: median 190 words, almost all bold, 45% bullet lists, 25% name a reference book. Pictures appear in 25% of stems and 36% of explanations.
+- The correct letter in real papers skews to A (29-33%) and away from D (16-19%); the app keeps letters even on purpose.
