@@ -169,6 +169,20 @@ async function openFdaByDrug(query) {
       .replace(/\s+/g, ' ');
     if (text) return [{ title: `${name} (FDA label: adverse reactions)`, url: 'https://open.fda.gov/apis/drug/label/', text: text.slice(0, 2500) }];
   }
+  // A drug class ("proton pump inhibitors") is not a generic name, so it is searched as an established pharmacologic class.
+  // Every non-generic word counts here, including short ones such as "pump".
+  const classWords = String(query || '').toLowerCase().match(/[a-z][a-z-]{2,}/g) || [];
+  const phrase = classWords.filter((w) => !NOT_A_DRUG.has(w)).map((w) => w.replace(/s$/, '')).join(' ').trim();
+  if (phrase) {
+    const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(`openfda.pharm_class_epc:"${phrase}"`)}&limit=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) }).catch(() => null);
+    const hit = res && res.ok ? (await res.json().catch(() => ({})))?.results?.[0] : null;
+    if (hit) {
+      const name = hit.openfda?.generic_name?.[0] || phrase;
+      const text = [hit.adverse_reactions?.[0], hit.warnings_and_cautions?.[0] || hit.warnings?.[0]].filter(Boolean).join(' ').replace(/\s+/g, ' ');
+      if (text) return [{ title: `${name} (FDA label, ${phrase} class: adverse reactions)`, url: 'https://open.fda.gov/apis/drug/label/', text: text.slice(0, 2500) }];
+    }
+  }
   return [];
 }
 
