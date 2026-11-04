@@ -4,11 +4,11 @@ import fs from 'node:fs';
 
 const BASE = 'http://localhost:3100';
 const store = new Map();
-try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync('quality-plans.json', 'utf8')))) store.set(k, v); } catch { /* none */ }
+try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(process.argv[5] || 'quality-plans.json', 'utf8')))) store.set(k, v); } catch { /* none */ }
 const mk = (m) => ({ getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); }, removeItem: (k) => { m.delete(k); }, key: (i) => [...m.keys()][i] ?? null, get length() { return m.size; } });
 globalThis.localStorage = mk(store);
 globalThis.sessionStorage = mk(new Map());
-store.set('ai.activeProvider', 'opencode');
+store.set('ai.activeProvider', process.argv[4] || 'opencode');
 store.set('ai.model.opencode', 'deepseek-v4.1-flash');
 const realFetch = globalThis.fetch.bind(globalThis);
 globalThis.fetch = (i, init) => realFetch(typeof i === 'string' && i.startsWith('/') ? BASE + i : i, init);

@@ -796,9 +796,13 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
       const more = await splitWith(model || undefined, strict).catch(() => []);
       if (more.length > subtopics.length) subtopics = more;
     }
+    // A failed or thin split (the provider was rate-limited or timed out) is never kept: the next request asks again.
+    const thin = subtopics.length < 4;
     if (!subtopics.length) subtopics = [{ subtopic: topic, priority: 10, facts: 1 }];
-    if (splitCache.size >= 50) splitCache.delete(splitCache.keys().next().value as string);
-    splitCache.set(key, subtopics);
+    if (!thin) {
+      if (splitCache.size >= 50) splitCache.delete(splitCache.keys().next().value as string);
+      splitCache.set(key, subtopics);
+    }
     return res.json({ subtopics: subtopics.map((s) => s.subtopic), priorities: subtopics.map((s) => s.priority), facts: subtopics.map((s) => s.facts) });
   } catch (err: any) {
     console.log('[split-topic] failed:', err?.message || err);
