@@ -340,6 +340,7 @@ export interface AssignedFact { subtopic: string; fact: string; quote: string; s
 
 const PLAN_FACTS_SYSTEM =
   'You list distinct, high-yield, exam-testable facts about one subtopic that the sources state. Do not repeat a fact already planned. ' +
+  'Each fact must be a definite statement a student can be tested on (a cause, a feature, a number, a test, a drug effect, a warning), never an uncertain or open one ("may", "remains uncertain", "has been evaluated"). Prefer statements from an official drug label or textbook over research papers. ' +
   'Copy the supporting words exactly from one source. Reply with ONLY JSON: ' +
   '{"facts":[{"fact":"one sentence","quote":"exact words from that source","source":<source number>}]}. ' +
   'Give at most the number of facts asked for; give fewer if the sources do not support that many.';
@@ -394,7 +395,7 @@ export async function planTopicFacts(
       // A single case report or a paediatric study is not a general exam fact.
       if (/case report|case series|a case of|successful management|fatal|pediatric|paediatric|in children/i.test(src.title)) continue;
       // Research-paper detail (statistics, gene or protein expression, open questions) is not a high-yield exam fact.
-      if (/\b(AUC|expression|interleukin|odds ratio|hazard ratio|cohort|95% ?CI|biomarker|incompletely characteri[sz]ed|not well characteri[sz]ed|further studies|remain unclear|protocol|this study|the study|trial|muscle density|sample size|banked|enrol(l)?ed|follow-up|mendelian|randomi[sz]ation|subjects|participants|were reported|studied|analysis|meta-analysis|observational|compared with|compared to|committee|hospitali[sz]ation|significantly (more|less|higher|lower)|no association|reporting rate|MedDRA|incidence of \d)\b/i.test(fact)) continue;
+      if (/\b(AUC|expression|interleukin|odds ratio|hazard ratio|cohort|95% ?CI|biomarker|incompletely characteri[sz]ed|not well characteri[sz]ed|further studies|remain unclear|protocol|this study|the study|trial|muscle density|sample size|banked|enrol(l)?ed|follow-up|mendelian|randomi[sz]ation|subjects|participants|were reported|studied|analysis|meta-analysis|observational|compared with|compared to|committee|hospitali[sz]ation|significantly (more|less|higher|lower)|no association|reporting rate|MedDRA|incidence of \d|uncertain|unclear|(has|have) been evaluated|raising the question|awareness|whether|potentially|were more commonly)\b/i.test(fact)) continue;
       // The same fact planned under two subtopics is one fact: compare with abbreviations and generic words normalised.
       if (usedFacts.some((u) => stemSimilarity(factKey(u), factKey(fact)) >= 0.5)) continue;
       planned.push({ subtopic: subtopics[i], fact, quote, source: src.title });
