@@ -473,14 +473,30 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     // Fact assignment: the important facts are planned from the sources before any question is written. Each planned
     // fact is one question slot, so the set is exactly as big as the facts the sources support.
     const planProvider = getActiveProvider();
-    const factPlan: AssignedFact[] = customTopic && planProvider && typedSubtopics.length
-      ? await planTopicFacts(customTopic, typedSubtopics, split.facts, planProvider)
-      : [];
+    // The plan is kept per topic for a day, so the same topic gives the same facts and set size on each run.
+    const planKey = customTopic ? `pulse.factPlan.v3.${selectedExam}.${customTopic.toLowerCase()}` : '';
+    let factPlan: AssignedFact[] = [];
+    if (customTopic && planProvider && typedSubtopics.length) {
+      try {
+        const saved = JSON.parse(localStorage.getItem(planKey) || 'null') as { at: number; plan: AssignedFact[] } | null;
+        if (saved && Date.now() - saved.at < 24 * 60 * 60 * 1000 && saved.plan.length) factPlan = saved.plan;
+      } catch {
+        factPlan = [];
+      }
+      if (!factPlan.length) {
+        factPlan = await planTopicFacts(customTopic, typedSubtopics, split.facts, planProvider);
+        if (factPlan.length) {
+          try { localStorage.setItem(planKey, JSON.stringify({ at: Date.now(), plan: factPlan })); } catch { /* storage full: the plan is simply not kept */ }
+        }
+      }
+    }
     // The count follows what the sources support. A topic with few important facts gets a smaller set, and the note
     // says so, rather than forcing filler questions.
     let targetCount = requestedCount;
     if (customTopic) {
-      const supportable = Math.max(1, factPlan.length || split.facts.reduce((sum, f) => sum + f, 0));
+      // The target is the facts the sources support (not the spares kept for replacements).
+      const factsTotal = split.facts.reduce((sum, f) => sum + f, 0);
+      const supportable = Math.max(1, factPlan.length ? Math.min(factPlan.length, factsTotal) : factsTotal);
       if (requestedCount > supportable) {
         targetCount = supportable;
         setHeldBackNote(`Only about ${supportable} relevant questions are available for "${customTopic}" (${typedSubtopics.length} important topics), so this set will have ${supportable} instead of the ${requestedCount} you asked for.`);
@@ -557,7 +573,8 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         exam: selectedExam,
         count,
         requestedTopic: customTopic || undefined,
-        factPlan: customTopic && factPlan.length ? factPlan.slice(0, targetCount) : undefined,
+        // The whole plan is passed: its spare facts replace slots that fail their checks.
+        factPlan: customTopic && factPlan.length ? factPlan : undefined,
         subjectSubtopics: customTopic
           ? [{ subject: customTopic, subtopics: typedSubtopics.length ? typedSubtopics : [customTopic] }]
           : keys.map((key, i) => ({

@@ -326,6 +326,15 @@ export async function pickSourcedFact(
   return null;
 }
 
+/** Normalises a fact or answer for comparison: "CT" is computed tomography, and generic words are dropped. */
+export function factKey(s: string): string {
+  return s.toLowerCase()
+    .replace(/\bct\b/g, 'computed tomography')
+    .replace(/\b(serum|level|levels|assay|test|the|of|and|in|a|an|with|for|is|are|on|at|slightly|more|than|most|likely)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /** A fact planned for one question slot: it is quoted from a source, and the question is written around it. */
 export interface AssignedFact { subtopic: string; fact: string; quote: string; source: string }
 
@@ -354,10 +363,12 @@ export async function planTopicFacts(
   const planned: AssignedFact[] = [];
   const usedFacts: string[] = [];
   for (let i = 0; i < subtopics.length; i++) {
+    // Spare facts (about half again) let a slot whose question fails its checks be replaced by another planned fact.
     const want = Math.max(1, facts[i] ?? 1);
+    const ask = want + Math.ceil(want / 2);
     const raw = await aiComplete({
       system: PLAN_FACTS_SYSTEM,
-      messages: [{ role: 'user', content: `Topic: ${topic}\nSubtopic: ${subtopics[i]}\nNumber of facts: ${want}${usedFacts.length ? `\nAlready planned, do not repeat: ${usedFacts.slice(-40).map((f) => f.slice(0, 100)).join(' | ')}` : ''}\n\nSources:\n${evidence}` }],
+      messages: [{ role: 'user', content: `Topic: ${topic}\nSubtopic: ${subtopics[i]}\nNumber of facts: ${ask}${usedFacts.length ? `\nAlready planned, do not repeat: ${usedFacts.slice(-40).map((f) => f.slice(0, 100)).join(' | ')}` : ''}\n\nSources:\n${evidence}` }],
       json: true,
       effort: 'low',
       provider,
@@ -366,13 +377,14 @@ export async function planTopicFacts(
     const parsed = extractJson<{ facts?: { fact?: string; quote?: string; source?: number }[] }>(raw);
     let kept = 0;
     for (const f of parsed?.facts ?? []) {
-      if (kept >= want) break;
+      if (kept >= ask) break;
       const fact = String(f?.fact ?? '').trim();
       const quote = String(f?.quote ?? '').trim();
       const src = ordered[Number(f?.source ?? 0) - 1];
       if (!fact || !src || squeezeText(quote).length < 20) continue;
       if (!squeezeText(src.text).includes(squeezeText(quote))) continue;
-      if (usedFacts.some((u) => stemSimilarity(u, fact) >= KEY_FACT_SIMILARITY)) continue;
+      // The same fact planned under two subtopics is one fact: compare with abbreviations and generic words normalised.
+      if (usedFacts.some((u) => stemSimilarity(factKey(u), factKey(fact)) >= 0.5)) continue;
       planned.push({ subtopic: subtopics[i], fact, quote, source: src.title });
       usedFacts.push(fact);
       kept += 1;
@@ -1209,7 +1221,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // A typed topic that does not name treatment gets no treatment or management items (hard filter, not a prompt hint).
         const topicNamesTreatment = /treat|manag|therap|drug|dose|regimen|rescue|prevent/i.test(requestedTopic ?? '');
         // Only clear treatment phrases count; words like "therapy" or "dose" also appear in side-effect questions.
-        const treatmentItem = /\b(management|treatment of|treatment is|first-line|next step|initial therapy|rescue therapy|drug of choice|prophylaxis)\b/i.test(`${q.stem ?? ''} ${(q as { questionText?: string }).questionText ?? ''}`);
+        const treatmentItem = /\b(management|treatment of|treatment is|first-line|next step|initial therapy|rescue therapy|drug of choice|prophylaxis|antibiotics?|antimicrobials?|regimen|appropriate (now|next|initial)|resuscitation)\b/i.test(`${q.stem ?? ''} ${(q as { questionText?: string }).questionText ?? ''}`);
         const driftsIntoTreatment = Boolean(requestedTopic) && !topicNamesTreatment && treatmentItem;
         // A generic lead-in ("Choose the single best answer") or a very short question line does not name the fact it tests.
         const qLine = ((q as { questionText?: string }).questionText ?? '').trim();
@@ -1245,9 +1257,16 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const keyFact = sourced ? sourced.fact : ((q.keyFact || '').trim() || (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim());
         if (!sourced && keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { logStage('drop:repeat-fact', 0); return null; }
         // The same correct answer asked again in other words (for example the same imaging test) is also a repeat.
+        // Abbreviations and generic words are normalised first, so "CT" and "computed tomography", or "serum lipase level"
+        // and "lipase assay", count as the same answer.
+        const answerKey = (s: string) => s.toLowerCase()
+          .replace(/\bct\b/g, 'computed tomography')
+          .replace(/\b(serum|level|levels|assay|test|the|of|and|in|a|an|with|for|is|are|on|at)\b/g, ' ')
+          .replace(/\s+/g, ' ').trim();
         const correctText = (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim();
-        if (correctText && requestedTopic && acceptedAnswers.some((a) => stemSimilarity(a, correctText) >= 0.6)) { logStage('drop:repeat-answer', 0); return null; }
-        if (correctText) acceptedAnswers.push(correctText);
+        const correctKey = answerKey(correctText);
+        if (correctKey && requestedTopic && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { logStage('drop:repeat-answer', 0); return null; }
+        if (correctKey) acceptedAnswers.push(correctKey);
         seenStems.add(key);
         acceptedStems.push(fullStem);
         if (keyFact) acceptedKeyFacts.push(keyFact);
