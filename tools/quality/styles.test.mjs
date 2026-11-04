@@ -63,7 +63,9 @@ expect('neet no match', 'match' in count(neet, 'style') ? 'has match' : null, nu
 const tiers = count(neet, 'tier');
 expect('tier mix', `${tiers.LOW}/${tiers.MEDIUM}/${tiers.HIGH}`, '4/9/7');
 const ini = planSlots(facts, 'INI_CET', [], [], 'ALL');
-expect('ini negative about 12%', String(count(ini, 'style').negative), '2');
+expect('ini negative about 16%', String(count(ini, 'style').negative), '3');
+const anat = planSlots(facts.map((f) => ({ ...f, picturable: true })), 'NEET_PG', [], [], 'MEDIUM', 'Anatomy');
+expect('anatomy mostly picture', String((count(anat, 'style').image || 0) >= 5), 'true');
 const amc = planSlots(facts, 'AMC_CAT', [], [], 'MEDIUM');
 expect('amc all vignettes', JSON.stringify(count(amc, 'style')), '{"vignette":20}');
 const picked = planSlots(facts, 'INI_CET', stylesFromChips(['Match the following']), leadInsFromChips(['Next best step']), 'MEDIUM');

@@ -6,7 +6,7 @@ import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } f
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
-import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, explainsDistractors, leadInsFromChips, planSlots, pointsAtMissingPicture, styleProblem, stylesFromChips, tierText, type Slot, type StyleId } from './questionStyles.ts';
+import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, explainsDistractors, leadInsFromChips, planSlots, pointsAtMissingPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
 
 /**
  * Two key facts this similar are the same fact (word overlap on the key-fact sentences). Set low because
@@ -459,6 +459,26 @@ async function dedupePlan(plan: AssignedFact[], provider: AiProviderId): Promise
  * figureQuery on them. A question about a drug effect or a mechanism gets none. The picture search and the picture
  * check then run as usual, so a picture is attached only when it is found and verified.
  */
+const subjectCache = new Map<string, string | undefined>();
+/** The exam subject a typed topic belongs to (words first, then one cheap model call), for the subject's own style mix. */
+async function guessSubject(topic: string): Promise<string | undefined> {
+  const key = topic.trim().toLowerCase();
+  if (subjectCache.has(key)) return subjectCache.get(key);
+  let subject = subjectFromTopic(topic);
+  if (!subject) {
+    const provider = getActiveProvider();
+    if (provider) {
+      const raw = await aiComplete({
+        system: 'Name the MBBS subject of an exam topic. Choose exactly one of: Anatomy, Physiology, Biochemistry, Pathology, Pharmacology, Microbiology, Forensic, PSM, Medicine, Surgery, OBG, Paediatrics, Orthopedics, ENT, Ophthalmology, Dermatology, Psychiatry, Radiology, Anaesthesia. Reply with ONLY JSON: {"subject":"..."}.',
+        messages: [{ role: 'user', content: topic }], json: true, effort: 'low', provider, model: getEffectiveModel(provider),
+      }).catch(() => '');
+      subject = String(extractJson<{ subject?: string }>(raw)?.subject ?? '').trim() || undefined;
+    }
+  }
+  subjectCache.set(key, subject);
+  return subject;
+}
+
 /** Rewrites an explanation that does not say why the other options are wrong. The question itself is not changed. */
 async function repairExplanation(q: ClinicalQuestion): Promise<void> {
   const provider = getActiveProvider();
@@ -1272,8 +1292,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     : [];
   // Every planned fact gets a slot: its style (vignette, one-liner, NOT, match, statements, ...), lead-in and difficulty,
   // from the styles the learner picked or, when none, the exam's own mix.
+  const subjectGuess = plannedFacts.length && requestedTopic ? await guessSubject(requestedTopic) : undefined;
   const slots: Slot[] = plannedFacts.length
-    ? planSlots(plannedFacts.map((f) => ({ fact: f.fact, subtopic: f.subtopic, picturable: f.picturable })), exam, stylesFromChips(questionTypes, explicitStyles), leadInsFromChips(stemPatterns, explicitLeadIns), difficultyTier)
+    ? planSlots(plannedFacts.map((f) => ({ fact: f.fact, subtopic: f.subtopic, picturable: f.picturable })), exam, stylesFromChips(questionTypes, explicitStyles), leadInsFromChips(stemPatterns, explicitLeadIns), difficultyTier, subjectGuess)
     : [];
   const plannedTopics = plannedFacts.length
     ? plannedFacts.map((f, i) => ({ subject: requestedTopic ?? '', subtopic: f.subtopic, focus: f.fact, difficultyTier: slots[i].tier, assigned: f, slot: slots[i] }))
@@ -1465,7 +1486,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           .replace(/\s+/g, ' ').trim();
         const correctText = (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim();
         const correctKey = answerKey(correctText);
-        if (correctKey && requestedTopic && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { logStage('drop:repeat-answer', 0); return null; }
+        if (correctKey && requestedTopic && !codedOptions && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { logStage('drop:repeat-answer', 0); return null; }
         // A last look by a second reader: a wrong key, two defensible answers, or a fact that only one study, place or
         // textbook layout makes true. Such a question is dropped and another is written in its place.
         if (requestedTopic && await examinerRejects(q, requestedTopic)) { if (ctx) ctx.reason = 'the examiner found the key wrong, two options defensible, or the fact too narrow'; logStage('drop:examiner', 0); return null; }
@@ -1587,6 +1608,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     return refilling;
   };
   // Fact-first counters for this run: how many picks worked and how many were tried.
+  const styleExplicit = stylesFromChips(questionTypes, explicitStyles).length > 0;
   let factHits = 0;
   let factTries = 0;
   let nullStreak = 0;
@@ -1639,7 +1661,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // The last rewrite of a demanding style (match, statements, calculation, picture) falls back to a plain style, so the slot is not lost.
         const plain: StyleId[] = ['one-liner', 'short-case', 'vignette'];
         const fallbackStyle: StyleId = exam === 'AMC_CAT' ? 'vignette' : exam === 'NEET_PG' ? 'one-liner' : 'short-case';
-        const nextSlot = slot && retries + 1 >= MAX_TOPIC_RETRIES && !plain.includes(slot.style) ? { ...slot, style: fallbackStyle } : slotOverride;
+        // A style the learner picked is never swapped for another: a calculation item that cannot be written is left out.
+        const nextSlot = slot && !styleExplicit && retries + 1 >= MAX_TOPIC_RETRIES && !plain.includes(slot.style) ? { ...slot, style: fallbackStyle } : slotOverride;
         queue.push({ topic, idx, retries: retries + 1, hint: ctx.reason, slot: nextSlot });
       }
       onProgress?.(questions.length, count, completedCount, Math.max(completedCount, slotCounter));

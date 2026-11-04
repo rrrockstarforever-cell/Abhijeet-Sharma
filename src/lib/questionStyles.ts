@@ -2,6 +2,7 @@
 // delivered. The generator uses it to plan a set (which style each question gets) and to reject a question whose
 // shape is wrong; the quality tests use the same rules.
 import type { ClinicalQuestion, ExamType } from '../types.ts';
+import { PYQ_PROFILE, type StyleShares } from './pyqProfile.ts';
 
 export type StyleId =
   | 'vignette' | 'short-case' | 'one-liner' | 'negative' | 'match'
@@ -190,15 +191,41 @@ export function styleProblem(q: ClinicalQuestion, slot: Slot | undefined, option
 // Planning: which style each question gets.
 
 /** The exam's own mix, as weights. NEET-PG's pattern forbids NOT, match and statement items; AMC is all vignettes. */
-// Mixes follow the previous-year papers (5,900 NEET-PG, AIIMS and INI-CET questions, 2017-2026): stems are short (median
-// 14 words INI-CET, 22 NEET-PG), about a quarter to two fifths are patient vignettes, one in 14 (NEET-PG) to one in 7
-// (INI-CET) asks what is NOT or EXCEPT, a quarter carry a picture, and match, statement and assertion-reason items are
-// almost absent (under 3%). AMC CAT is all vignettes by its own pattern.
-const EXAM_MIX: Record<ExamType, [StyleId, number][]> = {
-  NEET_PG: [['one-liner', 34], ['short-case', 17], ['vignette', 22], ['negative', 7], ['image', 15], ['calculation', 2], ['mechanism', 3]],
-  INI_CET: [['one-liner', 40], ['short-case', 12], ['vignette', 18], ['negative', 12], ['image', 15], ['match', 2], ['mechanism', 1]],
-  AMC_CAT: [['vignette', 100]],
-};
+// Mixes follow the previous-year papers (see pyqProfile.ts): since 2022 NEET-PG is about a third long vignettes and
+// two fifths picture items, INI-CET about two fifths one-liners and one in six NOT items, and the mix differs a lot by
+// subject (Anatomy and Radiology are mostly pictures, Medicine and OBG mostly vignettes, Physiology mostly one-liners).
+// Match, statement and assertion-reason items are almost absent (under 3%). AMC CAT is all vignettes by its own pattern.
+const SUBJECT_ALIASES: [RegExp, string][] = [
+  [/obstet|gynae|gynec|pre-?eclampsia|pregnan|antenatal|labou?r/i, 'OBG'], [/communit|preventive|epidemiolog|biostat|screening|vaccin|immunis/i, 'PSM'],
+  [/forensic|toxicolog|poison|postmortem|autopsy|medicolegal/i, 'Forensic'], [/paediatric|pediatric|neonat|child/i, 'Paediatrics'],
+  [/anaesthes|anesthes/i, 'Anaesthesia'], [/ophthal|retina|glaucoma|cornea|lens|squint/i, 'Ophthalmology'], [/\bent\b|otolaryng|larynx|tonsil|nasal|hearing/i, 'ENT'],
+  [/dermat|skin|psoria|vitiligo|leprosy/i, 'Dermatology'], [/orthop|fracture|bone tumou?r|dislocation|osteo/i, 'Orthopedics'], [/psychiat|depress|schizophren|anxiety/i, 'Psychiatry'],
+  [/radiolog|imaging|x-?ray|ultrasound|\bct\b|\bmri\b/i, 'Radiology'], [/anatom|nerve|plexus|artery|muscle|foramen|embryolog|histolog/i, 'Anatomy'],
+  [/physiolog|cardiac cycle|renal physiolog|respiratory physiolog|nerve conduction/i, 'Physiology'], [/biochem|metabolism|enzyme|urea cycle|glycogen|vitamin|gene expression/i, 'Biochemistry'],
+  [/pharmacolog|drug|adverse effect|antibiotic|anticoagul|inhibitor|receptor/i, 'Pharmacology'], [/microbiolog|bacteri|virus|viral|fung|parasit|hepatitis|malaria|immunolog/i, 'Microbiology'],
+  [/patholog|tumou?r|neoplas|necrosis|carcinoma|lymphoma|inflammation|amyloid/i, 'Pathology'], [/surg|appendic|hernia|thyroid|breast|trauma|burns/i, 'Surgery'],
+];
+
+/** The profile subject a typed topic belongs to, when it can be told from the words; otherwise undefined. */
+export function subjectFromTopic(topic: string): string | undefined {
+  return SUBJECT_ALIASES.find(([re]) => re.test(topic))?.[1];
+}
+
+/** The style mix of an exam, adjusted to a subject when one is known. */
+export function mixFor(exam: ExamType, subject?: string): [StyleId, number][] {
+  if (exam === 'AMC_CAT') return [['vignette', 100]];
+  const profile = PYQ_PROFILE[exam];
+  const known = subject && Object.keys(profile.subjects).find((k) => k.toLowerCase() === subject.toLowerCase());
+  const sh: StyleShares = known ? profile.subjects[known] : profile.all;
+  // A few percent of the one-liners are calculations and mechanism questions; the rest of the numbers are the papers'.
+  const calc = exam === 'NEET_PG' && subject === 'PSM' ? 5 : 1;
+  const mech = 2;
+  const oneLiner = Math.max(0, sh['one-liner'] - calc - mech);
+  const mix: [StyleId, number][] = [['one-liner', oneLiner], ['short-case', sh['short-case']], ['vignette', sh.vignette], ['negative', sh.negative], ['image', sh.image], ['calculation', calc], ['mechanism', mech]];
+  // Match-the-following is about 2% of INI-CET papers.
+  if (exam === 'INI_CET') mix.push(['match', 2]);
+  return mix.filter(([, w]) => w > 0);
+}
 
 // Real vignettes mostly ask for the diagnosis or a finding; next step, drug of choice and investigation are each rarer.
 const EXAM_LEAD_INS: Record<ExamType, [LeadIn, number][]> = {
@@ -252,11 +279,11 @@ export interface FactInfo { fact: string; subtopic: string; picturable?: boolean
  * has three or more other facts; calculation goes to facts with numbers; image goes to picturable facts. A fact that
  * cannot carry its style falls back to a short case (a one-liner for NEET-PG-style mixes).
  */
-export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], leadIns: LeadIn[], tierChoice: 'ALL' | 'LOW' | 'MEDIUM' | 'HIGH'): Slot[] {
+export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], leadIns: LeadIn[], tierChoice: 'ALL' | 'LOW' | 'MEDIUM' | 'HIGH', subject?: string): Slot[] {
   const n = facts.length;
   const styleSeq: StyleId[] = picked.length
     ? spread(n, picked.map((s) => [s, 1] as [StyleId, number]))
-    : spread(n, EXAM_MIX[exam]);
+    : spread(n, mixFor(exam, subject));
   const leadSeq: LeadIn[] = spread(n, leadIns.length ? leadIns.map((l) => [l, 1] as [LeadIn, number]) : EXAM_LEAD_INS[exam]);
   const tiers: ('LOW' | 'MEDIUM' | 'HIGH')[] = tierChoice === 'ALL' ? spread(n, [['LOW', 20], ['MEDIUM', 45], ['HIGH', 35]] as [('LOW' | 'MEDIUM' | 'HIGH'), number][]) : Array(n).fill(tierChoice);
   const bySub = new Map<string, number[]>();

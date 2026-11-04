@@ -49,7 +49,7 @@ export function plainChecks(questions, c = {}) {
   const set = [];
   const answers = questions.map((q) => norm(correctText(q)));
   const dupAnswers = answers.filter((a, i) => a && answers.indexOf(a) !== i).length;
-  if (dupAnswers) set.push(`${dupAnswers} repeated answers`);
+  if (dupAnswers && !(slot && STYLES[slot.style]?.codedOptions)) set.push(`${dupAnswers} repeated answers`);
   let nearDup = 0;
   for (let i = 0; i < questions.length; i++) for (let j = i + 1; j < questions.length; j++) {
     if (stemSimilarity(norm(questions[i].stem + ' ' + questions[i].questionText), norm(questions[j].stem + ' ' + questions[j].questionText)) >= 0.6) nearDup += 1;
@@ -84,7 +84,7 @@ async function judge(c, questions, provider) {
   if (!questions.length) return [];
   const slot = declaredSlot(c.style);
   const required = slot ? `Required style: ${STYLES[slot.style].judge}${slot.leadIn ? `; the question line asks for the ${slot.leadIn.replace(/-/g, ' ')}` : ''}.` : `No single style was required: the exam's own mix for ${c.exam} applies (NEET-PG: mostly vignettes and one-liners; INI-CET: also NOT items and some statements; AMC: patient vignettes with 5 options). Mark style_ok true if the item is a well-formed exam question of any normal style.`;
-  const list = questions.map((q, i) => `${i + 1}. ${q.stem}\n${q.questionText}\n` + q.options.map((o) => `${o.id}) ${o.text}`).join('\n') + `\nMarked answer: ${q.correctOption}\nExplanation: ${String(q.explanation || '').slice(0, 500)}`).join('\n\n');
+  const list = questions.map((q, i) => `${i + 1}. ${q.stem}\n${q.questionText}\n` + q.options.map((o) => `${o.id}) ${o.text}`).join('\n') + `\nMarked answer: ${q.correctOption}\nExplanation: ${String(q.explanation || '').slice(0, 1800)}`).join('\n\n');
   const raw = await aiComplete({ system: JUDGE_SYSTEM, messages: [{ role: 'user', content: `Topic: ${c.topic}\nExam: ${c.exam}\n${required}\n\n${list}` }], json: true, effort: 'medium', provider, model: getEffectiveModel(provider) }).catch(() => '');
   return extractJson(raw)?.items ?? [];
 }
