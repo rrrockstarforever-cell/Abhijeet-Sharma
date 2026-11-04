@@ -1604,6 +1604,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     if (!refilling) {
       refilling = (async () => {
         if (shouldStop?.() || signal?.aborted) return false;
+        // With a fact plan every slot is a planned fact. A generic refill would add questions with no fact and no style
+        // (off-topic or the wrong shape), so a planned set ends when its facts do.
+        if (requestedTopic && plannedFacts.length) return false;
         const more = await planTopics();
         const extra: PlannedTopic[] = more && more.length ? more : Array.from({ length: count }, (_, i) => ({
           ...workingPool[(slotCounter + i) % workingPool.length],

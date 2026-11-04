@@ -132,7 +132,7 @@ export const STYLES: Record<StyleId, StyleSpec> = {
   },
   calculation: {
     id: 'calculation', chips: ['Calculation'], needsRelated: false, codedOptions: true,
-    judge: 'a calculation item: the stem gives the numbers, the options are numbers with one unit, the explanation shows the working',
+    judge: 'a calculation item: the stem gives the numbers, the options are numbers (a unit is optional for counts), the explanation shows the working',
     instruction: () => 'Style: calculation. Give every number needed in the stem (counts, percentages, doses, rates) and ask for ONE computed value. All options are numbers with the same unit. Pick values that give a clean result. The explanation shows the working with "=" signs.',
     validate: (q) => {
       if ((`${q.stem ?? ''}`.match(/\d+(\.\d+)?/g) ?? []).length < 2) return 'calculation-without-numbers: the stem must give the numbers';

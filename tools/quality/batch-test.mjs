@@ -7,7 +7,7 @@ import { STYLES, styleProblem, pointsAtMissingPicture, explainsDistractors } fro
 
 export const MATRIX = [];
 
-const GENERIC_LEAD = /^(which of the following|what is the most likely diagnosis)\??$/i;
+const GENERIC_LEAD = /^which of the following\??$/i;
 const HEDGE = /\b(may|might|possibly|uncertain|unclear|remains? to be|not well understood)\b/i;
 const PATIENT = /\b(\d{1,2}[- ]year[- ]old|\d+ ?(month|week|day)s?[- ]old|a (man|woman|boy|girl|patient|child|infant|neonate))\b/i;
 const OPTION_COUNT = { NEET_PG: 4, INI_CET: 4, AMC_CAT: 5 };
