@@ -608,7 +608,7 @@ export async function timed<T>(stage: string, fn: () => Promise<T>, lane?: strin
 
 // Mixed mode (DeepSeek selected): writing and checking use two lanes at once. DeepSeek takes up to 4 calls,
 // NVIDIA takes one call at a time, so the NVIDIA lane never bursts past its limit.
-const laneCapacity: Record<'vyce' | 'nvidia', number> = { vyce: 4, nvidia: 1 };
+const laneCapacity: Record<'vyce' | 'nvidia', number> = { vyce: 4, nvidia: 3 };
 const laneBusy: Record<'vyce' | 'nvidia', number> = { vyce: 0, nvidia: 0 };
 const laneWaiters: (() => void)[] = [];
 
