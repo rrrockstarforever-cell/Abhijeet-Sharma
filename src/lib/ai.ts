@@ -6,7 +6,7 @@ import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } f
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
-import { EXAM_RULES, STYLES, explainsDistractors, leadInsFromChips, planSlots, pointsAtMissingPicture, styleProblem, stylesFromChips, tierText, type Slot, type StyleId } from './questionStyles.ts';
+import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, explainsDistractors, leadInsFromChips, planSlots, pointsAtMissingPicture, styleProblem, stylesFromChips, tierText, type Slot, type StyleId } from './questionStyles.ts';
 
 /**
  * Two key facts this similar are the same fact (word overlap on the key-fact sentences). Set low because
@@ -464,7 +464,7 @@ async function repairExplanation(q: ClinicalQuestion): Promise<void> {
   const provider = getActiveProvider();
   if (!provider) return;
   const raw = await aiComplete({
-    system: 'You improve the explanation of one exam MCQ. Write 2 to 5 sentences: first why the marked option is right, then briefly why each of the other options is wrong, naming them by letter ("Option B is wrong because ..."). Keep every fact and the marked answer exactly as they are; add no new claims. Reply with ONLY JSON: {"explanation":"..."}.',
+    system: 'You improve the explanation of one exam MCQ. Write 90 to 150 words: start with the key fact in **bold**, then one bullet per other option saying why it is wrong ("Option B: ..."), then one line "High-yield: ...". Keep every fact and the marked answer exactly as they are; add no new claims. Reply with ONLY JSON: {"explanation":"..."}.',
     messages: [{ role: 'user', content: [q.stem, (q as { questionText?: string }).questionText ?? '', ...q.options.map((o) => `${o.id}) ${o.text}`), `Marked answer: ${q.correctOption}`, `Current explanation: ${String(q.explanation ?? '')}`].join('\n') }],
     json: true,
     effort: 'low',
@@ -1335,7 +1335,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       shape ?? '',
       slot && STYLES[slot.style].codedOptions ? '' : `Make the ${pattern.opts} options similar in length and detail. The correct option must not be the longest or the most detailed.`,
       `Difficulty: ${topic.difficultyTier}. ${slot ? tierText(slot.style, topic.difficultyTier) : TIER_BEHAVIOUR[topic.difficultyTier]}`,
-      slot ? EXAM_RULES[exam] : pattern.pat,
+      slot ? `${EXAM_RULES[exam]} ${COMMON_STYLE_RULES}` : pattern.pat,
       !slot && questionTypes?.length ? `Question type focus: ${questionTypes.join('; ')}.` : '',
       !slot && stemPatterns?.length ? `Stem pattern: ${stemPatterns.join('; ')}.` : '',
       evidenceSources?.length ? `Ground answers in: ${evidenceSources.join('; ')}.` : '',

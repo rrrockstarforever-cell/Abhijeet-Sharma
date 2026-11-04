@@ -7,7 +7,7 @@ export type StyleId =
   | 'vignette' | 'short-case' | 'one-liner' | 'negative' | 'match'
   | 'multi-statement' | 'assertion-reason' | 'calculation' | 'mechanism' | 'image';
 
-export type LeadIn = 'next-step' | 'drug-of-choice' | 'investigation-of-choice' | 'treatment-of-choice' | 'diagnosis' | 'advice';
+export type LeadIn = 'next-step' | 'drug-of-choice' | 'investigation-of-choice' | 'treatment-of-choice' | 'diagnosis' | 'advice' | 'finding';
 
 /** One question slot of a set: its style, lead-in, difficulty and the other facts it may draw on. */
 export interface Slot {
@@ -29,6 +29,7 @@ const LEAD_INS: Record<LeadIn, { ask: string; test: RegExp }> = {
   'investigation-of-choice': { ask: 'The question line asks for the investigation of choice or the most appropriate test ("Which investigation is most appropriate?").', test: /investigation|test|imaging|scan|biopsy|gold standard|most (appropriate|useful|sensitive|specific)|best (initial )?(test|investigation)/i },
   'treatment-of-choice': { ask: 'The question line asks for the treatment of choice ("What is the treatment of choice?").', test: /treatment|management|therapy|drug|manage|intervention|procedure/i },
   diagnosis: { ask: 'The question line asks for the most likely diagnosis ("What is the most likely diagnosis?"). The stem must carry enough findings to settle it.', test: /diagnosis|condition|disorder|disease|most likely/i },
+  finding: { ask: 'The question line asks for a finding, feature, cause, complication or association of the stated condition ("Which of the following is the most likely finding?", "... is associated with?").', test: /./ },
   advice: { ask: 'The question line asks for the most appropriate advice or counselling ("What is the most appropriate advice to give this patient?").', test: /advice|counsel|inform|explain|tell|reassur|educat|recommend/i },
 };
 
@@ -57,7 +58,7 @@ export const STYLES: Record<StyleId, StyleSpec> = {
   vignette: {
     id: 'vignette', chips: ['Clinical vignette'], needsRelated: false, codedOptions: false,
     judge: 'a clinical vignette (age, sex, presentation, findings) ending in one question',
-    instruction: (slot) => `Style: clinical vignette. Write 3 to 6 sentences: age, sex, setting, presenting complaint, key examination findings and results, then ONE question. Weave in the findings that point to the tested fact; do not name the answer. ${slot.leadIn ? LEAD_INS[slot.leadIn].ask : 'End with one clear lead-in.'}`,
+    instruction: (slot) => `Style: clinical vignette. Write 2 to 4 sentences (about 30 to 45 words): age, sex, presenting complaint, the key finding or result, then ONE question. Real exam vignettes are brief. Weave in the findings that point to the tested fact; do not name the answer. ${slot.leadIn ? LEAD_INS[slot.leadIn].ask : 'End with one clear lead-in.'}`,
     validate: (q, slot) => {
       if (!PATIENT.test(q.stem ?? '')) return 'not-a-vignette: the stem has no patient (age and sex)';
       if (words(q.stem ?? '') < 22) return 'vignette-too-short: add presentation, findings and results';
@@ -78,10 +79,10 @@ export const STYLES: Record<StyleId, StyleSpec> = {
   'one-liner': {
     id: 'one-liner', chips: ['One-liner recall'], needsRelated: false, codedOptions: false,
     judge: 'a one-line factual recall question with no patient',
-    instruction: () => 'Style: one-liner recall. One short line about the fact, for example "Which of the following is ...?" or "... is caused by?". No patient: the stem has no age, no sex and no "a patient" or "a child". The stem must still give a subject (a drug, condition, structure or finding), not just a topic label.',
+    instruction: () => 'Style: one-liner recall. One short line (under 25 words) about the fact, for example "Which of the following is ...?" or "... is caused by?". No patient: the stem has no age, no sex and no "a patient" or "a child". The stem must still give a subject (a drug, condition, structure or finding), not just a topic label.',
     validate: (q) => {
       if (PATIENT.test(q.stem ?? '')) return 'one-liner-has-patient: remove the patient';
-      if (words(`${q.stem ?? ''} ${questionLine(q)}`) > 45) return 'one-liner-too-long: keep it to one short line';
+      if (words(`${q.stem ?? ''} ${questionLine(q)}`) > 35) return 'one-liner-too-long: keep it to one short line';
       return null;
     },
   },
@@ -189,15 +190,20 @@ export function styleProblem(q: ClinicalQuestion, slot: Slot | undefined, option
 // Planning: which style each question gets.
 
 /** The exam's own mix, as weights. NEET-PG's pattern forbids NOT, match and statement items; AMC is all vignettes. */
+// Mixes follow the previous-year papers (5,900 NEET-PG, AIIMS and INI-CET questions, 2017-2026): stems are short (median
+// 14 words INI-CET, 22 NEET-PG), about a quarter to two fifths are patient vignettes, one in 14 (NEET-PG) to one in 7
+// (INI-CET) asks what is NOT or EXCEPT, a quarter carry a picture, and match, statement and assertion-reason items are
+// almost absent (under 3%). AMC CAT is all vignettes by its own pattern.
 const EXAM_MIX: Record<ExamType, [StyleId, number][]> = {
-  NEET_PG: [['short-case', 30], ['vignette', 15], ['one-liner', 30], ['image', 10], ['calculation', 5], ['mechanism', 10]],
-  INI_CET: [['vignette', 35], ['one-liner', 25], ['negative', 20], ['multi-statement', 8], ['match', 4], ['assertion-reason', 4], ['mechanism', 4]],
+  NEET_PG: [['one-liner', 34], ['short-case', 17], ['vignette', 22], ['negative', 7], ['image', 15], ['calculation', 2], ['mechanism', 3]],
+  INI_CET: [['one-liner', 40], ['short-case', 12], ['vignette', 18], ['negative', 12], ['image', 15], ['match', 2], ['mechanism', 1]],
   AMC_CAT: [['vignette', 100]],
 };
 
+// Real vignettes mostly ask for the diagnosis or a finding; next step, drug of choice and investigation are each rarer.
 const EXAM_LEAD_INS: Record<ExamType, [LeadIn, number][]> = {
-  NEET_PG: [['diagnosis', 25], ['next-step', 25], ['investigation-of-choice', 20], ['drug-of-choice', 20], ['advice', 10]],
-  INI_CET: [['diagnosis', 25], ['next-step', 25], ['drug-of-choice', 25], ['investigation-of-choice', 25]],
+  NEET_PG: [['diagnosis', 35], ['finding', 30], ['next-step', 12], ['drug-of-choice', 10], ['investigation-of-choice', 8], ['treatment-of-choice', 5]],
+  INI_CET: [['diagnosis', 35], ['finding', 30], ['next-step', 12], ['drug-of-choice', 10], ['investigation-of-choice', 8], ['treatment-of-choice', 5]],
   AMC_CAT: [['next-step', 35], ['diagnosis', 25], ['investigation-of-choice', 20], ['advice', 20]],
 };
 
@@ -296,8 +302,11 @@ export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], 
 }
 
 /** The exam-specific rules that stay in force whatever the style (option count, wording, sources). */
+/** Style of options and explanation seen in the real papers, appended for every item. */
+export const COMMON_STYLE_RULES = 'Options are short: a term or a phrase of 1 to 6 words, unless the item needs a sentence. Explanation: 90 to 150 words. Start with the key fact in **bold**, then one bullet per other option saying why it is wrong ("Option B: ..."), then one line "High-yield: ...". Add no claim that the sources do not support.';
+
 export const EXAM_RULES: Record<ExamType, string> = {
-  NEET_PG: 'NEET PG (NBEMS): exactly 4 options (A-D), one correct. Options are homogeneous and close. Avoid "all of the above", "none of the above" and "all except" wording.',
+  NEET_PG: 'NEET PG (NBEMS): exactly 4 options (A-D), one correct. Options are homogeneous and close. Avoid "all of the above" and "none of the above".',
   INI_CET: 'INI-CET (AIIMS): exactly 4 options (A-D), one correct. Distractors are very close; elimination should be hard. Recent guidelines and advances are fair game.',
   AMC_CAT: 'AMC CAT MCQ (Australia): exactly 5 options (A-E), one best answer. Set the item in Australian practice (general practice, emergency department, ward, rural or remote clinic) and prefer safe, guideline-based steps (Therapeutic Guidelines, Australian Medicines Handbook, RACGP Red Book, Murtagh). Options are homogeneous (all diagnoses, or all management steps).',
 };

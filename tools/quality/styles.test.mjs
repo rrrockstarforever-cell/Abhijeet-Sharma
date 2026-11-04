@@ -58,12 +58,12 @@ expect('explains no', explainsDistractors({ ...q1, explanation: 'Long-term PPI u
 const facts = Array.from({ length: 20 }, (_, i) => ({ fact: `Fact ${i} about drug ${i % 2 ? 'with 5 mg dose' : 'effect'}`, subtopic: `Sub ${i % 4}`, picturable: i % 5 === 0 }));
 const count = (slots, key) => slots.reduce((m, s) => { m[s[key]] = (m[s[key]] || 0) + 1; return m; }, {});
 const neet = planSlots(facts, 'NEET_PG', [], [], 'ALL');
-expect('neet no negative', 'negative' in count(neet, 'style') ? 'has negative' : null, null);
+expect('neet few negatives', String(count(neet, 'style').negative <= 2), 'true');
 expect('neet no match', 'match' in count(neet, 'style') ? 'has match' : null, null);
 const tiers = count(neet, 'tier');
 expect('tier mix', `${tiers.LOW}/${tiers.MEDIUM}/${tiers.HIGH}`, '4/9/7');
 const ini = planSlots(facts, 'INI_CET', [], [], 'ALL');
-expect('ini negative about 20%', String(count(ini, 'style').negative), '4');
+expect('ini negative about 12%', String(count(ini, 'style').negative), '2');
 const amc = planSlots(facts, 'AMC_CAT', [], [], 'MEDIUM');
 expect('amc all vignettes', JSON.stringify(count(amc, 'style')), '{"vignette":20}');
 const picked = planSlots(facts, 'INI_CET', stylesFromChips(['Match the following']), leadInsFromChips(['Next best step']), 'MEDIUM');

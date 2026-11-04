@@ -63,9 +63,10 @@ export function plainChecks(questions, c = {}) {
   if (c.style === 'mix' && questions.length >= 8) {
     const n = questions.length;
     const kinds = { negative: questions.filter((q) => /\b(NOT|EXCEPT|FALSE|INCORRECT)\b/.test(`${q.questionText} ${q.stem}`)).length, statements: questions.filter((q) => /(^|\s)1[.)]\s.*\s2[.)]\s/s.test(q.stem)).length, match: questions.filter((q) => /match list/i.test(q.stem)).length };
-    if (c.exam === 'NEET_PG' && (kinds.negative + kinds.statements + kinds.match) / n > 0.15) set.push('NEET-PG set has NOT/statement/match items its pattern forbids');
+    if (c.exam === 'NEET_PG' && (kinds.statements + kinds.match) / n > 0.1) set.push('NEET-PG set has statement or match items (they are almost absent in real papers)');
+    if (c.exam === 'NEET_PG' && kinds.negative / n > 0.25) set.push('NEET-PG set has too many NOT items');
     if (c.exam === 'AMC_CAT' && cases / n < 0.9) set.push(`AMC set is not all patient vignettes (${Math.round((cases / n) * 100)}%)`);
-    if (c.exam === 'INI_CET' && kinds.negative / n > 0.4) set.push('INI-CET set has too many NOT items');
+    if (c.exam === 'INI_CET' && kinds.negative / n > 0.3) set.push('INI-CET set has too many NOT items');
   }
   return { per, set, patientShare: questions.length ? cases / questions.length : 0 };
 }
