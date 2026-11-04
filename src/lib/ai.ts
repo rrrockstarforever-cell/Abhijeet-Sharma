@@ -1363,7 +1363,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       patientGroup ? `Patient group: ${patientGroup}.` : '',
       presentingProblems?.length ? `Presenting problems: ${presentingProblems.join('; ')}.` : '',
       sourceMaterial ? `Base on these notes: """${sourceMaterial.slice(0, 6000)}""".` : '',
-      'Internet sources on this topic are attached after this request. Base the correct option on them where they apply, state the fact in keyFact, and do not copy their wording. Set "sourceCheck" to "supported" only if one of those sources directly backs the keyed option; otherwise set it to "not supported" and change the item to a fact that they do back.',
+      'Internet sources on this topic are attached after this request. Base the correct option on them where they apply, state the fact in keyFact, and do not copy their wording. Set "sourceCheck" to "supported" only if one of those sources directly backs the keyed option; otherwise set it to "not supported" and change the item to a fact that they do back. sourceCheck concerns only the keyed option and keyFact: patient details in a vignette and the reasons given for the wrong options may use standard textbook knowledge.',
       slot && slot.style !== 'image'
         ? 'This item is not image-based: set "figureModality" and "figureQuery" to empty strings, and never refer to a picture.'
         : includeImages
@@ -1430,11 +1430,11 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // A stem that is itself a question (ends with "?") is not a stem: it gives no case or context.
         const stemIsQuestion = Boolean(requestedTopic) && /\?\s*$/.test((q.stem ?? '').trim());
         // Styles with a fixed question line ("Choose the correct combination.", "Which statements are correct?") are short by design.
-        const shortLineOk = Boolean(slot) && ['match', 'multi-statement', 'assertion-reason', 'calculation', 'negative', 'one-liner'].includes(slot!.style);
+        const shortLineOk = Boolean(slot);
         const codedOptions = Boolean(slot) && STYLES[slot!.style].codedOptions;
         // A management lead-in (next step, drug of choice, advice) is the style asked for, not drift.
         const managesByDesign = Boolean(slot?.leadIn) && ['next-step', 'drug-of-choice', 'treatment-of-choice', 'advice'].includes(slot!.leadIn!);
-        const genericLeadIn = Boolean(requestedTopic) && (stemIsQuestion || (!shortLineOk && qLine.length < 40) || /^(choose|select) the (single )?best answer/i.test(qLine) && !shortLineOk || /^which of the following is the most likely diagnosis\??$/i.test(qLine) || dependsOnOutside);
+        const genericLeadIn = Boolean(requestedTopic) && (stemIsQuestion || (!shortLineOk && qLine.length < 40) || /^(choose|select) the (single )?best answer/i.test(qLine) && !shortLineOk || (/^which of the following is the most likely diagnosis\??$/i.test(qLine) && slot?.leadIn !== 'diagnosis') || dependsOnOutside);
         // With a planned style mix the slots decide how many cases there are, so the case cap is off.
         const shape = structureReason(q) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions && !codedOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases && !slot ? 'too-many-cases' : null) ?? (driftsIntoTreatment && !managesByDesign ? 'treatment-drift' : null);
         const SHAPE_HINTS: Record<string, string> = {
@@ -1461,6 +1461,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const verdict = await verifyItem(q, { query: groundQuery, subject: topic.subject }, signal);
         if (verdict !== 'supported') {
           claimed = false;
+          if (verdict === 'error') providerErrorStreak += 1;
           logStage(verdict === 'error' ? 'drop:verify-error' : 'drop:unverified', 0);
           return null;
         }
@@ -1540,6 +1541,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       } catch (err: any) {
         // A copy stopped because another copy won is not a stop of the whole run.
         if (own.signal.aborted && !outerSignal?.aborted) return null;
+        providerErrorStreak += 1;
         if (outerSignal?.aborted || (err instanceof AiError && err.kind === 'aborted') || err?.name === 'AbortError') {
           stopped = true;
           return null;
@@ -1611,8 +1613,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const styleExplicit = stylesFromChips(questionTypes, explicitStyles).length > 0;
   let factHits = 0;
   let factTries = 0;
-  let nullStreak = 0;
-  const MAX_NULL_STREAK = 60;
+  // Consecutive provider errors (not rejected questions): when the provider is down, the run stops with a message.
+  let providerErrorStreak = 0;
+  const MAX_NULL_STREAK = 40;
   let markTargetReached: () => void = () => {};
   const targetReached = new Promise<void>((resolve) => { markTargetReached = resolve; });
   const worker = async (): Promise<void> => {
@@ -1642,8 +1645,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       completedCount += 1;
       // Circuit breaker: when the provider is down every slot fails, and a run that keeps refilling its queue would
       // send thousands of calls. A long unbroken streak of failures ends the run with a message instead.
-      nullStreak = q ? 0 : nullStreak + 1;
-      if (nullStreak >= MAX_NULL_STREAK && questions.length < count && !stopped) {
+      if (providerErrorStreak >= MAX_NULL_STREAK && questions.length < count && !stopped) {
         failure = 'The AI provider kept returning errors, so this set was stopped. Check the connection and try again.';
         stopped = true;
         markTargetReached();

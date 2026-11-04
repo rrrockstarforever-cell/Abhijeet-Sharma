@@ -330,7 +330,7 @@ export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], 
 
 /** The exam-specific rules that stay in force whatever the style (option count, wording, sources). */
 /** Style of options and explanation seen in the real papers, appended for every item. */
-export const COMMON_STYLE_RULES = 'Options are short: a term or a phrase of 1 to 6 words, unless the item needs a sentence. Explanation: 90 to 150 words. Start with the key fact in **bold**, then one bullet per other option saying why it is wrong ("Option B: ..."), then one line "High-yield: ...". Add no claim that the sources do not support.';
+export const COMMON_STYLE_RULES = 'Options are short: a term or a phrase of 1 to 6 words, unless the item needs a sentence. Explanation: 90 to 150 words. Start with the key fact in **bold**, then one bullet per other option saying why it is wrong ("Option B: ..."), then one line "High-yield: ...".';
 
 export const EXAM_RULES: Record<ExamType, string> = {
   NEET_PG: 'NEET PG (NBEMS): exactly 4 options (A-D), one correct. Options are homogeneous and close. Avoid "all of the above" and "none of the above".',
