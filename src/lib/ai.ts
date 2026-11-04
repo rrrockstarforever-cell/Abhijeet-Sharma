@@ -265,7 +265,7 @@ export async function splitTopic(topic: string, exam: string): Promise<{ subtopi
     const res = await fetch('/api/ai/split-topic', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, exam, provider, model: getEffectiveModel(provider) }),
+      body: JSON.stringify({ topic, exam, ...currentRoute(provider) }),
     });
     const data = await res.json().catch(() => ({}));
     const list: string[] = Array.isArray(data?.subtopics) ? data.subtopics : [];
@@ -673,6 +673,12 @@ export async function aiComplete(options: AiCompleteOptions): Promise<string> {
 const HAIKU_FALLBACK_MODEL = 'claude-haiku-5-5';
 let opencodeExhaustedUntil = 0;
 
+/** The provider and model a call should use now: Claude Haiku 5.5 while the OpenCode plan is used up, else the active one. */
+function currentRoute(provider: AiProviderId): { provider: AiProviderId; model: string } {
+  if (provider === 'opencode' && Date.now() < opencodeExhaustedUntil) return { provider: 'claude', model: HAIKU_FALLBACK_MODEL };
+  return { provider, model: getEffectiveModel(provider) };
+}
+
 /**
  * Runs a writing call as a server job: starts it, then checks it every 400 ms with a short request. The browser
  * holds only a short connection at a time, so many questions can wait on the server at once. Returns the same
@@ -937,7 +943,7 @@ async function verifyItem(q: ClinicalQuestion, groundOn: { query: string; subjec
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           // The checker is a stronger model than the writer, so a weak writer cannot approve its own mistakes.
-      body: JSON.stringify({ provider, model: provider === 'nvidia' ? DEFAULT_MODELS.nvidia : getEffectiveModel(provider), question: q, groundOn }),
+      body: JSON.stringify({ ...(provider === 'nvidia' ? { provider, model: DEFAULT_MODELS.nvidia } : currentRoute(provider)), question: q, groundOn }),
           signal,
         });
         if (res.ok) {
