@@ -6,6 +6,7 @@ import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } f
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
+import { EXAM_RULES, STYLES, explainsDistractors, leadInsFromChips, planSlots, pointsAtMissingPicture, styleProblem, stylesFromChips, tierText, type Slot, type StyleId } from './questionStyles.ts';
 
 /**
  * Two key facts this similar are the same fact (word overlap on the key-fact sentences). Set low because
@@ -253,7 +254,7 @@ function openCodeSessionId(): string {
 }
 
 /** One planned question slot: the subject, subtopic, the part of it to focus on, and the difficulty. */
-interface PlannedTopic { subject: string; subtopic: string; focus?: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH'; assigned?: AssignedFact }
+interface PlannedTopic { subject: string; subtopic: string; focus?: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH'; assigned?: AssignedFact; slot?: Slot }
 
 /** Splits a typed topic into its distinct subtopics with the selected engine. Falls back to the topic itself. */
 export async function splitTopic(topic: string, exam: string): Promise<{ subtopics: string[]; priorities: number[]; facts: number[] }> {
@@ -356,7 +357,7 @@ export function factKey(s: string): string {
 }
 
 /** A fact planned for one question slot: it is quoted from a source, and the question is written around it. */
-export interface AssignedFact { subtopic: string; fact: string; quote: string; source: string }
+export interface AssignedFact { subtopic: string; fact: string; quote: string; source: string; /** The finding has a typical picture (X-ray, histology, ECG, smear, clinical photo). */ picturable?: boolean }
 
 const PLAN_FACTS_SYSTEM =
   'You list distinct, high-yield, exam-testable facts about one subtopic that the sources state. Do not repeat a fact already planned. ' +
@@ -430,7 +431,7 @@ export async function planTopicFacts(
       kept += 1;
     }
   }
-  return dedupePlan(planned, provider);
+  return tagPicturable(await dedupePlan(planned, provider), provider);
 }
 
 /**
@@ -458,6 +459,37 @@ async function dedupePlan(plan: AssignedFact[], provider: AiProviderId): Promise
  * figureQuery on them. A question about a drug effect or a mechanism gets none. The picture search and the picture
  * check then run as usual, so a picture is attached only when it is found and verified.
  */
+/** Rewrites an explanation that does not say why the other options are wrong. The question itself is not changed. */
+async function repairExplanation(q: ClinicalQuestion): Promise<void> {
+  const provider = getActiveProvider();
+  if (!provider) return;
+  const raw = await aiComplete({
+    system: 'You improve the explanation of one exam MCQ. Write 2 to 5 sentences: first why the marked option is right, then briefly why each of the other options is wrong, naming them by letter ("Option B is wrong because ..."). Keep every fact and the marked answer exactly as they are; add no new claims. Reply with ONLY JSON: {"explanation":"..."}.',
+    messages: [{ role: 'user', content: [q.stem, (q as { questionText?: string }).questionText ?? '', ...q.options.map((o) => `${o.id}) ${o.text}`), `Marked answer: ${q.correctOption}`, `Current explanation: ${String(q.explanation ?? '')}`].join('\n') }],
+    json: true,
+    effort: 'low',
+    provider,
+    model: getEffectiveModel(provider),
+  }).catch(() => '');
+  const better = String(extractJson<{ explanation?: string }>(raw)?.explanation ?? '').trim();
+  if (better.length >= 80) q.explanation = better;
+}
+
+/** Marks the planned facts whose finding has a typical picture, so picture slots go to facts that can carry one. */
+async function tagPicturable(plan: AssignedFact[], provider: AiProviderId): Promise<AssignedFact[]> {
+  if (!plan.length) return plan;
+  const raw = await aiComplete({
+    system: 'You mark which exam facts have a typical, recognisable picture: an X-ray, CT, MRI, ultrasound, ECG, histology slide, blood smear, fundus photo, clinical photo or gross specimen. A drug effect, a mechanism, a number or a management step has none. Reply with ONLY JSON: {"picturable":[<fact numbers>]}.',
+    messages: [{ role: 'user', content: plan.map((f, i) => `${i + 1}. ${f.fact}`).join('\n') }],
+    json: true,
+    effort: 'low',
+    provider,
+    model: getEffectiveModel(provider),
+  }).catch(() => '');
+  const picks = new Set((extractJson<{ picturable?: number[] }>(raw)?.picturable ?? []).map((n) => Number(n) - 1));
+  return plan.map((f, i) => ({ ...f, picturable: picks.has(i) }));
+}
+
 async function examinerRejects(q: ClinicalQuestion, topic: string): Promise<boolean> {
   const provider = getActiveProvider();
   if (!provider) return false;
@@ -993,6 +1025,10 @@ export interface GenerateQuestionsOptions {
   /** Section-14 options: question types / stem patterns / evidence sources / patient context */
   questionTypes?: string[];
   stemPatterns?: string[];
+  /** Explicit style ids (vignette, one-liner, negative, match, multi-statement, assertion-reason, calculation, mechanism, image). */
+  styles?: string[];
+  /** Explicit lead-ins (next-step, drug-of-choice, investigation-of-choice, treatment-of-choice, diagnosis, advice). */
+  leadIns?: string[];
   evidenceSources?: string[];
   patientGroup?: string;
   presentingProblems?: string[];
@@ -1156,7 +1192,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const {
     exam, count, subjectSubtopics, requestedTopic, factPlan, difficultyTier, difficultySubLevel, effort,
     onProgress, onBatch, batchPromises, shouldStop, existing, usedUnits: unitsUsed, signal, onRetry,
-    questionTypes, stemPatterns, evidenceSources, patientGroup, presentingProblems,
+    questionTypes, stemPatterns, styles: explicitStyles, leadIns: explicitLeadIns, evidenceSources, patientGroup, presentingProblems,
     sourceMaterial, customInstructions, includeImages,
   } = options;
   const learnerProfile = typeof customInstructions === 'string' ? customInstructions.trim().slice(0, 1500) : '';
@@ -1234,8 +1270,13 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const plannedFacts = requestedTopic && factPlan?.length
     ? factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`))
     : [];
+  // Every planned fact gets a slot: its style (vignette, one-liner, NOT, match, statements, ...), lead-in and difficulty,
+  // from the styles the learner picked or, when none, the exam's own mix.
+  const slots: Slot[] = plannedFacts.length
+    ? planSlots(plannedFacts.map((f) => ({ fact: f.fact, subtopic: f.subtopic, picturable: f.picturable })), exam, stylesFromChips(questionTypes, explicitStyles), leadInsFromChips(stemPatterns, explicitLeadIns), difficultyTier)
+    : [];
   const plannedTopics = plannedFacts.length
-    ? plannedFacts.map((f) => ({ subject: requestedTopic ?? '', subtopic: f.subtopic, focus: f.fact, difficultyTier: tier, assigned: f }))
+    ? plannedFacts.map((f, i) => ({ subject: requestedTopic ?? '', subtopic: f.subtopic, focus: f.fact, difficultyTier: slots[i].tier, assigned: f, slot: slots[i] }))
     : requestedTopic ? null : await planTopics(count);
 
   // Build the subject/subtopic pool as fallback.
@@ -1259,13 +1300,15 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }));
 
   // ---------- Step 3: Single-question generation ----------
-  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string): Promise<ClinicalQuestion | null> => {
+  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string, ctx?: { reason?: string }, slotOverride?: Slot): Promise<ClinicalQuestion | null> => {
     if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
     // Fact first (typed topics) where the sources have facts: the question is written around a fact the sources state.
     // If picks keep failing with no success, the fact step is switched off and the earlier writer path is used.
     // A slot with an assigned fact (from the fact plan) already has its fact, so no per-question pick runs.
     const assigned = (topic as { assigned?: AssignedFact }).assigned;
+    // The slot (style, lead-in, difficulty) this question was planned for; a slot given by the worker replaces it on a fallback.
+    const slot = slotOverride ?? (topic as { slot?: Slot }).slot;
     const factStepOn = !assigned && Boolean(requestedTopic && activeProvider) && (factHits > 0 || factTries < 6);
     const sourced = assigned ?? (factStepOn
       ? await pickSourcedFact(requestedTopic!, focus, activeProvider!, signal ?? undefined, acceptedKeyFacts)
@@ -1284,21 +1327,25 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       focus ? `Focus this item on: ${focus}. Use a different drug, regimen or scenario from the usual textbook example.` : '',
       // A typed topic is what the learner wants to learn: the item must ask about that content, not a downstream decision.
       sourced ? `Base the correct option on this fact, which source "${sourced.source}" states: "${sourced.fact}". The question must test that fact, and the stem must not give the answer away. Set keyFact to this fact and sourceCheck to "supported".` : '',
-      requestedTopic ? `The learner asked for exactly: "${requestedTopic}". Each item must test that content itself (the named effect, feature, drug or fact). Test mechanism only if the request asks for it, and do not test a workup, diagnosis or management step that follows from it. Keep the stem short and direct; a brief case is fine only when the answer is that fact. The stem must give real context (a patient, a setting or a finding), never a topic label, and must not name or hint at the answer. Stay inside the request: do not write treatment, management or investigation items unless the request names them. Use a patient case in at most one item in three; the other items are one-line questions about the fact. Never use a generic lead-in such as "the most likely diagnosis" or "the most appropriate investigation" without naming the condition or the finding it is about. The four options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis; otherwise ask for a supporting or most likely finding.` : '',
+      requestedTopic && slot
+        ? `The learner asked for exactly: "${requestedTopic}". The item must test that content itself (the named effect, feature, drug or fact) in the style given below. The stem must give real context (a subject, a setting or a finding), never a topic label, and must not name or hint at the answer. Never refer to a picture, list or table that the stem does not contain ("this biopsy", "shown here") unless the style is image-based and the stem says what the picture shows. The options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis.`
+        : requestedTopic ? `The learner asked for exactly: "${requestedTopic}". Each item must test that content itself (the named effect, feature, drug or fact). Test mechanism only if the request asks for it, and do not test a workup, diagnosis or management step that follows from it. Keep the stem short and direct; a brief case is fine only when the answer is that fact. The stem must give real context (a patient, a setting or a finding), never a topic label, and must not name or hint at the answer. Stay inside the request: do not write treatment, management or investigation items unless the request names them. Use a patient case in at most one item in three; the other items are one-line questions about the fact. Never use a generic lead-in such as "the most likely diagnosis" or "the most appropriate investigation" without naming the condition or the finding it is about. The four options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis; otherwise ask for a supporting or most likely finding.` : '',
       requestedTopic && acceptedStems.length ? `Already in this set, so do not reuse these patients, scenarios or drugs: ${acceptedStems.slice(-8).map((s) => s.slice(0, 160)).join(' | ')}` : '',
       requestedTopic && acceptedKeyFacts.length ? `Key facts already tested in this set. Do not test any of them again, not even in other words: ${acceptedKeyFacts.slice(-20).map((f) => f.slice(0, 120)).join(' | ')}` : '',
       shape ?? '',
-      'Make the four options similar in length and detail. The correct option must not be the longest or the most detailed.',
-      `Difficulty: ${topic.difficultyTier}. ${TIER_BEHAVIOUR[topic.difficultyTier]}`,
-      pattern.pat,
-      questionTypes?.length ? `Question type focus: ${questionTypes.join('; ')}.` : '',
-      stemPatterns?.length ? `Stem pattern: ${stemPatterns.join('; ')}.` : '',
+      slot && STYLES[slot.style].codedOptions ? '' : `Make the ${pattern.opts} options similar in length and detail. The correct option must not be the longest or the most detailed.`,
+      `Difficulty: ${topic.difficultyTier}. ${slot ? tierText(slot.style, topic.difficultyTier) : TIER_BEHAVIOUR[topic.difficultyTier]}`,
+      slot ? EXAM_RULES[exam] : pattern.pat,
+      !slot && questionTypes?.length ? `Question type focus: ${questionTypes.join('; ')}.` : '',
+      !slot && stemPatterns?.length ? `Stem pattern: ${stemPatterns.join('; ')}.` : '',
       evidenceSources?.length ? `Ground answers in: ${evidenceSources.join('; ')}.` : '',
       patientGroup ? `Patient group: ${patientGroup}.` : '',
       presentingProblems?.length ? `Presenting problems: ${presentingProblems.join('; ')}.` : '',
       sourceMaterial ? `Base on these notes: """${sourceMaterial.slice(0, 6000)}""".` : '',
       'Internet sources on this topic are attached after this request. Base the correct option on them where they apply, state the fact in keyFact, and do not copy their wording. Set "sourceCheck" to "supported" only if one of those sources directly backs the keyed option; otherwise set it to "not supported" and change the item to a fact that they do back.',
-      includeImages
+      slot && slot.style !== 'image'
+        ? 'This item is not image-based: set "figureModality" and "figureQuery" to empty strings, and never refer to a picture.'
+        : includeImages
         ? 'If this item is image-based (about one in five items must be), describe the finding in the stem AND set "figureModality" and "figureQuery" so a real picture can be fetched: "figureModality" is one of ECG | X-ray | CT | MRI | ultrasound | histology | fundus | clinical photo, and "figureQuery" is a 3-6 word English search phrase naming the diagnosis + modality (e.g. "atrial fibrillation ECG", "lobar pneumonia chest X-ray", "membranous nephropathy histology"). For items that are NOT image-based, set both to an empty string — never invent a picture.'
         : '',
       `JSON shape — return exactly one object: { "examType": "${exam}", "subject": "${topic.subject}", "subtopic": "${topic.subtopic}", "cognitiveTier": "Direct Recall | Clinical 2-Step | Multi-Step & IBQ", "difficultyTier": "${topic.difficultyTier}", "stem": "...", "questionText": "...", "options": {${'ABCDE'.slice(0, pattern.opts).split('').map(k => `"${k}": "text"`).join(', ')}}, "correctOption": "A|B|C|D|E", "explanation": "...", "keyFact": "one sentence: the textbook or guideline fact that makes the correct option right, stated so a student could look it up", "boardPearl": "...", "citations": [...], "trapType": "...", "trapExplanation": "...", "targetAccuracy": 0-100, "sourceCheck": "supported|not supported"${includeImages ? ', "figureModality": "", "figureQuery": ""' : ''} }`,
@@ -1361,9 +1408,28 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const dependsOnOutside = /\b(that|those|this|these) (list|group|set|pattern|eruption|finding|statement)s?\b|\blisted\b|\bon that\b|\bthat list\b|\bthat statement\b/i.test(`${q.stem ?? ''} ${qLine}`) && !/\b(list|statement|pattern)\b/i.test(q.stem ?? '');
         // A stem that is itself a question (ends with "?") is not a stem: it gives no case or context.
         const stemIsQuestion = Boolean(requestedTopic) && /\?\s*$/.test((q.stem ?? '').trim());
-        const genericLeadIn = Boolean(requestedTopic) && (stemIsQuestion || qLine.length < 40 || /^(choose|select) the (single )?best answer/i.test(qLine) || /^which of the following is the most likely diagnosis\??$/i.test(qLine) || dependsOnOutside);
-        const shape = structureReason(q) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases ? 'too-many-cases' : null) ?? (driftsIntoTreatment ? 'treatment-drift' : null);
-        if (shape) { logStage(`drop:${shape}`, 0); return null; }
+        // Styles with a fixed question line ("Choose the correct combination.", "Which statements are correct?") are short by design.
+        const shortLineOk = Boolean(slot) && ['match', 'multi-statement', 'assertion-reason', 'calculation', 'negative', 'one-liner'].includes(slot!.style);
+        const codedOptions = Boolean(slot) && STYLES[slot!.style].codedOptions;
+        // A management lead-in (next step, drug of choice, advice) is the style asked for, not drift.
+        const managesByDesign = Boolean(slot?.leadIn) && ['next-step', 'drug-of-choice', 'treatment-of-choice', 'advice'].includes(slot!.leadIn!);
+        const genericLeadIn = Boolean(requestedTopic) && (stemIsQuestion || (!shortLineOk && qLine.length < 40) || /^(choose|select) the (single )?best answer/i.test(qLine) && !shortLineOk || /^which of the following is the most likely diagnosis\??$/i.test(qLine) || dependsOnOutside);
+        // With a planned style mix the slots decide how many cases there are, so the case cap is off.
+        const shape = structureReason(q) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions && !codedOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases && !slot ? 'too-many-cases' : null) ?? (driftsIntoTreatment && !managesByDesign ? 'treatment-drift' : null);
+        const SHAPE_HINTS: Record<string, string> = {
+          'generic-lead-in': 'the question line must name the fact or finding it asks about; do not end the stem with a question mark',
+          'stem-thin': 'the stem needs real context, not a label',
+          'similar-options': 'two options said nearly the same thing; make every option clearly different',
+          'repeat-patient': 'use a different patient (age and sex) from those already in the set',
+          'treatment-drift': 'stay on the requested content; do not turn it into a treatment question',
+          'stem-incomplete': 'the stem ended mid-sentence; finish it',
+          'stem-repeats-question': 'the stem repeated the question; give the case or context',
+          'missing-statements': 'list the numbered statements inside the stem',
+        };
+        if (shape) { if (ctx) ctx.reason = SHAPE_HINTS[shape] ?? shape; logStage(`drop:${shape}`, 0); return null; }
+        // The style asked for must really be delivered (match lists, numbered statements, numbers, lead-in, and so on).
+        const styleIssue = styleProblem(q, slot, pattern.opts, true);
+        if (styleIssue) { if (ctx) ctx.reason = styleIssue; logStage(`drop:style-${styleIssue.split(':')[0]}`, 0); return null; }
         const hint = hintReason(q);
         if (hint) { logStage(`drop:${hint}`, 0); return null; }
 
@@ -1402,29 +1468,28 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (correctKey && requestedTopic && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { logStage('drop:repeat-answer', 0); return null; }
         // A last look by a second reader: a wrong key, two defensible answers, or a fact that only one study, place or
         // textbook layout makes true. Such a question is dropped and another is written in its place.
-        if (requestedTopic && await examinerRejects(q, requestedTopic)) { logStage('drop:examiner', 0); return null; }
-        if (correctKey) acceptedAnswers.push(correctKey);
+        if (requestedTopic && await examinerRejects(q, requestedTopic)) { if (ctx) ctx.reason = 'the examiner found the key wrong, two options defensible, or the fact too narrow'; logStage('drop:examiner', 0); return null; }
+        // The explanation must say why the key is right and why the others are wrong; if it does not, it is rewritten.
+        if (requestedTopic && slot?.style !== 'calculation' && !explainsDistractors(q)) await repairExplanation(q);
         // The correct letters rotate through A-D over the accepted questions, so no letter dominates the set.
-        if (requestedTopic) placeCorrectAt(q, 'ABCD'[(acceptedStems.length + Math.floor(acceptedStems.length / 4)) % 4]);
-        seenStems.add(key);
-        acceptedStems.push(fullStem);
-        if (keyFact) acceptedKeyFacts.push(keyFact);
+        // Coded options (combinations, numbers, assertion-reason) keep their order.
+        if (requestedTopic && !codedOptions) placeCorrectAt(q, 'ABCD'[(acceptedStems.length + Math.floor(acceptedStems.length / 4)) % 4]);
 
-        // Attach image if this item actually asked for one. Previously this read
-        // `!q.figureQuery` and then searched with `q.figureQuery || ''` — an empty
-        // string — so it never matched anything. Now we only attach when the model
-        // flagged the item as image-based and supplied a search phrase, AND the figure
-        // passed the vision check (findLiveImage returns only verified figures).
-        // The writer rarely asks for a picture on its own, so a short check decides whether this question's finding
-        // has a real picture, for at most about one question in four.
-        if (includeImages && liveImages && !q.figureQuery && figuresPlanned < Math.ceil((acceptedStems.length + 1) / 4)) {
+        // Pictures. An image-style slot always asks for one; other slots only when the fact has a typical picture, for at
+        // most about one question in four. Without a slot (a plain subject run) the earlier rule applies.
+        const wantsPicture = Boolean(includeImages && liveImages) && (
+          slot ? (slot.style === 'image' || (assigned?.picturable === true && figuresPlanned < Math.ceil((acceptedStems.length + 1) / 4)))
+            : (!q.figureQuery && figuresPlanned < Math.ceil((acceptedStems.length + 1) / 4)));
+        if (wantsPicture && !q.figureQuery) {
           await planFigure(q, requestedTopic ?? topic.subject);
           if (q.figureQuery) figuresPlanned += 1;
         }
+        let attachedHere: string | null = null;
         if (includeImages && liveImages && q.figureQuery) {
           const live = await findLiveImage(q.figureQuery, usedImages);
           if (live && !usedImages.has(live.id)) {
             usedImages.add(live.id);
+            attachedHere = live.id;
             q.image = live.proxyUrl;
             q.imageSourceUrl = live.articleUrl;
             q.imageCaption = liveImageCaption(live);
@@ -1433,9 +1498,21 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
             q.imageGroundTruth = q.figureQuery;
             q.imageVerified = live.verified === true;
             q.imageVerifyReason = live.verifyReason;
-            attachedImages += 1;
           }
         }
+        // A stem that points at a picture ("this biopsy") must have one; otherwise the item cannot be answered.
+        if (pointsAtMissingPicture(q)) {
+          if (attachedHere) usedImages.delete(attachedHere);
+          if (ctx) ctx.reason = 'the stem points at a picture that is not there; describe the finding in words instead';
+          logStage('drop:refers-to-missing-picture', 0);
+          return null;
+        }
+        if (attachedHere) attachedImages += 1;
+
+        if (correctKey) acceptedAnswers.push(correctKey);
+        seenStems.add(key);
+        acceptedStems.push(fullStem);
+        if (keyFact) acceptedKeyFacts.push(keyFact);
 
         used.add(`${topic.subtopic}|${focus ?? ''}`);
         return q;
@@ -1491,7 +1568,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   });
   // A pool of workers takes planned topics from a queue. When the queue runs low, more topics are planned right
   // away, so a question starts as soon as a lane is free, while others are still in progress.
-  const queue: { topic: PlannedTopic; idx: number; retries: number }[] = topics.map((topic, idx) => ({ topic, idx, retries: 0 }));
+  const queue: { topic: PlannedTopic; idx: number; retries: number; hint?: string; slot?: Slot }[] = topics.map((topic, idx) => ({ topic, idx, retries: 0 }));
   let slotCounter = topics.length;
   let refilling: Promise<boolean> | null = null;
   const refill = (): Promise<boolean> => {
@@ -1528,12 +1605,18 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       }
       // Every worker lane runs a question at once, so the speed does not drop as the set nears its full count.
       if (questionsInProgress >= GENERATION_CONCURRENCY) { await new Promise((r) => setTimeout(r, 300)); continue; }
-      const { topic, idx, retries } = queue.shift()!;
+      const { topic, idx, retries, hint, slot: slotOverride } = queue.shift()!;
+      const slot = slotOverride ?? topic.slot;
       const parts = focusParts(topic.subtopic);
       // A planned topic carries its own focus (one drug class, one part of a subtopic); otherwise rotate the parts.
       const focus = topic.focus ?? (parts.length > 1 ? parts[idx % parts.length] : undefined);
       questionsInProgress += 1;
-      const q = await generateSingleQuestion(topic, 0, focus, requestedTopic ? typedShape(idx) : itemShape(idx, exam)).finally(() => { questionsInProgress -= 1; });
+      // A rewrite is told why the last attempt was rejected.
+      const ctx: { reason?: string } = {};
+      const shapeText = slot
+        ? `${STYLES[slot.style].instruction(slot, pattern.opts)}${hint ? ` Your previous attempt was rejected because: ${hint}. Fix exactly that.` : ''}`
+        : requestedTopic ? typedShape(idx) : itemShape(idx, exam);
+      const q = await generateSingleQuestion(topic, 0, focus, shapeText, ctx, slotOverride).finally(() => { questionsInProgress -= 1; });
       completedCount += 1;
       // Circuit breaker: when the provider is down every slot fails, and a run that keeps refilling its queue would
       // send thousands of calls. A long unbroken streak of failures ends the run with a message instead.
@@ -1553,7 +1636,11 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (questions.length >= count) markTargetReached();
       } else if (retries < MAX_TOPIC_RETRIES && !stopped && !signal?.aborted) {
         // The call failed or the question was dropped: the same topic goes back in the queue, so it is written again.
-        queue.push({ topic, idx, retries: retries + 1 });
+        // The last rewrite of a demanding style (match, statements, calculation, picture) falls back to a plain style, so the slot is not lost.
+        const plain: StyleId[] = ['one-liner', 'short-case', 'vignette'];
+        const fallbackStyle: StyleId = exam === 'AMC_CAT' ? 'vignette' : exam === 'NEET_PG' ? 'one-liner' : 'short-case';
+        const nextSlot = slot && retries + 1 >= MAX_TOPIC_RETRIES && !plain.includes(slot.style) ? { ...slot, style: fallbackStyle } : slotOverride;
+        queue.push({ topic, idx, retries: retries + 1, hint: ctx.reason, slot: nextSlot });
       }
       onProgress?.(questions.length, count, completedCount, Math.max(completedCount, slotCounter));
       if (onBatch && questions.length > 0 && completedCount % Math.max(1, Math.floor(count / 2)) === 0) {

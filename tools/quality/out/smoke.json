@@ -1,0 +1,199 @@
+{
+ "results": [
+  {
+   "id": "st-vignette",
+   "topic": "nephrotic syndrome",
+   "requested": 4,
+   "planned": 11,
+   "target": 4,
+   "kept": 4,
+   "dropped": 0,
+   "seconds": 145,
+   "wrong": 0,
+   "ambiguous": 0,
+   "lowRelevance": 0,
+   "avgRelevance": 3.75,
+   "images": 0,
+   "plainFlags": 1,
+   "setIssues": [],
+   "patientShare": 0.25,
+   "flagged": [
+    {
+     "stem": "In a pediatric nephrology clinic, the initial presentation of nephrotic syndrome is being reviewed to improve ",
+     "ask": "Which of the following is typically the earliest physical finding, often accompanying rapid weight gain?",
+     "ans": "Periorbital puffiness",
+     "plain": [
+      "hedged explanation"
+     ],
+     "judge": ""
+    }
+   ],
+   "questions": [
+    {
+     "id": "AI-INICET-mw25i3cp-3",
+     "moduleCode": "INI-CET · AI Generated Module",
+     "examType": "INI_CET",
+     "subject": "nephrotic syndrome",
+     "subtopic": "Steroid-resistant immunosuppression: calcineurin inhibitors (cyclosporine, tacrolimus), cyclophosphamide, rituximab",
+     "cognitiveTier": "Direct Recall",
+     "difficultyTier": "MEDIUM",
+     "difficultySubLevel": "M1",
+     "stem": "During a renal genetics review of initial steroid-resistant nephrotic syndrome, the clinician is summarizing how often a monogenic disorder underlies the disease.",
+     "questionText": "Which statement best reflects the likelihood of a monogenic etiology in initial steroid-resistant nephrotic syndrome?",
+     "options": [
+      {
+       "id": "A",
+       "text": "A monogenic cause is present in nearly all cases."
+      },
+      {
+       "id": "B",
+       "text": "A monogenic cause accounts for up to one-third of cases."
+      },
+      {
+       "id": "C",
+       "text": "A monogenic cause explains about two-thirds of cases."
+      },
+      {
+       "id": "D",
+       "text": "A monogenic cause is found in fewer than 5% of cases."
+      }
+     ],
+     "correctOption": "B",
+     "boardPearl": "Steroid-resistant nephrotic syndrome has a meaningful monogenic component, so resistance to steroids should prompt consideration of genetic testing rather than assuming all cases are immune-mediated.",
+     "keyFact": "Up to one-third of children with initial steroid-resistant nephrotic syndrome have a monogenic etiology.",
+     "explanation": "Initial steroid-resistant nephrotic syndrome is not uniformly immune-mediated; a monogenic cause is identified in up to about one-third of affected children. This substantial yield is why genetic evaluation is considered in steroid-resistant disease, particularly before committing to prolonged immunosuppression.",
+     "citations": [
+      "Long-term outcomes of childhood nephrotic syndrome. Kidney Int. doi:10.1016/j.kint.2026.06.054",
+      "Precision Medicine in Pediatric Nephrology: From Shared Clinical Phenotypes to Genotype-Guided Diagnosis and Management. Genes (Basel). 2026. doi:10.3390/genes17091069"
+     ],
+     "trapType": "Epidemiologic inversion",
+     "trapExplanation": "Candidates may overestimate monogenic disease as near-universal in steroid-resistant nephrotic syndrome or dismiss it as rare, instead of recognizing the approximately one-third contribution.",
+     "targetAccuracy": 55
+    },
+    {
+     "id": "AI-INICET-mw25i3o3-4",
+     "moduleCode": "INI-CET · AI Generated Module",
+     "examType": "INI_CET",
+     "subject": "nephrotic syndrome",
+     "subtopic": "Glucocorticoid first-line therapy: prednisolone, prednisone, initial steroid response, prognostic significance",
+     "cognitiveTier": "Clinical 2-Step",
+     "difficultyTier": "MEDIUM",
+     "difficultySubLevel": "M1",
+     "stem": "A 4-year-old boy is brought with two weeks of periorbital puffiness that is worst on waking, progressing to abdominal distension and a 2 kg weight gain. Blood pressure is 96/60 mmHg. Urine dipstick shows 4+ protein with no red cells or casts; serum albumin is 16 g/L, and C3 and C4 are normal.",
+     "questionText": "Which glomerular disease is the most frequent cause of this presentation in children of his age?",
+     "options": [
+      {
+       "id": "A",
+       "text": "Minimal change disease"
+      },
+      {
+       "id": "B",
+       "text": "Mesangial proliferative glomerulonephritis"
+      },
+      {
+       "id": "C",
+       "text": "Membranous nephropathy"
+      },
+      {
+       "id": "D",
+       "text": "Focal segmental glomerulosclerosis"
+      }
+     ],
+     "correctOption": "A",
+     "boardPearl": "Age is the single strongest clue to the histology behind nephrotic syndrome: a 2-10 year old with normal BP, normal complement and no haematuria has minimal change disease until proven otherwise, and is treated with steroids before any thought of biopsy.",
+     "keyFact": "In children, minimal change disease is by far the most common cause of nephrotic syndrome, so renal biopsy is not usually required unless the child fails to respond to high-dose glucocorticoid therapy.",
+     "explanation": "The boy has a typical severe childhood nephrotic syndrome: heavy selective proteinuria, hypoalbuminaemia, oedema, normal blood pressure and normal complement; microscopic haematuria is absent. In children, minimal change disease is by far the most common cause of nephrotic syndrome, accounting for roughly 85-90% of idiopathic cases between 1 and 12 years, which is precisely why a biopsy is not needed before a trial of high-dose glucocorticoid. Focal segmental glomerulosclerosis is the leading cause of steroid-resistant disease and of nephrotic syndrome in Black adults; membranous nephropathy is the commonest primary nephrotic lesion in White adults and is rare before adolescence; mesangial proliferative glomerulonephritis typically presents with haematuria and, when complement is low, follows infection. None of these is the dominant childhood lesion.",
+     "citations": [
+      "Davidson's Principles and Practice of Medicine, 23rd ed, p. 417 (Nephrotic syndrome: in children minimal change disease is by far the most common cause)",
+      "Gupte's Short Textbook of Pediatrics, 11th ed, p. 543 (Nephrotic syndrome: idiopathic forms account for ~90% of childhood cases, minimal change being the commonest)",
+      "Robbins Basic Pathology, Table 14.2 (Minimal change disease presenting as nephrotic syndrome with normal light microscopy)"
+     ],
+     "trapType": "Age-mismatched epidemiology",
+     "trapExplanation": "Candidates who pattern-match 'nephrotic syndrome' to adult data pick membranous nephropathy (commonest primary nephrotic lesion in White adults) or focal segmental glomerulosclerosis (commonest in Black adults and the classic steroid-resistant lesion). Both are genuine nephrotic diseases, so the option cannot be dismissed on plausibility alone; the discriminating step is recognising that in a pre-pubertal child, minimal change disease outnumbers all other causes combined.",
+     "targetAccuracy": 68
+    },
+    {
+     "id": "AI-INICET-mw25i906-6",
+     "moduleCode": "INI-CET · AI Generated Module",
+     "examType": "INI_CET",
+     "subject": "nephrotic syndrome",
+     "subtopic": "Investigation and biopsy indications: non-invasive tests, biopsy for steroid resistance, diabetic nephropathy not routinely biopsied",
+     "cognitiveTier": "Direct Recall",
+     "difficultyTier": "ALL",
+     "stem": "In nephrotic syndrome, non-invasive tests such as serology and urinary biomarker panels are used before renal biopsy.",
+     "questionText": "Which of the following best describes their role?",
+     "options": [
+      {
+       "id": "A",
+       "text": "Confirming the histological diagnosis"
+      },
+      {
+       "id": "B",
+       "text": "Staging chronic kidney disease"
+      },
+      {
+       "id": "C",
+       "text": "Suggesting the underlying cause"
+      },
+      {
+       "id": "D",
+       "text": "Predicting steroid responsiveness"
+      }
+     ],
+     "correctOption": "C",
+     "boardPearl": "In nephrotic syndrome, non-invasive tests are adjuncts that point toward a cause; kidney biopsy remains the definitive histological test when indicated.",
+     "keyFact": "Non-invasive tests may be helpful in suggesting the underlying cause of nephrotic syndrome.",
+     "explanation": "The source fact is that non-invasive tests may be helpful in suggesting the underlying cause of nephrotic syndrome. They do not replace biopsy for histological diagnosis, and they are not used primarily to predict steroid response or stage CKD in this context.",
+     "citations": [
+      "Medicine, page 417"
+     ],
+     "trapType": "Investigation-purpose confusion",
+     "trapExplanation": "Half-prepared candidates often equate non-invasive tests with a substitute for biopsy or with steroid-response prediction, rather than remembering that their stated role is to suggest the underlying cause.",
+     "targetAccuracy": 72
+    },
+    {
+     "id": "AI-INICET-mw25ib1z-11",
+     "moduleCode": "INI-CET · AI Generated Module",
+     "examType": "INI_CET",
+     "subject": "nephrotic syndrome",
+     "subtopic": "Clinical features: periorbital puffiness, weight gain, anasarca, ascites, normal blood pressure and urea",
+     "cognitiveTier": "Direct Recall",
+     "difficultyTier": "ALL",
+     "stem": "In a pediatric nephrology clinic, the initial presentation of nephrotic syndrome is being reviewed to improve early recognition.",
+     "questionText": "Which of the following is typically the earliest physical finding, often accompanying rapid weight gain?",
+     "options": [
+      {
+       "id": "A",
+       "text": "Pitting edema of the lower limbs"
+      },
+      {
+       "id": "B",
+       "text": "Painless scrotal swelling"
+      },
+      {
+       "id": "C",
+       "text": "Abdominal distension from ascites"
+      },
+      {
+       "id": "D",
+       "text": "Periorbital puffiness"
+      }
+     ],
+     "correctOption": "D",
+     "boardPearl": "Periorbital puffiness is often the earliest visible sign of nephrotic syndrome in children, and the accompanying weight gain may be misinterpreted by parents as healthy growth.",
+     "keyFact": "In nephrotic syndrome, a previously well child gaining weight over days to weeks may have periorbital puffiness.",
+     "explanation": "In nephrotic syndrome, a previously well child may gain weight over days to weeks, and this is often accompanied by periorbital puffiness, which is frequently the first visible sign. Ascites, anasarca, and scrotal edema are later features of massive fluid accumulation. Lower limb pitting edema is also common but typically follows the periorbital changes in children. Therefore, periorbital puffiness is the earliest and most characteristic initial physical finding.",
+     "citations": [
+      "Short Textbook of Pediatrics, page 544"
+     ],
+     "trapType": "Later vs. earliest clinical feature",
+     "trapExplanation": "Candidates often choose dramatic features like anasarca or ascites, which are classic but appear later; the earliest visible sign is periorbital puffiness.",
+     "targetAccuracy": 65
+    }
+   ]
+  }
+ ],
+ "started": 4,
+ "kept": 4,
+ "yield": 1
+}

@@ -75,6 +75,10 @@ const QUESTION_TYPE_CHIPS = [
   'Multiple statements ("1 and 3 only")',
   'ECG / X-ray interpretation',
   'Identify the structure',
+  'NOT / EXCEPT',
+  'Assertion-reason',
+  'Calculation',
+  'Mechanism',
 ];
 const STEM_PATTERN_CHIPS = [
   'Most likely diagnosis',
@@ -474,7 +478,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     // fact is one question slot, so the set is exactly as big as the facts the sources support.
     const planProvider = getActiveProvider();
     // The plan is kept per topic for a day, so the same topic gives the same facts and set size on each run.
-    const planKey = customTopic ? `pulse.factPlan.v9.${selectedExam}.${customTopic.toLowerCase()}` : '';
+    const planKey = customTopic ? `pulse.factPlan.v10.${selectedExam}.${customTopic.toLowerCase()}` : '';
     let factPlan: AssignedFact[] = [];
     if (customTopic && planProvider && typedSubtopics.length) {
       try {

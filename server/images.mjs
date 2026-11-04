@@ -17,12 +17,34 @@ import { homedir } from 'node:os';
 const DATA_ROOT = process.env.PULSE_DATA_DIR || join(homedir(), '.pulse-med');
 const CACHE_DIR = join(DATA_ROOT, 'image-cache');
 const OPENI = 'https://openi.nlm.nih.gov';
-const UA = 'PulseMed-Education/1.0 (offline exam study app)';
+// Wikimedia asks automated clients to say who they are, and answers anonymous ones more slowly.
+const UA = 'PulseMed-Education/1.0 (exam study app; https://github.com/rrrockstarforever-cell/Abhijeet-Sharma)';
 
 // Search results are cached in memory: a query costs 5–12 s against two live APIs, and
 // generation asks for the same topic across batches. 30-minute TTL keeps it fresh.
 const SEARCH_TTL_MS = 30 * 60 * 1000;
 const searchCache = new Map();
+// Searches that found pictures are also kept on disk for a week, so repeated runs (and tests) do not ask Wikimedia again.
+// An empty answer is remembered for ten minutes only.
+const DISK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const EMPTY_TTL_MS = 10 * 60 * 1000;
+const DISK_FILE = join(CACHE_DIR, 'search-results.json');
+let diskCache = null;
+function diskGet(key) {
+  try {
+    if (!diskCache) diskCache = existsSync(DISK_FILE) ? JSON.parse(readFileSync(DISK_FILE, 'utf8')) : {};
+    const hit = diskCache[key];
+    return hit && Date.now() - hit.at < DISK_TTL_MS ? hit.results : null;
+  } catch { diskCache = {}; return null; }
+}
+function diskSet(key, results) {
+  try {
+    if (!diskCache) diskCache = {};
+    diskCache[key] = { at: Date.now(), results };
+    mkdirSync(CACHE_DIR, { recursive: true });
+    writeFileSync(DISK_FILE, JSON.stringify(diskCache));
+  } catch { /* the cache is an optimisation only */ }
+}
 
 const stripHtml = (value) =>
   String(value ?? '')
@@ -80,40 +102,90 @@ function normalise(entry) {
   };
 }
 
+
+// Wikimedia answers HTTP 429 when many searches arrive together (several questions look for pictures at once), so its
+// requests go through one small queue: two at a time, a short gap between starts, and a patient retry on 429 or 503.
+const WIKI_CONCURRENCY = 2;
+const WIKI_GAP_MS = 250;
+let wikiActive = 0;
+let wikiLastStart = 0;
+const wikiWaiting = [];
+async function wikiFetch(url, init = {}) {
+  if (wikiActive >= WIKI_CONCURRENCY) await new Promise((resolve) => wikiWaiting.push(resolve));
+  wikiActive += 1;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const wait = wikiLastStart + WIKI_GAP_MS - Date.now();
+      wikiLastStart = Math.max(Date.now(), wikiLastStart) + (wait > 0 ? wait : 0);
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      const res = await fetch(url, init);
+      if ((res.status === 429 || res.status === 503) && attempt < 3) {
+        const retryAfter = Number(res.headers.get('retry-after'));
+        await new Promise((resolve) => setTimeout(resolve, Math.min(8000, (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1200 * (attempt + 1)))));
+        continue;
+      }
+      return res;
+    }
+  } finally {
+    wikiActive -= 1;
+    wikiWaiting.shift()?.();
+  }
+}
+
 /** Search Open-i for reusable figures. Returns [] on no match; throws only on network errors. */
-export async function searchImages(query, { limit = 6 } = {}) {
+export async function searchImages(query, { limit = 10, noExtra = false } = {}) {
   const q = String(query || '').replace(/\s+/g, ' ').trim();
   if (!q) return { results: [], errors: [] };
   const cacheKey = `${q.toLowerCase()}::${limit}`;
   const hit = searchCache.get(cacheKey);
-  if (hit && Date.now() - hit.at < SEARCH_TTL_MS) {
+  if (hit && Date.now() - hit.at < (hit.results.length ? SEARCH_TTL_MS : EMPTY_TTL_MS)) {
     return { results: hit.results, errors: [], cached: true };
+  }
+  const onDisk = noExtra ? null : diskGet(cacheKey);
+  if (onDisk?.length) {
+    searchCache.set(cacheKey, { at: Date.now(), results: onDisk });
+    return { results: onDisk, errors: [], cached: true };
   }
   const errors = [];
   // Both providers run in parallel, but a slow/unreachable one must not hold the whole
   // search hostage: after the soft deadline we keep whatever has already arrived.
   let commons = [];
   let openi = [];
-  const commonsP = searchCommons(q, { limit: Math.ceil(limit / 2) })
-    .then((rows) => { commons = rows; return rows; })
-    .catch((err) => {
-      errors.push(`Wikimedia Commons: ${err?.message || err}`);
-      return [];
-    });
+  let article = [];
+  let category = [];
+  // The article and the category are named after the condition, so they are searched with the diagnosis words only
+  // (the modality word and trailing "photo" would not be part of a title).
+  const core = q.split(/\s+/).filter((w) => !/^(histology|histological|histopathology|biopsy|micrograph|ecg|ekg|x-ray|xray|radiograph|ct|mri|ultrasound|smear|fundus|photo|photograph|clinical|image|picture)$/i.test(w)).join(' ') || q;
+  const articleP = (noExtra ? Promise.resolve([]) : searchWikipediaArticle(core, { limit }))
+    .then((rows) => { article = rows; return rows; })
+    .catch((err) => { errors.push(`Wikipedia: ${err?.message || err}`); return []; });
+  const categoryP = (noExtra ? Promise.resolve([]) : searchCommonsCategory(core, { limit }))
+    .then((rows) => { category = rows; return rows; })
+    .catch((err) => { errors.push(`Commons category: ${err?.message || err}`); return []; });
   const openiP = searchOpenI(q, { limit })
     .then((rows) => { openi = rows; return rows; })
     .catch((err) => {
       errors.push(`Open-i: ${err?.message || err}`);
       return [];
     });
-  await Promise.race([
-    Promise.all([commonsP, openiP]),
-    new Promise((resolve) => setTimeout(resolve, 10000)),
-  ]);
+  // Stage 1: the condition's own article and category (two quick requests). Stage 2, only when these found fewer than
+  // three pictures: the Commons text search. Fewer requests also means fewer HTTP 429 answers from Wikimedia.
+  const within = (p, ms) => Promise.race([p, new Promise((resolve) => setTimeout(resolve, ms))]);
+  await within(Promise.all([articleP, categoryP]), 6000);
+  if (category.length + article.length < 3) {
+    // The full phrase must match every word in a Commons title or description; if it finds nothing, the diagnosis alone is tried.
+    const commonsP = searchCommons(q, { limit: Math.ceil(limit / 2) })
+      .then(async (rows) => (rows.length || core === q ? rows : searchCommons(core, { limit: Math.ceil(limit / 2) })))
+      .then((rows) => { commons = rows; return rows; })
+      .catch((err) => { errors.push(`Wikimedia Commons: ${err?.message || err}`); return []; });
+    await within(commonsP, 6000);
+  }
+  // Open-i has been running the whole time; it only gets a short extra wait.
+  await within(openiP, 1500);
   const seen = new Set();
   const merged = [];
-  // Commons first: usually a single clean picture rather than a multi-panel journal figure.
-  for (const item of [...commons, ...openi]) {
+  // The condition's own category and article first, then Commons search, then journal figures (often multi-panel).
+  for (const item of [...category, ...article, ...commons, ...openi]) {
     if (seen.has(item.imageUrl)) continue;
     seen.add(item.imageUrl);
     merged.push(item);
@@ -127,7 +199,8 @@ export async function searchImages(query, { limit = 6 } = {}) {
     top: merged[0] ? `${merged[0].provider}: ${merged[0].title}`.slice(0, 160) : null,
     errors,
   });
-  if (merged.length) searchCache.set(cacheKey, { at: Date.now(), results: merged });
+  searchCache.set(cacheKey, { at: Date.now(), results: merged });
+  if (merged.length && !noExtra) diskSet(cacheKey, merged);
   return { results: merged, errors };
 }
 
@@ -144,13 +217,17 @@ async function searchCommons(q, { limit = 3 } = {}) {
     iiprop: 'url|extmetadata|size|mime',
     iiurlwidth: '1000',
   });
-  const res = await fetch(`https://commons.wikimedia.org/w/api.php?${params}`, {
+  const res = await wikiFetch(`https://commons.wikimedia.org/w/api.php?${params}`, {
     headers: { 'User-Agent': UA, Accept: 'application/json' },
     signal: AbortSignal.timeout(15000),
   });
   if (!res.ok) throw new Error(`Commons returned HTTP ${res.status}`);
   const body = await res.json().catch(() => ({}));
-  const pages = body?.query?.pages ? Object.values(body.query.pages) : [];
+  return mapCommonsPages(body?.query?.pages ? Object.values(body.query.pages) : [], limit, 'Wikimedia Commons');
+}
+
+/** Turns MediaWiki imageinfo pages into reusable figures (size, type and licence are checked). */
+function mapCommonsPages(pages, limit, provider) {
   const out = [];
   for (const page of pages) {
     const info = page?.imageinfo?.[0];
@@ -164,7 +241,7 @@ async function searchCommons(q, { limit = 3 } = {}) {
     if (!imageUrl) continue;
     out.push({
       id: createHash('sha1').update(imageUrl).digest('hex').slice(0, 16),
-      provider: 'Wikimedia Commons',
+      provider,
       title: stripHtml(page.title.replace(/^File:/, '')).slice(0, 160),
       caption: stripHtml(meta.ImageDescription?.value).slice(0, 400),
       credit: stripHtml(meta.Artist?.value).slice(0, 160) || 'Wikimedia Commons contributor',
@@ -179,6 +256,33 @@ async function searchCommons(q, { limit = 3 } = {}) {
     if (out.length >= limit) break;
   }
   return out;
+}
+
+const IMAGEINFO = { prop: 'imageinfo', iiprop: 'url|extmetadata|size|mime', iiurlwidth: '1000' };
+
+/** The pictures used in the Wikipedia article that best matches the query: relevant by construction. */
+async function searchWikipediaArticle(q, { limit = 6 } = {}) {
+  const find = new URLSearchParams({ action: 'query', format: 'json', list: 'search', srsearch: q, srlimit: '1', srnamespace: '0' });
+  const hit = await wikiFetch(`https://en.wikipedia.org/w/api.php?${find}`, { headers: { 'User-Agent': UA, Accept: 'application/json' }, signal: AbortSignal.timeout(12000) });
+  if (!hit.ok) throw new Error(`Wikipedia returned HTTP ${hit.status}`);
+  const title = (await hit.json().catch(() => ({})))?.query?.search?.[0]?.title;
+  if (!title) return [];
+  const params = new URLSearchParams({ action: 'query', format: 'json', generator: 'images', titles: title, gimlimit: '40', redirects: '1', ...IMAGEINFO });
+  const res = await wikiFetch(`https://en.wikipedia.org/w/api.php?${params}`, { headers: { 'User-Agent': UA, Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error(`Wikipedia returned HTTP ${res.status}`);
+  const body = await res.json().catch(() => ({}));
+  return mapCommonsPages(body?.query?.pages ? Object.values(body.query.pages) : [], limit, 'Wikipedia article');
+}
+
+/** The files in the Commons category named after the condition (for example "Category:Caseous necrosis"). */
+async function searchCommonsCategory(q, { limit = 6 } = {}) {
+  const name = q.trim().replace(/\s+/g, ' ');
+  const title = `Category:${name.charAt(0).toUpperCase()}${name.slice(1)}`;
+  const params = new URLSearchParams({ action: 'query', format: 'json', generator: 'categorymembers', gcmtitle: title, gcmtype: 'file', gcmlimit: '30', ...IMAGEINFO });
+  const res = await wikiFetch(`https://commons.wikimedia.org/w/api.php?${params}`, { headers: { 'User-Agent': UA, Accept: 'application/json' }, signal: AbortSignal.timeout(12000) });
+  if (!res.ok) throw new Error(`Commons category returned HTTP ${res.status}`);
+  const body = await res.json().catch(() => ({}));
+  return mapCommonsPages(body?.query?.pages ? Object.values(body.query.pages) : [], limit, 'Wikimedia Commons');
 }
 
 async function searchOpenI(q, { limit = 6 } = {}) {
