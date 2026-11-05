@@ -619,16 +619,21 @@ export const stageLog: StageTiming[] = [];
 
 export function logStage(stage: string, ms: number, lane?: string, detail?: Record<string, number>): void {
   stageLog.push({ stage, lane, ms: Math.round(ms), endedAt: new Date().toISOString().slice(11, 23), detail });
-  // A dropped question is reported to the progress page with its reason.
-  if (stage.startsWith('drop:')) reportQuestion('dropped', stage.slice(5));
+}
+
+/** Records a dropped question: the reason, and the question itself when it was written, so it can be examined later. */
+function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion } | undefined, reason: string): void {
+  dropQ(ctx, `${reason}`);
+  const d = ctx?.draft;
+  reportQuestion('dropped', reason, d ? { stem: d.stem, questionText: (d as { questionText?: string }).questionText, options: d.options, correctOption: d.correctOption, explanation: d.explanation, subtopic: (d as { subtopic?: string }).subtopic } : undefined);
 }
 
 /** Tells the server whether a question was kept, so the progress page counts the same questions the app shows. */
-export function reportQuestion(outcome: 'accepted' | 'dropped', reason?: string): void {
+export function reportQuestion(outcome: 'accepted' | 'dropped', reason?: string, draft?: unknown): void {
   void fetch('/api/ai/nvidia-stats/question', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ outcome, reason }),
+    body: JSON.stringify({ outcome, reason, draft }),
   }).catch(() => {});
 }
 
@@ -1374,7 +1379,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }));
 
   // ---------- Step 3: Single-question generation ----------
-  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string, ctx?: { reason?: string }, slotOverride?: Slot): Promise<ClinicalQuestion | null> => {
+  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string, ctx?: { reason?: string; draft?: ClinicalQuestion }, slotOverride?: Slot): Promise<ClinicalQuestion | null> => {
     if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
     // Fact first (typed topics) where the sources have facts: the question is written around a fact the sources state.
@@ -1452,11 +1457,12 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           signal,
         });
         const parsed = extractJson<BatchQuestionSpec>(raw);
-        if (!parsed) { logStage('drop:unparsed', 0); return null; }
-        if (String(parsed.sourceCheck ?? '').trim().toLowerCase() === 'not supported') { logStage('drop:unsupported', 0); return null; }
+        if (!parsed) { dropQ(ctx, 'unparsed'); return null; }
+        if (String(parsed.sourceCheck ?? '').trim().toLowerCase() === 'not supported') { dropQ(ctx, 'unsupported'); return null; }
 
         const q = buildQuestion(parsed, exam, [{ subject: topic.subject, subtopic: topic.subtopic }], topic.difficultyTier, difficultySubLevel, pattern.opts);
-        if (!q) { logStage('drop:invalid', 0); return null; }
+        if (!q) { dropQ(ctx, 'invalid'); return null; }
+        if (ctx) ctx.draft = q;
         // For a typed topic a stem under six words is usually just a label, not context for the question.
         const thinStem = requestedTopic && (q.stem ?? '').trim().split(/\s+/).filter(Boolean).length < 6;
         // Two options that say nearly the same thing make the item ambiguous, so the item is dropped.
@@ -1501,16 +1507,16 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           'stem-repeats-question': 'the stem repeated the question; give the case or context',
           'missing-statements': 'list the numbered statements inside the stem',
         };
-        if (shape) { if (ctx) ctx.reason = SHAPE_HINTS[shape] ?? shape; logStage(`drop:${shape}`, 0); return null; }
+        if (shape) { if (ctx) ctx.reason = SHAPE_HINTS[shape] ?? shape; dropQ(ctx, `${shape}`); return null; }
         // The style asked for must really be delivered (match lists, numbered statements, numbers, lead-in, and so on).
         const styleIssue = styleProblem(q, slot, pattern.opts, true);
-        if (styleIssue) { if (ctx) ctx.reason = styleIssue; logStage(`drop:style-${styleIssue.split(':')[0]}`, 0); return null; }
+        if (styleIssue) { if (ctx) ctx.reason = styleIssue; dropQ(ctx, `style-${styleIssue.split(':')[0]}`); return null; }
         const hint = hintReason(q);
-        if (hint) { logStage(`drop:${hint}`, 0); return null; }
+        if (hint) { dropQ(ctx, `${hint}`); return null; }
 
         // The first copy to pass the structure checks claims the question. The claim is then checked against the
         // sources once, so the checker runs once per question, not once per copy. A rejected claim releases the question.
-        if (claimed) { logStage('drop:late-copy', 0); return null; }
+        if (claimed) { dropQ(ctx, 'late-copy'); return null; }
         claimed = true;
         const verdict = await verifyItem(q, { query: groundQuery, subject: topic.subject }, signal);
         if (verdict !== 'supported') {
@@ -1524,14 +1530,14 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // Dedup against already-accepted questions: exact stems, then near-identical scenarios
         // (same patient and regimen with the words reshuffled).
         const key = stemKey(q.stem);
-        if (seenStems.has(key)) { logStage('drop:repeat-stem', 0); return null; }
+        if (seenStems.has(key)) { dropQ(ctx, 'repeat-stem'); return null; }
         const fullStem = toBenchItem(q).stem;
-        if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) { logStage('drop:similar-stem', 0); return null; }
+        if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) { dropQ(ctx, 'similar-stem'); return null; }
         // The same key fact asked in other words (same drug, same finding) is a repeat, even when the stem differs.
         // Without a written key fact, the correct option's text stands in, so repeats are still caught.
         // A planned slot keeps its planned fact as the key fact. The planner already kept those facts distinct.
         const keyFact = sourced ? sourced.fact : ((q.keyFact || '').trim() || (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim());
-        if (!sourced && keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { logStage('drop:repeat-fact', 0); return null; }
+        if (!sourced && keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { dropQ(ctx, 'repeat-fact'); return null; }
         // The same correct answer asked again in other words (for example the same imaging test) is also a repeat.
         // Abbreviations and generic words are normalised first, so "CT" and "computed tomography", or "serum lipase level"
         // and "lipase assay", count as the same answer.
@@ -1541,10 +1547,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           .replace(/\s+/g, ' ').trim();
         const correctText = (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim();
         const correctKey = answerKey(correctText);
-        if (correctKey && requestedTopic && !codedOptions && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { logStage('drop:repeat-answer', 0); return null; }
+        if (correctKey && requestedTopic && !codedOptions && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { dropQ(ctx, 'repeat-answer'); return null; }
         // A last look by a second reader: a wrong key, two defensible answers, or a fact that only one study, place or
         // textbook layout makes true. Such a question is dropped and another is written in its place.
-        if (requestedTopic && await examinerRejects(q, requestedTopic, signal)) { if (ctx) ctx.reason = 'the examiner found the key wrong, two options defensible, or the fact too narrow'; logStage('drop:examiner', 0); return null; }
+        if (requestedTopic && await examinerRejects(q, requestedTopic, signal)) { if (ctx) ctx.reason = 'the examiner found the key wrong, two options defensible, or the fact too narrow'; dropQ(ctx, 'examiner'); return null; }
         // The explanation must say why the key is right and why the others are wrong; if it does not, it is rewritten.
         if (requestedTopic && ((slot?.style !== 'calculation' && !explainsDistractors(q)) || explanationLeaks(q))) await repairExplanation(q, signal);
         // The correct letters rotate through A-D over the accepted questions, so no letter dominates the set.
@@ -1580,7 +1586,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (pointsAtMissingPicture(q)) {
           if (attachedHere) usedImages.delete(attachedHere);
           if (ctx) ctx.reason = 'the stem points at a picture that is not there; describe the finding in words instead';
-          logStage('drop:refers-to-missing-picture', 0);
+          dropQ(ctx, 'refers-to-missing-picture');
           return null;
         }
         if (attachedHere) attachedImages += 1;
@@ -1712,7 +1718,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       }
       if (q && questions.length >= count) {
         // Questions still in flight when the target was reached are discarded, so the set never goes over the count asked for.
-        logStage('drop:over-target', 0);
+        dropQ(ctx, 'over-target');
       } else if (q) {
         questions.push(q);
         reportQuestion('accepted');

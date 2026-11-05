@@ -1910,11 +1910,21 @@ app.post('/api/ai/nvidia-stats/reset', (_req: Request, res: Response) => {
 
 // The app reports each question it keeps, or the reason it drops one (for example a failed source check).
 app.post('/api/ai/nvidia-stats/question', (req: Request, res: Response) => {
-  const { outcome, reason } = req.body || {};
+  const { outcome, reason, draft } = req.body || {};
   if (outcome === 'accepted') nvidiaStats.accepted += 1;
   else if (outcome === 'dropped') {
     const key = String(reason || 'other');
     nvidiaStats.dropped[key] = (nvidiaStats.dropped[key] ?? 0) + 1;
+    // Keep the dropped question itself, so the rejects can be examined later: one JSON line per drop.
+    if (draft && typeof draft === 'object') {
+      try {
+        const dir = path.join(process.cwd(), 'tools', 'quality', 'out');
+        fs.mkdirSync(dir, { recursive: true });
+        fs.appendFileSync(path.join(dir, 'dropped-questions.jsonl'), JSON.stringify({ at: new Date().toISOString(), reason: key, draft }) + '\n');
+      } catch {
+        // A failed write must not fail the generation.
+      }
+    }
   }
   res.json({ ok: true });
 });
