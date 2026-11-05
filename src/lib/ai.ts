@@ -623,7 +623,7 @@ export function logStage(stage: string, ms: number, lane?: string, detail?: Reco
 
 /** Records a dropped question: the reason, and the question itself when it was written, so it can be examined later. */
 function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion } | undefined, reason: string): void {
-  dropQ(ctx, `${reason}`);
+  logStage(`drop:${reason}`, 0);
   const d = ctx?.draft;
   reportQuestion('dropped', reason, d ? { stem: d.stem, questionText: (d as { questionText?: string }).questionText, options: d.options, correctOption: d.correctOption, explanation: d.explanation, subtopic: (d as { subtopic?: string }).subtopic } : undefined);
 }
