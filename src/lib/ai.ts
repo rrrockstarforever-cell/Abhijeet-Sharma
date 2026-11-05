@@ -934,7 +934,7 @@ const GENERATION_RULES =
   'The stem must contain the facts needed to answer the question, and the keyed option must be the one the sources support.';
 
 // A topic whose question failed or was dropped is written again this many times before it is given up.
-const MAX_TOPIC_RETRIES = 2;
+const MAX_TOPIC_RETRIES = 6;
 
 // Copies of the same question request sent at once. The first copy that passes every check is kept.
 const QUESTION_COPIES = 2;
