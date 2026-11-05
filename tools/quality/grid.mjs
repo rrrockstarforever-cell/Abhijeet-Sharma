@@ -43,4 +43,5 @@ export const GRID = [
   { id: 'tp-forensic', topic: 'common poisonings', exam: 'NEET_PG', count: 8, style: 'mix' },
   { id: 'tp-chapter', topic: 'cardiovascular system chapter', exam: 'INI_CET', count: 8, style: 'mix' },
   { id: 'tp-few', topic: 'Kayser-Fleischer ring', exam: 'NEET_PG', count: 8, style: 'mix' },
+  { id: 'tp-wall-40', topic: 'drugs acting on bacterial cell wall', exam: 'NEET_PG', count: 40, style: 'mix' },
 ];
