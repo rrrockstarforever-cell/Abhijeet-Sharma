@@ -296,6 +296,8 @@ const nvidiaStats = {
   // Questions the app kept, and those it dropped by reason (after the model replied).
   accepted: 0,
   dropped: {} as Record<string, number>,
+  // Repair outcomes for rejected drafts: attempted (sent), accepted (kept after its checks), failed (no repair returned).
+  repairs: {} as Record<string, number>,
   byModel: {} as Record<string, Record<NvidiaAttemptOutcome, number>>,
   events: [] as { at: string; model: string; outcome: string; detail: string }[],
 };
@@ -1905,6 +1907,7 @@ app.post('/api/ai/nvidia-stats/reset', (_req: Request, res: Response) => {
   nvidiaStats.events = [];
   nvidiaStats.accepted = 0;
   nvidiaStats.dropped = {};
+  nvidiaStats.repairs = {};
   res.json({ ok: true });
 });
 
@@ -1929,6 +1932,16 @@ app.post('/api/ai/nvidia-stats/question', (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
+// The app reports each attempt to repair a rejected draft, so the progress page can show how many repairs were sent,
+// kept, or failed. Outcomes are counted individually; unknown values are ignored.
+app.post('/api/ai/nvidia-stats/repair', (req: Request, res: Response) => {
+  const { outcome } = req.body || {};
+  if (outcome === 'attempted' || outcome === 'accepted' || outcome === 'failed') {
+    nvidiaStats.repairs[outcome] = (nvidiaStats.repairs[outcome] ?? 0) + 1;
+  }
+  res.json({ ok: true });
+});
+
 // The engine used by the most recent generation request, so the progress page can show what is running.
 let lastEngine: { provider: string; model: string; at: string } | null = null;
 
@@ -1946,6 +1959,7 @@ app.get('/api/ai/nvidia-stats', (_req: Request, res: Response) => {
     questionsFailed: f.failed,
     questionsStopped: f.stopped,
     accepted: nvidiaStats.accepted,
+    repairs: nvidiaStats.repairs,
     dropped: nvidiaStats.dropped,
     attempts: totals,
     byModel: Object.fromEntries(Object.entries(nvidiaStats.byModel).map(([k, v]) => [k.replace('nvidia/', ''), v])),

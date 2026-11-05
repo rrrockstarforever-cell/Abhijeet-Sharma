@@ -651,6 +651,15 @@ function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: strin
   reportQuestion('dropped', reason, d ? { fact, stem: d.stem, questionText: (d as { questionText?: string }).questionText, options: d.options, correctOption: d.correctOption, explanation: d.explanation, subtopic: (d as { subtopic?: string }).subtopic } : (fact ? { fact } : undefined));
 }
 
+/** Counts a repair on the progress page: attempted (sent), accepted (kept after its checks) or failed (no repair returned). */
+export function reportRepair(outcome: 'attempted' | 'accepted' | 'failed'): void {
+  void fetch('/api/ai/nvidia-stats/repair', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ outcome }),
+  }).catch(() => {});
+}
+
 /** Tells the server whether a question was kept, so the progress page counts the same questions the app shows. */
 export function reportQuestion(outcome: 'accepted' | 'dropped', reason?: string, draft?: unknown): void {
   void fetch('/api/ai/nvidia-stats/question', {
@@ -1751,6 +1760,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       } else if (q) {
         questions.push(q);
         reportQuestion('accepted');
+        if (repaired) reportRepair('accepted');
         if (questions.length >= count) markTargetReached();
       } else if (retries < MAX_TOPIC_RETRIES && !stopped && !signal?.aborted) {
         // The call failed or the question was dropped: the same topic goes back in the queue, so it is written again.
@@ -1764,6 +1774,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const fixed = retries === 0 && ctx.draft && ctx.dropKey && REPAIRABLE_DROPS.has(ctx.dropKey)
           ? await repairDraft(ctx.draft, ctx.reason ?? ctx.dropKey, getActiveProvider() ?? 'nvidia').catch(() => null)
           : null;
+        if (fixed === null && retries === 0 && ctx.draft && ctx.dropKey && REPAIRABLE_DROPS.has(ctx.dropKey)) reportRepair('failed');
+        else if (fixed) reportRepair('attempted');
         pending = { topic, idx, retries: retries + 1, hint: ctx.reason, slot: nextSlot, repaired: fixed ?? undefined };
       }
       onProgress?.(questions.length, count, completedCount, Math.max(completedCount, slotCounter));
