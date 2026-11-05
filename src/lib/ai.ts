@@ -1675,7 +1675,6 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const MAX_NULL_STREAK = 40;
   let markTargetReached: () => void = () => {};
   const targetReached = new Promise<void>((resolve) => { markTargetReached = resolve; });
-  let rewritesInFlight = 0;
   const worker = async (): Promise<void> => {
     for (;;) {
       if (stopped || shouldStop?.() || signal?.aborted || questions.length >= count) return;
@@ -1688,13 +1687,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       }
       // Every worker lane runs a question at once, so the speed does not drop as the set nears its full count.
       if (questionsInProgress >= GENERATION_CONCURRENCY) { await new Promise((r) => setTimeout(r, 300)); continue; }
-      // A rewrite (a question sent back after a failed check) runs alone: only one rewrite is in flight at a time, and new
-      // questions fill the other lanes meanwhile. A new question is never held up by a rewrite already running.
-      const freshAt = queue.findIndex((x) => x.retries === 0);
-      const pickAt = rewritesInFlight > 0 ? freshAt : 0;
-      if (pickAt < 0) { await new Promise((r) => setTimeout(r, 300)); continue; }
-      const [{ topic, idx, retries, hint, slot: slotOverride }] = queue.splice(pickAt, 1);
-      if (retries > 0) rewritesInFlight += 1;
+      // A rewrite goes back into the queue only after its own attempt has finished, so one question is never written twice
+      // at once; rewrites of different questions run in parallel with the other lanes.
+      const { topic, idx, retries, hint, slot: slotOverride } = queue.shift()!;
       const slot = slotOverride ?? topic.slot;
       const parts = focusParts(topic.subtopic);
       // A planned topic carries its own focus (one drug class, one part of a subtopic); otherwise rotate the parts.
@@ -1705,7 +1700,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       const shapeText = slot
         ? `${STYLES[slot.style].instruction(slot, pattern.opts)}${hint ? ` Your previous attempt was rejected because: ${hint}. Fix exactly that.` : ''}`
         : requestedTopic ? typedShape(idx) : itemShape(idx, exam);
-      const q = await generateSingleQuestion(topic, 0, focus, shapeText, ctx, slotOverride).finally(() => { questionsInProgress -= 1; if (retries > 0) rewritesInFlight -= 1; });
+      const q = await generateSingleQuestion(topic, 0, focus, shapeText, ctx, slotOverride).finally(() => { questionsInProgress -= 1; });
       completedCount += 1;
       // Circuit breaker: when the provider is down every slot fails, and a run that keeps refilling its queue would
       // send thousands of calls. A long unbroken streak of failures ends the run with a message instead.
