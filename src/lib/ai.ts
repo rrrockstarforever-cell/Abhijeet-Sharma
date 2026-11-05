@@ -642,11 +642,13 @@ export function logStage(stage: string, ms: number, lane?: string, detail?: Reco
 }
 
 /** Records a dropped question: the reason, and the question itself when it was written, so it can be examined later. */
-function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string } | undefined, reason: string): void {
+function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string } | undefined, reason: string): void {
   logStage(`drop:${reason}`, 0);
   if (ctx) ctx.dropKey = reason;
   const d = ctx?.draft;
-  reportQuestion('dropped', reason, d ? { stem: d.stem, questionText: (d as { questionText?: string }).questionText, options: d.options, correctOption: d.correctOption, explanation: d.explanation, subtopic: (d as { subtopic?: string }).subtopic } : undefined);
+  // The planned fact the attempt was written for, so each rejected question can be traced to its fact.
+  const fact = ctx?.fact;
+  reportQuestion('dropped', reason, d ? { fact, stem: d.stem, questionText: (d as { questionText?: string }).questionText, options: d.options, correctOption: d.correctOption, explanation: d.explanation, subtopic: (d as { subtopic?: string }).subtopic } : (fact ? { fact } : undefined));
 }
 
 /** Tells the server whether a question was kept, so the progress page counts the same questions the app shows. */
@@ -1400,7 +1402,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }));
 
   // ---------- Step 3: Single-question generation ----------
-  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string, ctx?: { reason?: string; draft?: ClinicalQuestion; dropKey?: string }, slotOverride?: Slot, repaired?: BatchQuestionSpec): Promise<ClinicalQuestion | null> => {
+  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string, ctx?: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string }, slotOverride?: Slot, repaired?: BatchQuestionSpec): Promise<ClinicalQuestion | null> => {
+    if (ctx) ctx.fact = focus ?? topic.subtopic;
     if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
     // Fact first (typed topics) where the sources have facts: the question is written around a fact the sources state.
@@ -1728,7 +1731,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       const focus = topic.focus ?? (parts.length > 1 ? parts[idx % parts.length] : undefined);
       questionsInProgress += 1;
       // A rewrite is told why the last attempt was rejected.
-      const ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string } = {};
+      const ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string } = {};
       const shapeText = slot
         ? `${STYLES[slot.style].instruction(slot, pattern.opts)}${hint ? ` Your previous attempt was rejected because: ${hint}. Fix exactly that.` : ''}`
         : requestedTopic ? typedShape(idx) : itemShape(idx, exam);
