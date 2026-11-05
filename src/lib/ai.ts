@@ -1724,7 +1724,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const fallbackStyle: StyleId = exam === 'AMC_CAT' ? 'vignette' : exam === 'NEET_PG' ? 'one-liner' : 'short-case';
         // A style the learner picked is never swapped for another: a calculation item that cannot be written is left out.
         const nextSlot = slot && !styleExplicit && retries + 1 >= MAX_TOPIC_RETRIES && !plain.includes(slot.style) ? { ...slot, style: fallbackStyle } : slotOverride;
-        queue.push({ topic, idx, retries: retries + 1, hint: ctx.reason, slot: nextSlot });
+        // A rejected question goes to the front of the queue: the next free lane regenerates it before any fresh question.
+        queue.unshift({ topic, idx, retries: retries + 1, hint: ctx.reason, slot: nextSlot });
       }
       onProgress?.(questions.length, count, completedCount, Math.max(completedCount, slotCounter));
       if (onBatch && questions.length > 0 && completedCount % Math.max(1, Math.floor(count / 2)) === 0) {
