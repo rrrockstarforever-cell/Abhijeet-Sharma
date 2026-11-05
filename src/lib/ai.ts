@@ -537,6 +537,18 @@ async function examinerRejects(q: ClinicalQuestion, topic: string): Promise<bool
   return extractJson<{ ok?: boolean }>(raw)?.ok === false;
 }
 
+/** Round-robin across subtopics, keeping each subtopic's own facts in their planned order. */
+function interleaveBySubtopic<T extends { subtopic: string }>(facts: T[]): T[] {
+  const groups = new Map<string, T[]>();
+  for (const f of facts) groups.set(f.subtopic, [...(groups.get(f.subtopic) ?? []), f]);
+  const lists = [...groups.values()];
+  const out: T[] = [];
+  for (let round = 0; out.length < facts.length; round++) {
+    for (const list of lists) if (round < list.length) out.push(list[round]);
+  }
+  return out;
+}
+
 async function planFigure(q: ClinicalQuestion, topic: string): Promise<void> {
   const provider = getActiveProvider();
   if (!provider) return;
@@ -1297,8 +1309,11 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // A typed topic is spread evenly across its categories, so the priority weighting is skipped: the planner
   // would keep choosing the top-priority category, and one category would fill the whole set.
   // With a fact plan, each planned fact is one slot (facts already used in this module are skipped on later rounds).
+  // The plan lists each subtopic's facts together, so taking slots in order would fill a set from the top subtopic.
+  // Interleaving gives every subtopic one question before any subtopic gets a second: a 10-question set from 30
+  // subtopics covers 10 subtopics, and a 50-question set covers each subtopic about evenly.
   const plannedFacts = requestedTopic && factPlan?.length
-    ? factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`))
+    ? interleaveBySubtopic(factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`)))
     : [];
   // Every planned fact gets a slot: its style (vignette, one-liner, NOT, match, statements, ...), lead-in and difficulty,
   // from the styles the learner picked or, when none, the exam's own mix.
