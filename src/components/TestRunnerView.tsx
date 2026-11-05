@@ -265,12 +265,18 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
   // answered, so the panel has its own visibility flag.
   const [matrixOpen, setMatrixOpen] = useState<boolean>(false);
 
+  // The run starts over only when a different set of questions is passed in. A parent that passes a new array with the same
+  // questions (same ids) must not reset the saved position and answers, or the progress is lost on every re-render.
+  const lastSigRef = useRef<string>(propQuestions && propQuestions.length > 0 ? signature(propQuestions) : '');
   useEffect(() => {
     if (skipFirstSync.current) {
       skipFirstSync.current = false;
       return;
     }
     if (propQuestions && propQuestions.length > 0) {
+      const sig = signature(propQuestions);
+      if (sig === lastSigRef.current) return;
+      lastSigRef.current = sig;
       setQuestions(propQuestions);
       setCurrentIndex(0);
       setUserAnswers({});
