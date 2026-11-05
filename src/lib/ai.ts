@@ -359,7 +359,7 @@ export function factKey(s: string): string {
 }
 
 /** A fact planned for one question slot: it is quoted from a source, and the question is written around it. */
-export interface AssignedFact { subtopic: string; fact: string; quote: string; source: string; /** The finding has a typical picture (X-ray, histology, ECG, smear, clinical photo). */ picturable?: boolean }
+export interface AssignedFact { subtopic: string; fact: string; quote: string; source: string; /** Where the fact came from: the user's own library ('book') or the web and papers ('web'). */ origin?: 'book' | 'web'; /** The finding has a typical picture (X-ray, histology, ECG, smear, clinical photo). */ picturable?: boolean }
 
 const PLAN_FACTS_SYSTEM =
   'You list distinct, high-yield, exam-testable facts about one subtopic that the sources state. Do not repeat a fact already planned. ' +
@@ -430,7 +430,7 @@ export async function planTopicFacts(
       if (/\b(AUC|expression|interleukin|odds ratio|hazard ratio|cohort|95% ?CI|biomarker|incompletely characteri[sz]ed|not well characteri[sz]ed|further studies|remain unclear|protocol|this study|the study|trial|muscle density|sample size|banked|enrol(l)?ed|follow-up|mendelian|randomi[sz]ation|subjects|participants|were reported|studied|analysis|meta-analysis|observational|compared with|compared to|committee|hospitali[sz]ation|significantly (more|less|higher|lower)|no association|reporting rate|MedDRA|incidence of \d|uncertain|unclear|(has|have) been evaluated|raising the question|awareness|whether|potentially|were more commonly|retrospective|umbrella|meta-analyses|no significant|between groups|few and mostly)\b|\d+\.\d+ ?%/i.test(fact)) continue;
       // The same fact planned under two subtopics is one fact: compare with abbreviations and generic words normalised.
       if (usedFacts.some((u) => stemSimilarity(factKey(u), factKey(fact)) >= 0.5)) { skip('duplicate'); continue; }
-      planned.push({ subtopic: subtopics[i], fact, quote, source: src.title });
+      planned.push({ subtopic: subtopics[i], fact, quote, source: src.title, origin: kindOf(src) === 'book' ? 'book' : 'web' });
       usedFacts.push(fact);
       kept += 1;
     }
@@ -558,6 +558,24 @@ function weightedOrder<T extends { subtopic: string }>(facts: T[], weights: Reco
   }
   // A subtopic can run out before its share; its leftover facts follow in plan order.
   for (const list of left.values()) out.push(...list);
+  return out;
+}
+
+/**
+ * The source split of a set: about 70% of the questions come from the user's own library (books), 30% from the web
+ * and papers. Facts keep their order within each group. When one group runs out, the other fills the rest.
+ */
+function mixByOrigin<T extends { origin?: 'book' | 'web' }>(facts: T[], bookShare = 0.7): T[] {
+  const books = facts.filter((f) => f.origin !== 'web');
+  const web = facts.filter((f) => f.origin === 'web');
+  const out: T[] = [];
+  let b = 0;
+  let w = 0;
+  while (b < books.length || w < web.length) {
+    const wantBook = out.length === 0 || (b / Math.max(1, out.length)) < bookShare;
+    if ((wantBook && b < books.length) || w >= web.length) out.push(books[b++]);
+    else out.push(web[w++]);
+  }
   return out;
 }
 
@@ -1378,7 +1396,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     ? await fetchPyqWeights([...new Set(factPlan.map((f) => f.subtopic))], exam)
     : {};
   const plannedFacts = requestedTopic && factPlan?.length
-    ? weightedOrder(factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`)), pyqWeightsForPlan)
+    ? mixByOrigin(weightedOrder(factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`)), pyqWeightsForPlan))
     : [];
   // Every planned fact gets a slot: its style (vignette, one-liner, NOT, match, statements, ...), lead-in and difficulty,
   // from the styles the learner picked or, when none, the exam's own mix.
