@@ -739,10 +739,10 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
   const prompt = [
     `You are an expert medical exam item writer for ${exam}.`,
     evidence
-      ? `Evidence from the textbook library and the web on this topic (list only subtopics this evidence supports):\n${evidence}`
+      ? `Evidence from the textbook library and the web on this topic (a guide: list every subtopic the evidence supports, and every other subtopic an examiner tests on this topic):\n${evidence}`
       : 'No evidence was found, so list the subtopics an exam would test.',
     `Split the topic "${topic}" into its distinct subtopics, sorted as an examiner would sort them:`,
-    'for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. Give 8 to 12 subtopics.',
+    'for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. List every distinct subtopic an examiner tests on this topic: a narrow topic may have only two or three, a broad one thirty or more. Do not stop at a fixed number.',
     'Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.',
     'Give each subtopic a priority from 1 to 10 for how often it is tested.',
     'Give each subtopic "facts": the number of high-yield, exam-testable facts in it (1 to 6). Count only facts an examiner would ask, not background detail.',
@@ -768,8 +768,8 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
         ? { subtopic: e, priority: 10, facts: 1 }
         : { subtopic: e?.subtopic, priority: Number(e?.priority) || 0, facts: Math.min(6, Math.max(1, Math.round(Number(e?.facts) || 1))) }))
       .filter((r: any) => typeof r.subtopic === 'string' && r.subtopic.trim());
-    const important = rated.filter((r: any) => r.priority >= 5);
-    const chosen = (important.length ? important : rated).sort((a: any, b: any) => b.priority - a.priority);
+    // Every relevant subtopic is kept; the priority only sets the order.
+    const chosen = rated.sort((a: any, b: any) => b.priority - a.priority);
     const seen = new Set<string>();
     const unique: { subtopic: string; priority: number; facts: number }[] = [];
     for (const r of chosen) {
@@ -778,7 +778,7 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
       seen.add(name);
       unique.push({ subtopic: name, priority: r.priority, facts: r.facts });
     }
-    return unique.slice(0, 12);
+    return unique;
   };
   try {
     // A small model sometimes gives no list. Retry once with the stronger default model, then fall back to the typed topic.
@@ -788,7 +788,7 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
     if (subtopics.length < 4) {
       const strict = [
         prompt,
-        'Your last reply gave too few subtopics. Return at least 8, each a different category.',
+        'Your last reply gave too few subtopics. Return every distinct subtopic an examiner tests on this topic, each a different category.',
         'For a drug or drug class, cover every organ system and effect type it is known for (for example renal, neurological, sensory, haematological, hepatic, cardiac, metabolic, skin, endocrine, pregnancy), plus its key interactions and monitoring.',
         'For a disease, cover its causes, clinical features, investigations, treatment, complications and prognosis.',
         'A single subtopic is not acceptable.',
