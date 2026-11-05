@@ -18,6 +18,7 @@ import {
 } from './server/oauth.mjs';
 import { aiLog } from './server/oauth.mjs';
 import { research as webResearch, literatureSources, SOURCE_REGISTRY } from './server/web.mjs';
+import { pyqWeights, pyqSource } from './server/pyqFrequency.mjs';
 import { searchImages, fetchImage, REFERENCE_SOURCES } from './server/images.mjs';
 import { buildImageBank, loadImageBank, queryImageBank, getBankImage, bankStats, rejectImage, searchBankByText } from './server/imageBank.mjs';
 import { generateQuestionFromImage } from './server/visionQuestion.mjs';
@@ -715,6 +716,14 @@ app.get('/api/oauth/status', (req: Request, res: Response) => {
     },
     defaults: DEFAULT_MODELS,
   });
+});
+
+// POST /api/pyq/weights: how often each subtopic is asked in the previous-year papers for an exam, so a set can follow
+// the exam's own frequency. Subtopics with no PYQ match weigh 1. Reads the PYQ bundle on this machine, if present.
+app.post('/api/pyq/weights', (req: Request, res: Response) => {
+  const subtopics = Array.isArray(req.body?.subtopics) ? req.body.subtopics.map((s: any) => String(s)).slice(0, 200) : [];
+  const exam = String(req.body?.exam || '');
+  return res.json({ weights: pyqWeights(subtopics, exam), source: pyqSource() });
 });
 
 // POST /api/ai/split-topic: splits a typed topic into distinct subtopics. Runs once per module; cached per session.

@@ -6,7 +6,7 @@ import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } f
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
-import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, explainsDistractors, explanationLeaks, leadInsFromChips, planSlots, pointsAtMissingPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
+import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, combinationListMissing, explainsDistractors, explanationLeaks, leadInsFromChips, planSlots, spread, pointsAtMissingPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
 
 /**
  * Two key facts this similar are the same fact (word overlap on the key-fact sentences). Set low because
@@ -539,16 +539,35 @@ async function examinerRejects(q: ClinicalQuestion, topic: string): Promise<bool
   return extractJson<{ ok?: boolean }>(raw)?.ok === false;
 }
 
-/** Round-robin across subtopics, keeping each subtopic's own facts in their planned order. */
-function interleaveBySubtopic<T extends { subtopic: string }>(facts: T[]): T[] {
+/**
+ * Orders the planned facts so a set follows the exam's frequency: each subtopic gets slots in proportion to its PYQ
+ * count (a class asked more often in the papers gets more questions). Facts keep their planned order within a subtopic.
+ */
+function weightedOrder<T extends { subtopic: string }>(facts: T[], weights: Record<string, number>): T[] {
   const groups = new Map<string, T[]>();
   for (const f of facts) groups.set(f.subtopic, [...(groups.get(f.subtopic) ?? []), f]);
-  const lists = [...groups.values()];
+  const weighted: [string, number][] = [...groups.keys()].map((k) => [k, Math.max(1, weights[k] ?? 1)]);
+  const order = spread(facts.length, weighted);
+  const left = new Map([...groups].map(([k, v]) => [k, [...v]] as [string, T[]]));
   const out: T[] = [];
-  for (let round = 0; out.length < facts.length; round++) {
-    for (const list of lists) if (round < list.length) out.push(list[round]);
+  for (const label of order) {
+    const list = left.get(label);
+    if (list && list.length) out.push(list.shift()!);
   }
+  // A subtopic can run out before its share; its leftover facts follow in plan order.
+  for (const list of left.values()) out.push(...list);
   return out;
+}
+
+/** PYQ frequency for each subtopic of the plan. Falls back to an even spread (weight 1) when the server has no bundle. */
+async function fetchPyqWeights(subtopics: string[], exam: string): Promise<Record<string, number>> {
+  try {
+    const res = await fetch('/api/pyq/weights', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subtopics, exam }) });
+    const data = await res.json().catch(() => ({}));
+    return res.ok && data.weights ? data.weights : {};
+  } catch {
+    return {};
+  }
 }
 
 async function planFigure(q: ClinicalQuestion, topic: string): Promise<void> {
@@ -1314,8 +1333,12 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // The plan lists each subtopic's facts together, so taking slots in order would fill a set from the top subtopic.
   // Interleaving gives every subtopic one question before any subtopic gets a second: a 10-question set from 30
   // subtopics covers 10 subtopics, and a 50-question set covers each subtopic about evenly.
+  // Each subtopic's share of the set follows its PYQ frequency for this exam (see server/pyqFrequency.mjs).
+  const pyqWeightsForPlan = requestedTopic && factPlan?.length
+    ? await fetchPyqWeights([...new Set(factPlan.map((f) => f.subtopic))], exam)
+    : {};
   const plannedFacts = requestedTopic && factPlan?.length
-    ? interleaveBySubtopic(factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`)))
+    ? weightedOrder(factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`)), pyqWeightsForPlan)
     : [];
   // Every planned fact gets a slot: its style (vignette, one-liner, NOT, match, statements, ...), lead-in and difficulty,
   // from the styles the learner picked or, when none, the exam's own mix.
@@ -1463,9 +1486,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const managesByDesign = Boolean(slot?.leadIn) && ['next-step', 'drug-of-choice', 'treatment-of-choice', 'advice'].includes(slot!.leadIn!);
         const genericLeadIn = Boolean(requestedTopic) && (stemIsQuestion || (!shortLineOk && qLine.length < 40) || /^(choose|select) the (single )?best answer/i.test(qLine) && !shortLineOk || (/^which of the following is the most likely diagnosis\??$/i.test(qLine) && slot?.leadIn !== 'diagnosis') || dependsOnOutside);
         // With a planned style mix the slots decide how many cases there are, so the case cap is off.
-        const shape = structureReason(q) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions && !codedOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases && !slot ? 'too-many-cases' : null) ?? (driftsIntoTreatment && !managesByDesign ? 'treatment-drift' : null);
+        const shape = structureReason(q) ?? (combinationListMissing(q) ? 'combination-list-missing' : null) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions && !codedOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases && !slot ? 'too-many-cases' : null) ?? (driftsIntoTreatment && !managesByDesign ? 'treatment-drift' : null);
         const SHAPE_HINTS: Record<string, string> = {
           'generic-lead-in': 'the question line must name the fact or finding it asks about; do not end the stem with a question mark',
+          'combination-list-missing': 'the question asks for a combination or a match, so the stem must list the items: "A. ...", "B. ...", "C. ...", "D. ..." and "1. ...", "2. ...", "3. ...", "4. ..." each on its own line',
           'stem-thin': 'the stem needs real context, not a label',
           'similar-options': 'two options said nearly the same thing; make every option clearly different',
           'repeat-patient': 'use a different patient (age and sex) from those already in the set',

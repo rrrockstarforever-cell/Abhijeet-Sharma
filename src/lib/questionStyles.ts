@@ -158,7 +158,19 @@ export const STYLES: Record<StyleId, StyleSpec> = {
 /** Words that show a stem points at a picture the learner cannot see ("this biopsy", "shown here"). */
 const POINTER = /\b(?:this|the following|the above|the below)\s+(?:image|picture|photograph|photo|figure|slide|micrograph|radiograph|x-?ray|ecg|ekg|tracing|scan|film|biopsy|specimen|smear|section|lesion in the (?:image|picture))\b|\b(?:shown|seen|depicted|illustrated|pictured)\s+(?:here|above|below|in the (?:image|picture|figure|photograph|slide))\b|\bin the (?:image|picture|figure|photograph|photo)\b|\b(?:see|refer to) (?:the )?(?:image|figure|picture)\b/i;
 
-/** A stem that points at a picture, when no picture is attached, cannot be answered. */
+/**
+ * A question whose question line asks for a combination or a matching ("Choose the correct combination", "Match the
+ * following") must carry its list in the stem. Without the list the options cannot be checked, so it is rejected.
+ */
+export function combinationListMissing(q: ClinicalQuestion): boolean {
+  const line = String(q.questionText ?? '');
+  const stem = String(q.stem ?? '');
+  const asksCombination = /\b(correct|right|true|appropriate)\s+(combination|pair|match)\b|\bmatch(ing)?\s+(the\s+following|list)\b|\bmatch list\b/i.test(line);
+  if (!asksCombination && !/\bmatch list i\b/i.test(stem)) return false;
+  const hasLists = /(^|\n|\s)A[.)]\s*\S/.test(stem) && /(^|\n|\s)1[.)]\s*\S/.test(stem);
+  return !hasLists;
+}
+
 export function pointsAtMissingPicture(q: ClinicalQuestion): boolean {
   if (q.image) return false;
   return POINTER.test(`${q.stem ?? ''} ${questionLine(q)}`);
@@ -235,7 +247,7 @@ const EXAM_LEAD_INS: Record<ExamType, [LeadIn, number][]> = {
 };
 
 /** Spreads `n` picks over weighted entries so equal kinds are interleaved, not clustered (largest remainder). */
-function spread<T>(n: number, weighted: [T, number][]): T[] {
+export function spread<T>(n: number, weighted: [T, number][]): T[] {
   const total = weighted.reduce((a, [, w]) => a + w, 0) || 1;
   const quotas = weighted.map(([item, w]) => ({ item, exact: (w / total) * n, count: Math.floor((w / total) * n) }));
   let left = n - quotas.reduce((a, q) => a + q.count, 0);
