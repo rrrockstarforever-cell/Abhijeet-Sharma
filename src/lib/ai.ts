@@ -572,6 +572,26 @@ async function fetchPyqWeights(subtopics: string[], exam: string): Promise<Recor
   }
 }
 
+/** Drops that a small fix can repair: the draft is kept and only the named part is rewritten. */
+const REPAIRABLE_DROPS = new Set(['generic-lead-in', 'repeat-answer', 'style-one-liner-too-long', 'examiner']);
+
+/** Repairs one drafted question for the problem a check named. Returns the fixed item, or null when the repair fails. */
+async function repairDraft(draft: ClinicalQuestion, problem: string, provider: AiProviderId): Promise<BatchQuestionSpec | null> {
+  const answer = draft.options.find((o) => o.id === draft.correctOption)?.text ?? '';
+  const line = (draft as { questionText?: string }).questionText ?? '';
+  const raw = await aiComplete({
+    system: 'You repair one exam MCQ. Fix ONLY the problem named. Keep the same fact and the same correct answer. Reply with ONLY JSON: {"stem":"","questionText":"","options":[{"id":"A","text":""},{"id":"B","text":""},{"id":"C","text":""},{"id":"D","text":""}],"correctOption":"A","explanation":""}.',
+    messages: [{ role: 'user', content: ['Problem to fix: ' + problem, '', 'Stem: ' + draft.stem, 'Question line: ' + line, draft.options.map((o) => `${o.id}) ${o.text}`).join(String.fromCharCode(10)), 'Correct answer: ' + draft.correctOption + ') ' + answer, 'Explanation: ' + (draft.explanation ?? '')].join(String.fromCharCode(10)) }],
+    json: true,
+    effort: 'low',
+    provider,
+    model: getEffectiveModel(provider),
+  }).catch(() => '');
+  const fixed = extractJson<{ stem?: string; questionText?: string; options?: { id: string; text: string }[]; correctOption?: string; explanation?: string }>(raw);
+  if (!fixed?.stem || !fixed.options?.length || !fixed.correctOption) return null;
+  return { ...fixed, sourceCheck: 'supported' } as unknown as BatchQuestionSpec;
+}
+
 async function planFigure(q: ClinicalQuestion, topic: string, signal?: AbortSignal): Promise<void> {
   const provider = getActiveProvider();
   if (!provider) return;
@@ -622,8 +642,9 @@ export function logStage(stage: string, ms: number, lane?: string, detail?: Reco
 }
 
 /** Records a dropped question: the reason, and the question itself when it was written, so it can be examined later. */
-function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion } | undefined, reason: string): void {
+function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string } | undefined, reason: string): void {
   logStage(`drop:${reason}`, 0);
+  if (ctx) ctx.dropKey = reason;
   const d = ctx?.draft;
   reportQuestion('dropped', reason, d ? { stem: d.stem, questionText: (d as { questionText?: string }).questionText, options: d.options, correctOption: d.correctOption, explanation: d.explanation, subtopic: (d as { subtopic?: string }).subtopic } : undefined);
 }
@@ -1379,7 +1400,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }));
 
   // ---------- Step 3: Single-question generation ----------
-  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string, ctx?: { reason?: string; draft?: ClinicalQuestion }, slotOverride?: Slot): Promise<ClinicalQuestion | null> => {
+  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string, ctx?: { reason?: string; draft?: ClinicalQuestion; dropKey?: string }, slotOverride?: Slot, repaired?: BatchQuestionSpec): Promise<ClinicalQuestion | null> => {
     if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
     // Fact first (typed topics) where the sources have facts: the question is written around a fact the sources state.
@@ -1445,7 +1466,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       if (outerSignal?.aborted || shouldStop?.()) { stopped = true; return null; }
       if (own.signal.aborted) return null;
       try {
-        const raw = await aiComplete({
+        const raw = repaired ? JSON.stringify(repaired) : await aiComplete({
           system: GENERATOR_SYSTEM,
           messages: [{ role: 'user', content: prompt }],
           json: true,
@@ -1651,7 +1672,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   });
   // A pool of workers takes planned topics from a queue. When the queue runs low, more topics are planned right
   // away, so a question starts as soon as a lane is free, while others are still in progress.
-  const queue: { topic: PlannedTopic; idx: number; retries: number; hint?: string; slot?: Slot }[] = topics.map((topic, idx) => ({ topic, idx, retries: 0 }));
+  type QueueItem = { topic: PlannedTopic; idx: number; retries: number; hint?: string; slot?: Slot; repaired?: BatchQuestionSpec };
+  const queue: QueueItem[] = topics.map((topic, idx) => ({ topic, idx, retries: 0 }));
   let slotCounter = topics.length;
   let refilling: Promise<boolean> | null = null;
   const refill = (): Promise<boolean> => {
@@ -1682,11 +1704,13 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   let markTargetReached: () => void = () => {};
   const targetReached = new Promise<void>((resolve) => { markTargetReached = resolve; });
   const worker = async (): Promise<void> => {
+    // The item this lane must try next: a repaired question goes straight back to the lane that found the defect.
+    let pending: QueueItem | null = null;
     for (;;) {
       if (stopped || shouldStop?.() || signal?.aborted || questions.length >= count) return;
       // Plan more topics as soon as the queue is shorter than the number of lanes, so every lane has a topic to start on.
       if (queue.length < GENERATION_CONCURRENCY && questions.length < count) void refill();
-      if (queue.length === 0) {
+      if (queue.length === 0 && !pending) {
         if (questionsInProgress > 0) { await new Promise((r) => setTimeout(r, 300)); continue; }
         if (!(await refill())) return;
         continue;
@@ -1695,18 +1719,20 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       if (questionsInProgress >= GENERATION_CONCURRENCY) { await new Promise((r) => setTimeout(r, 300)); continue; }
       // A rewrite goes back into the queue only after its own attempt has finished, so one question is never written twice
       // at once; rewrites of different questions run in parallel with the other lanes.
-      const { topic, idx, retries, hint, slot: slotOverride } = queue.shift()!;
+      const next: QueueItem = pending ?? queue.shift()!;
+      pending = null;
+      const { topic, idx, retries, hint, slot: slotOverride, repaired } = next;
       const slot = slotOverride ?? topic.slot;
       const parts = focusParts(topic.subtopic);
       // A planned topic carries its own focus (one drug class, one part of a subtopic); otherwise rotate the parts.
       const focus = topic.focus ?? (parts.length > 1 ? parts[idx % parts.length] : undefined);
       questionsInProgress += 1;
       // A rewrite is told why the last attempt was rejected.
-      const ctx: { reason?: string } = {};
+      const ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string } = {};
       const shapeText = slot
         ? `${STYLES[slot.style].instruction(slot, pattern.opts)}${hint ? ` Your previous attempt was rejected because: ${hint}. Fix exactly that.` : ''}`
         : requestedTopic ? typedShape(idx) : itemShape(idx, exam);
-      const q = await generateSingleQuestion(topic, 0, focus, shapeText, ctx, slotOverride).finally(() => { questionsInProgress -= 1; });
+      const q = await generateSingleQuestion(topic, 0, focus, shapeText, ctx, slotOverride, repaired).finally(() => { questionsInProgress -= 1; });
       completedCount += 1;
       // Circuit breaker: when the provider is down every slot fails, and a run that keeps refilling its queue would
       // send thousands of calls. A long unbroken streak of failures ends the run with a message instead.
@@ -1731,7 +1757,11 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // A style the learner picked is never swapped for another: a calculation item that cannot be written is left out.
         const nextSlot = slot && !styleExplicit && retries + 1 >= MAX_TOPIC_RETRIES && !plain.includes(slot.style) ? { ...slot, style: fallbackStyle } : slotOverride;
         // A rejected question goes to the front of the queue: the next free lane regenerates it before any fresh question.
-        queue.unshift({ topic, idx, retries: retries + 1, hint: ctx.reason, slot: nextSlot });
+        // The repair starts at the moment the defect is found, in this lane: it is not put behind the queue.
+        const fixed = retries === 0 && ctx.draft && ctx.dropKey && REPAIRABLE_DROPS.has(ctx.dropKey)
+          ? await repairDraft(ctx.draft, ctx.reason ?? ctx.dropKey, getActiveProvider() ?? 'nvidia').catch(() => null)
+          : null;
+        pending = { topic, idx, retries: retries + 1, hint: ctx.reason, slot: nextSlot, repaired: fixed ?? undefined };
       }
       onProgress?.(questions.length, count, completedCount, Math.max(completedCount, slotCounter));
       if (onBatch && questions.length > 0 && completedCount % Math.max(1, Math.floor(count / 2)) === 0) {
