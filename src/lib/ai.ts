@@ -486,7 +486,7 @@ async function guessSubject(topic: string): Promise<string | undefined> {
 }
 
 /** Rewrites an explanation that does not say why the other options are wrong. The question itself is not changed. */
-async function repairExplanation(q: ClinicalQuestion): Promise<void> {
+async function repairExplanation(q: ClinicalQuestion, signal?: AbortSignal): Promise<void> {
   const provider = getActiveProvider();
   if (!provider) return;
   const raw = await aiComplete({
@@ -496,6 +496,7 @@ async function repairExplanation(q: ClinicalQuestion): Promise<void> {
     effort: 'low',
     provider,
     model: getEffectiveModel(provider),
+    signal,
   }).catch(() => '');
   const better = String(extractJson<{ explanation?: string }>(raw)?.explanation ?? '').trim();
   if (better.length >= 80) q.explanation = better;
@@ -516,7 +517,7 @@ async function tagPicturable(plan: AssignedFact[], provider: AiProviderId): Prom
   return plan.map((f, i) => ({ ...f, picturable: picks.has(i) }));
 }
 
-async function examinerRejects(q: ClinicalQuestion, topic: string): Promise<boolean> {
+async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: AbortSignal): Promise<boolean> {
   const provider = getActiveProvider();
   if (!provider) return false;
   const raw = await aiComplete({
@@ -534,6 +535,7 @@ async function examinerRejects(q: ClinicalQuestion, topic: string): Promise<bool
     effort: 'low',
     provider,
     model: getEffectiveModel(provider),
+    signal,
   }).catch(() => '');
   // A failed check never blocks a question: only a clear "ok": false drops it.
   return extractJson<{ ok?: boolean }>(raw)?.ok === false;
@@ -570,7 +572,7 @@ async function fetchPyqWeights(subtopics: string[], exam: string): Promise<Recor
   }
 }
 
-async function planFigure(q: ClinicalQuestion, topic: string): Promise<void> {
+async function planFigure(q: ClinicalQuestion, topic: string, signal?: AbortSignal): Promise<void> {
   const provider = getActiveProvider();
   if (!provider) return;
   const answer = q.options.find((o) => o.id === q.correctOption)?.text ?? '';
@@ -584,6 +586,7 @@ async function planFigure(q: ClinicalQuestion, topic: string): Promise<void> {
     effort: 'low',
     provider,
     model: getEffectiveModel(provider),
+    signal,
   }).catch(() => '');
   const pick = extractJson<{ modality?: string; query?: string }>(raw);
   const query = String(pick?.query ?? '').trim();
@@ -1541,9 +1544,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (correctKey && requestedTopic && !codedOptions && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { logStage('drop:repeat-answer', 0); return null; }
         // A last look by a second reader: a wrong key, two defensible answers, or a fact that only one study, place or
         // textbook layout makes true. Such a question is dropped and another is written in its place.
-        if (requestedTopic && await examinerRejects(q, requestedTopic)) { if (ctx) ctx.reason = 'the examiner found the key wrong, two options defensible, or the fact too narrow'; logStage('drop:examiner', 0); return null; }
+        if (requestedTopic && await examinerRejects(q, requestedTopic, signal)) { if (ctx) ctx.reason = 'the examiner found the key wrong, two options defensible, or the fact too narrow'; logStage('drop:examiner', 0); return null; }
         // The explanation must say why the key is right and why the others are wrong; if it does not, it is rewritten.
-        if (requestedTopic && ((slot?.style !== 'calculation' && !explainsDistractors(q)) || explanationLeaks(q))) await repairExplanation(q);
+        if (requestedTopic && ((slot?.style !== 'calculation' && !explainsDistractors(q)) || explanationLeaks(q))) await repairExplanation(q, signal);
         // The correct letters rotate through A-D over the accepted questions, so no letter dominates the set.
         // Coded options (combinations, numbers, assertion-reason) keep their order.
         if (requestedTopic && !codedOptions) placeCorrectAt(q, 'ABCD'[(acceptedStems.length + Math.floor(acceptedStems.length / 4)) % 4]);
@@ -1554,7 +1557,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           slot ? (slot.style === 'image' || (assigned?.picturable === true && figuresPlanned < Math.ceil((acceptedStems.length + 1) / 4)))
             : (!q.figureQuery && figuresPlanned < Math.ceil((acceptedStems.length + 1) / 4)));
         if (wantsPicture && !q.figureQuery) {
-          await planFigure(q, requestedTopic ?? topic.subject);
+          await planFigure(q, requestedTopic ?? topic.subject, signal);
           if (q.figureQuery) figuresPlanned += 1;
         }
         let attachedHere: string | null = null;
