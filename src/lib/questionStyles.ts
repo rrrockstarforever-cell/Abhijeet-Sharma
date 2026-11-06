@@ -171,6 +171,16 @@ export function combinationListMissing(q: ClinicalQuestion): boolean {
   return !hasLists;
 }
 
+/**
+ * A stem that cites a guideline, a survey, a study or a shortage the case does not give has an invented source.
+ * The examiner cannot check such a claim, so the question is dropped.
+ */
+export function inventedSource(q: ClinicalQuestion): boolean {
+  const text = `${q.stem ?? ''} ${String((q as { questionText?: string }).questionText ?? '')}`;
+  const invented = /\b(?:this|the|a|an|our|their|national|local) (?:guideline|survey|questionnaire|shortage|supply interruption\w*|trial|audit|formulary review)\b|\b20\d\d (?:survey|questionnaire|shortage|guideline)\b|\bsurvey of (?:physicians|prescribers|doctors)\b|\b(?:German|Austrian)\b.*\b(?:survey|shortage|questionnaire|supply interruption\w*)\b/i;
+  return invented.test(text);
+}
+
 export function pointsAtMissingPicture(q: ClinicalQuestion): boolean {
   if (q.image) return false;
   return POINTER.test(`${q.stem ?? ''} ${questionLine(q)}`);
@@ -344,7 +354,7 @@ export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], 
 
 /** The exam-specific rules that stay in force whatever the style (option count, wording, sources). */
 /** Style of options and explanation seen in the real papers, appended for every item. */
-export const COMMON_STYLE_RULES = 'Options are short: a term or a phrase of 1 to 6 words, unless the item needs a sentence. Explanation: 130 to 190 words of clinical reasoning only. Start with the key fact in **bold**, then one bullet per other option saying why it is wrong, naming the option by its text and never by its letter ("Hyperkalaemia: ..."), then one line "High-yield: ...". Never mention sources, pages, attachments, the examiner or the question itself.';
+export const COMMON_STYLE_RULES = 'Never cite a guideline, survey, study, shortage or any source that the case does not give: describe the case itself. ' + 'Options are short: a term or a phrase of 1 to 6 words, unless the item needs a sentence. Explanation: 130 to 190 words of clinical reasoning only. Start with the key fact in **bold**, then one bullet per other option saying why it is wrong, naming the option by its text and never by its letter ("Hyperkalaemia: ..."), then one line "High-yield: ...". Never mention sources, pages, attachments, the examiner or the question itself.';
 
 export const EXAM_RULES: Record<ExamType, string> = {
   NEET_PG: 'NEET PG (NBEMS): exactly 4 options (A-D), one correct. Options are homogeneous and close. Avoid "all of the above" and "none of the above".',

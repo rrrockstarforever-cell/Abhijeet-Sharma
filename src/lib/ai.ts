@@ -6,7 +6,7 @@ import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } f
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
-import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, combinationListMissing, explainsDistractors, explanationLeaks, leadInsFromChips, planSlots, spread, pointsAtMissingPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
+import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, combinationListMissing, inventedSource, explainsDistractors, explanationLeaks, leadInsFromChips, planSlots, spread, pointsAtMissingPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
 
 /**
  * Two key facts this similar are the same fact (word overlap on the key-fact sentences). Set low because
@@ -527,10 +527,10 @@ async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: Abor
   if (!provider) return false;
   const raw = await aiComplete({
     system:
-      'You are a strict NEET-PG / INI-CET / AMC examiner checking one MCQ before it is used. Mark ok=false if ANY of these is true: ' +
+      'You are an examiner checking one MCQ before it is used. Mark ok=false only when you are sure of a problem: ' +
       '(1) the marked answer is wrong by standard textbooks and guidelines; (2) more than one option is defensible; ' +
       '(3) the answer only holds for one particular study, cohort, hospital, country or textbook layout, or it is a research detail no exam would ask; ' +
-      '(4) the stem or options are incomplete or contradict themselves. Otherwise ok=true. ' +
+      '(4) the stem or options are incomplete or contradict themselves. A NOT or EXCEPT question with a correct standard textbook key is ok=true. Otherwise ok=true. ' +
       'Reply with ONLY JSON: {"ok":true,"problem":""} or {"ok":false,"problem":"one short sentence"}.',
     messages: [{
       role: 'user',
@@ -1465,7 +1465,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       requestedTopic && slot
         ? `The learner asked for exactly: "${requestedTopic}". The item must test that content itself (the named effect, feature, drug or fact) in the style given below. The stem must give real context (a subject, a setting or a finding), never a topic label, and must not name or hint at the answer. Never refer to a picture, list or table that the stem does not contain ("this biopsy", "shown here") unless the style is image-based and the stem says what the picture shows. The options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis.`
         : requestedTopic ? `The learner asked for exactly: "${requestedTopic}". Each item must test that content itself (the named effect, feature, drug or fact). Test mechanism only if the request asks for it, and do not test a workup, diagnosis or management step that follows from it. Keep the stem short and direct; a brief case is fine only when the answer is that fact. The stem must give real context (a patient, a setting or a finding), never a topic label, and must not name or hint at the answer. Stay inside the request: do not write treatment, management or investigation items unless the request names them. Use a patient case in at most one item in three; the other items are one-line questions about the fact. Never use a generic lead-in such as "the most likely diagnosis" or "the most appropriate investigation" without naming the condition or the finding it is about. The four options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis; otherwise ask for a supporting or most likely finding.` : '',
-      requestedTopic && acceptedStems.length ? `Already in this set, so do not reuse these patients, scenarios or drugs: ${acceptedStems.slice(-8).map((s) => s.slice(0, 160)).join(' | ')}` : '',
+      requestedTopic && acceptedStems.length ? `Already in this set, so do not reuse these patients, scenarios or drugs: ${acceptedStems.slice(-25).map((s) => s.slice(0, 110)).join(' | ')}` : '',
       requestedTopic && acceptedKeyFacts.length ? `Key facts already tested in this set. Do not test any of them again, not even in other words: ${acceptedKeyFacts.slice(-20).map((f) => f.slice(0, 120)).join(' | ')}` : '',
       shape ?? '',
       slot && STYLES[slot.style].codedOptions ? '' : `Make the ${pattern.opts} options similar in length and detail. The correct option must not be the longest or the most detailed.`,
@@ -1551,9 +1551,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const managesByDesign = Boolean(slot?.leadIn) && ['next-step', 'drug-of-choice', 'treatment-of-choice', 'advice'].includes(slot!.leadIn!);
         const genericLeadIn = Boolean(requestedTopic) && (stemIsQuestion || (!shortLineOk && qLine.length < 40) || /^(choose|select) the (single )?best answer/i.test(qLine) && !shortLineOk || (/^which of the following is the most likely diagnosis\??$/i.test(qLine) && slot?.leadIn !== 'diagnosis') || dependsOnOutside);
         // With a planned style mix the slots decide how many cases there are, so the case cap is off.
-        const shape = structureReason(q) ?? (combinationListMissing(q) ? 'combination-list-missing' : null) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions && !codedOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases && !slot ? 'too-many-cases' : null) ?? (driftsIntoTreatment && !managesByDesign ? 'treatment-drift' : null);
+        const shape = structureReason(q) ?? (combinationListMissing(q) ? 'combination-list-missing' : null) ?? (inventedSource(q) ? 'invented-source' : null) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions && !codedOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases && !slot ? 'too-many-cases' : null) ?? (driftsIntoTreatment && !managesByDesign ? 'treatment-drift' : null);
         const SHAPE_HINTS: Record<string, string> = {
           'generic-lead-in': 'the question line must name the fact or finding it asks about; do not end the stem with a question mark',
+          'invented-source': 'do not cite a guideline, survey, study or shortage; describe the case itself, with no source the stem does not give',
           'combination-list-missing': 'the question asks for a combination or a match, so the stem must list the items: "A. ...", "B. ...", "C. ...", "D. ..." and "1. ...", "2. ...", "3. ...", "4. ..." each on its own line',
           'stem-thin': 'the stem needs real context, not a label',
           'similar-options': 'two options said nearly the same thing; make every option clearly different',
