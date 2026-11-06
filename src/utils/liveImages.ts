@@ -24,6 +24,9 @@ export interface LiveImage {
 
 const LIVE_KEY = 'pulse.images.live';
 
+/** Words that name no particular condition, so a caption containing them says nothing about a match. */
+const GENERIC_TOPIC_WORDS = new Set(['disease', 'diseases', 'syndrome', 'change', 'changes', 'injury', 'injuries', 'lesion', 'lesions', 'finding', 'findings', 'with', 'from', 'case', 'sign', 'signs', 'acute', 'chronic', 'severe', 'image', 'picture', 'common', 'typical', 'photo', 'photograph', 'clinical', 'skin', 'facial', 'plaques', 'plaque', 'patch', 'patches', 'appearance', 'showing', 'stain', 'stained', 'microscopy']);
+
 // Session cache: image search is slow (Commons + Open-i), so the same query is only
 // ever fetched once per page load.
 const rowsCache = new Map<string, LiveImage[]>();
@@ -108,6 +111,13 @@ export async function findLiveImage(
   // variants that name the modality + the core finding.
   const variants: string[] = [q];
   const words = q.split(/\s+/);
+  // The diagnosis comes first and the modality last ("caseous necrosis granuloma histology"). Commons needs every word
+  // to match, so the diagnosis alone (without the modality word and then with fewer words) finds far more pictures.
+  const MODALITY_WORD = /^(histology|histological|histopathology|biopsy|micrograph|ecg|ekg|x-ray|xray|radiograph|ct|mri|ultrasound|smear|fundus|photo|photograph|clinical|image|picture)$/i;
+  const core = words.filter((w) => !MODALITY_WORD.test(w));
+  if (core.length && core.length < words.length) variants.push(core.join(' '));
+  if (core.length > 3) variants.push(core.slice(0, 3).join(' '));
+  if (core.length > 2) variants.push(core.slice(0, 2).join(' '));
   if (words.length > 4) {
     // Last 3-4 words usually carry the modality + key finding.
     variants.push(words.slice(-4).join(' '));
@@ -127,7 +137,12 @@ export async function findLiveImage(
     return true;
   });
 
-  const deadline = Date.now() + Math.max(timeoutMs, 12000);
+  // The picture sources are slow when several searches run at once (7-10 s each), so the search gets 20 s in all.
+  const deadline = Date.now() + Math.max(timeoutMs, 20000);
+  // One budget of vision checks for the whole picture search, across all query variants: a question never
+  // costs more than this many vision calls, however many variants were tried.
+  const MAX_VISION_CHECKS_PER_QUESTION = 4;
+  let visionChecks = 0;
   for (const tryQ of tries) {
     const remaining = deadline - Date.now();
     if (remaining < 2500) break;
@@ -172,16 +187,17 @@ export async function findLiveImage(
           t.length <= 3 ? new RegExp(`\\b${t}\\b`, 'i').test(hay) : hay.includes(t);
         // Topic tokens are the non-modality words of the query.
         const topicTokens = expandedTokens.filter((t) => !modalityTokens.includes(t));
-        const topicOk = topicTokens.length === 0 || topicTokens.some(matches);
-        if (modalityTokens.length > 0) {
-          // Both the modality AND at least one topic word must appear in the figure's
-          // own title/caption — a histology slide of an adrenal tumour is not a
-          // verified picture for a hypertension question.
-          return topicOk && modalityTokens.some(matches);
-        }
-        // No modality: require ALL topic tokens to match (stricter verification).
-        const topicMatches = expandedTokens.filter(matches).length;
-        return topicMatches === expandedTokens.length && expandedTokens.length > 0;
+        // Words like "disease" or "change" appear in any caption, so they do not count towards a match. Most of the
+        // remaining words must be in the figure's own text ("minimal change disease" must not match a brain slide
+        // that only says "histopathologic changes").
+        const distinctive = topicTokens.filter((t) => !GENERIC_TOPIC_WORDS.has(t));
+        const needed = distinctive.length <= 1 ? distinctive.length : Math.ceil(distinctive.length * 0.6);
+        const topicOk = topicTokens.length === 0 || (distinctive.length ? distinctive.filter(matches).length >= needed : topicTokens.some(matches));
+        // Most of the condition words must be in the figure's own text. The modality ("histology", "x-ray") is often
+        // missing from a Commons title ("Leprosy - Lepromatous (LL) 4x.jpg"), and a condition rarely has every query
+        // word ("skin plaques"), so neither is required here: the vision check that follows looks at the picture
+        // itself and rejects the wrong modality or the wrong finding.
+        return topicOk && (topicTokens.length > 0 || modalityTokens.some(matches));
       };
       const unused = rows.filter((row) =>
         typeof row?.proxyUrl === 'string' &&
@@ -197,11 +213,9 @@ export async function findLiveImage(
       // Each verification is a vision call, so cap how many candidates we are willing
       // to check per query variant — a topic with many metadata-close-but-wrong rows
       // must not stall the whole generation.
-      const MAX_VERIFY_PER_VARIANT = Number(3);
-      let checked = 0;
       for (const candidate of candidates) {
-        if (checked >= MAX_VERIFY_PER_VARIANT) break;
-        checked += 1;
+        if (visionChecks >= MAX_VISION_CHECKS_PER_QUESTION) break;
+        visionChecks += 1;
         const verdict = await verifyImageMatches(candidate, tryQ);
         if (verdict.pass) {
           debugLog('H8', `query "${tryQ}" -> VERIFIED ${candidate.id} ${candidate.title} — ${verdict.reason}`);
@@ -232,14 +246,8 @@ export async function findLiveImage(
  * is dropped and only the credit/licence is shown pre-answer.
  */
 export function liveImageCaption(image: LiveImage): string {
-  const raw = (image.caption || image.title || '').trim();
-  // Open-i/Commons captions are frequently nothing but the diagnosis ("Conjunctivitis",
-  // "Prurigo Nodularis"): short, no sentence structure, and often identical to the
-  // figure title. Those are dropped rather than shown before the student answers.
-  const looksLikeDiagnosis =
-    raw.length > 0 && raw.length <= 48 && !/[.!?]/.test(raw) && raw.split(/\s+/).length <= 4;
-  const restatement = raw.length > 0 && raw.toLowerCase() === (image.title || '').trim().toLowerCase();
-  const caption = !looksLikeDiagnosis && !restatement ? raw : '';
-  const parts = [caption, image.credit, image.licence, 'Open-i/NLM'].filter(Boolean);
+  // A source caption usually names the diagnosis ("...radiograph of tetralogy of Fallot... boot-shaped heart"), so no
+  // part of it is shown before the student answers. Only the credit and licence are.
+  const parts = [image.credit, image.licence, image.provider || 'Open-i/NLM'].filter(Boolean);
   return parts.join(' · ');
 }

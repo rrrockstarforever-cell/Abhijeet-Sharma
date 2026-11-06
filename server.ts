@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
@@ -16,7 +17,8 @@ import {
   type OAuthChatMessage,
 } from './server/oauth.mjs';
 import { aiLog } from './server/oauth.mjs';
-import { research as webResearch } from './server/web.mjs';
+import { research as webResearch, literatureSources, SOURCE_REGISTRY } from './server/web.mjs';
+import { pyqWeights, pyqSource } from './server/pyqFrequency.mjs';
 import { searchImages, fetchImage, REFERENCE_SOURCES } from './server/images.mjs';
 import { buildImageBank, loadImageBank, queryImageBank, getBankImage, bankStats, rejectImage, searchBankByText } from './server/imageBank.mjs';
 import { generateQuestionFromImage } from './server/visionQuestion.mjs';
@@ -44,6 +46,11 @@ const DATA_DIR = process.env.PULSE_DATA_DIR || path.join(os.homedir(), '.pulse-m
 const ENV_FILE = path.join(DATA_DIR, '.env');
 try { dotenv.config({ path: ENV_FILE }); } catch { /* dev: file may not exist */ }
 
+// Page images for notes are far larger than the default 100 KB body limit. Registered first so
+// this route is parsed here and the global parser below leaves it alone.
+app.use('/api/ai/complete-images', express.json({ limit: '30mb' }));
+app.use('/api/ocr/nemotron', express.json({ limit: '1mb' }));
+app.use('/api/export/questions', express.json({ limit: '5mb' }));
 app.use(express.json());
 
 // ==========================================
@@ -61,6 +68,7 @@ const DEFAULT_MODELS: Record<string, string> = {
   opencode: OPENCODE_DEFAULT_MODEL,
   custom: 'gpt-4o-mini',
   nvidia: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
+  vyce: 'deepseek-v4.1',
 };
 
 // UI provider ids -> old oauth.mjs internal ids
@@ -84,6 +92,13 @@ function geminiKey(): string {
 
 function nvidiaKey(): string {
   return (process.env.NVIDIA_API_KEY || '').trim();
+}
+
+// VyceAI: an OpenAI-compatible gateway that serves DeepSeek models. The key is saved from Settings.
+const VYCE_BASE_URL = 'https://vyceai.com/v1';
+
+function vyceKey(): string {
+  return (process.env.VYCE_API_KEY || '').trim();
 }
 
 /**
@@ -187,8 +202,31 @@ function opencodeKeyFromCli(): string {
   }
 }
 
+// The OpenCode desktop install ships its own CLI. `auth export` lists the credentials it stores,
+// including the device sign-in for the OpenCode Console account, which is what "Sign in" gives.
+let signInCache: { key: string; at: number } | null = null;
+function opencodeKeyFromSignIn(): string {
+  if (signInCache && Date.now() - signInCache.at < 5 * 60_000) return signInCache.key;
+  const cli = process.env.OPENCODE_CLI_PATH
+    || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'ai.opencode.desktop', 'resources', 'opencode-cli.exe');
+  let key = '';
+  try {
+    const list = JSON.parse(execFileSync(cli, ['auth', 'export'], { encoding: 'utf8', timeout: 15_000, windowsHide: true }));
+    // Either account's sign-in works: the OpenCode Console login or the OpenCode Go login.
+    const signedIn = (id: string) => list.find((c: any) => c?.integrationID === id && c?.active && c?.value?.type === 'oauth');
+    const fresh = (c: any) => typeof c?.value?.expires === 'number' && c.value.expires > Date.now() && typeof c?.value?.access === 'string';
+    const oauth = [signedIn('opencode-go'), signedIn('opencode')].find(fresh);
+    const goKey = list.find((c: any) => c?.integrationID === 'opencode-go' && c?.active && c?.value?.type === 'key');
+    key = oauth ? oauth.value.access : goKey?.value?.key ?? '';
+  } catch {
+    key = '';
+  }
+  signInCache = { key, at: Date.now() };
+  return key;
+}
+
 function opencodeKey(): string {
-  return (process.env.OPENCODE_API_KEY || opencodeKeyFromCli()).trim();
+  return (opencodeKeyFromSignIn() || process.env.OPENCODE_API_KEY || opencodeKeyFromCli()).trim();
 }
 
 /** Save/replace the OpenCode Console API key (never echoed back to the browser). */
@@ -208,6 +246,7 @@ function isProviderConnected(providerId: string): boolean {
   if (providerId === 'gemini') return Boolean(geminiKey());
   if (providerId === 'opencode') return Boolean(opencodeKey());
   if (providerId === 'nvidia') return Boolean(nvidiaKey());
+  if (providerId === 'vyce') return Boolean(vyceKey());
   if (providerId === 'custom') return Boolean(getActiveCustomEndpoint());
   try {
     const s = oauthStatus();
@@ -228,10 +267,53 @@ function notConnectedMessage(providerId: string): string {
   if (providerId === 'nvidia') {
     return 'NVIDIA is not connected. Paste your NVIDIA API key in Settings → AI Subscription Hub.';
   }
+  if (providerId === 'vyce') {
+    return 'VyceAI is not connected. Paste your VyceAI API key in Settings → AI Subscription Hub.';
+  }
   if (providerId === 'custom') {
     return 'Custom provider is not connected. Add a custom endpoint in Settings → AI Subscription Hub.';
   }
   return `${providerId.charAt(0).toUpperCase() + providerId.slice(1)} is not signed in. Connect an AI provider in Settings → AI Subscription Hub.`;
+}
+
+// Models that refuse the JSON response format. They are sent plain requests from then on.
+const nvidiaNoJsonFormat = new Set<string>();
+
+// Text questions are spread over these NVIDIA models in turn, so one model's rate limit does not hold up every question.
+const NVIDIA_SPREAD_MODELS = [
+  'nvidia/nemotron-3.5-super-vl-120b-a12b',
+];
+let nvidiaSpreadCursor = 0;
+
+// Live counts for the NVIDIA generation, read by the progress widget. Attempts are single HTTP calls; finished
+// counts one per question. Only the last few events are kept.
+type NvidiaAttemptOutcome = 'ok' | 'refused' | 'error' | 'timeout';
+type NvidiaFinishOutcome = 'ok' | 'failed' | 'stopped';
+const nvidiaStats = {
+  started: 0,
+  inFlight: 0,
+  finished: { ok: 0, failed: 0, stopped: 0 } as Record<NvidiaFinishOutcome, number>,
+  // Questions the app kept, and those it dropped by reason (after the model replied).
+  accepted: 0,
+  dropped: {} as Record<string, number>,
+  // Repair outcomes for rejected drafts: attempted (sent), accepted (kept after its checks), failed (no repair returned).
+  repairs: {} as Record<string, number>,
+  byModel: {} as Record<string, Record<NvidiaAttemptOutcome, number>>,
+  events: [] as { at: string; model: string; outcome: string; detail: string }[],
+};
+function nvidiaEvent(model: string, outcome: string, detail = '') {
+  nvidiaStats.events.push({ at: new Date().toISOString().slice(11, 19), model: model.replace('nvidia/', ''), outcome, detail });
+  if (nvidiaStats.events.length > 40) nvidiaStats.events.shift();
+}
+function nvidiaAttempt(model: string, outcome: NvidiaAttemptOutcome, detail = '') {
+  const counts = (nvidiaStats.byModel[model] ??= { ok: 0, refused: 0, error: 0, timeout: 0 });
+  counts[outcome] += 1;
+  nvidiaEvent(model, outcome, detail);
+}
+function nvidiaFinish(model: string, outcome: NvidiaFinishOutcome, detail = '') {
+  nvidiaStats.inFlight = Math.max(0, nvidiaStats.inFlight - 1);
+  nvidiaStats.finished[outcome] += 1;
+  nvidiaEvent(model, `question ${outcome}`, detail);
 }
 
 // Shared completion dispatcher used by /api/ai/complete and /api/ai/tutor-chat.
@@ -246,8 +328,13 @@ async function runCompletion(opts: {
   signal?: AbortSignal;
   /** Stable conversation id for providers that route/cache per session (OpenCode Go). */
   session?: string;
+  /** Data URLs attached to the last message. Only the NVIDIA path sends them. */
+  images?: string[];
+  /** Spread this call across the NVIDIA text models in turn, so one model's rate limit does not hold up the run. */
+  /** Who asked for this call (write, check-solve, check-judge): shown in the server log. */
+  purpose?: string;
 }): Promise<string> {
-  const { provider, model, system, messages, json, effort, search, signal } = opts;
+  const { provider, model, system, messages, json, effort, search, signal, images } = opts;
 
   if (provider === 'opencode') {
     const key = opencodeKey();
@@ -432,59 +519,153 @@ async function runCompletion(opts: {
     return text;
   }
 
-  if (provider === 'nvidia') {
-    const key = nvidiaKey();
-    if (!key) throw new ApiError(notConnectedMessage('nvidia'), 401);
-    const model_ = model || DEFAULT_MODELS.nvidia;
-    const payloadMessages = [
-      ...(system ? [{ role: 'system', content: system }] : []),
-      ...messages.map((m) => ({ role: m.role, content: m.content })),
-    ];
+  if (provider === 'vyce') {
+    const key = vyceKey();
+    if (!key) throw new ApiError(notConnectedMessage('vyce'), 401);
+    const model_ = model || DEFAULT_MODELS.vyce;
     const payload = JSON.stringify({
       model: model_,
-      messages: payloadMessages,
+      messages: [
+        ...(system ? [{ role: 'system', content: system }] : []),
+        ...messages.map((m) => ({ role: m.role, content: m.content })),
+      ],
       temperature: 0.7,
-      // Let a long clinical answer finish rather than starving the reasoning trace.
-      max_tokens: nvidiaTokenBudget(effort),
-      chat_template_kwargs: nvidiaReasoningKwargs(effort),
       ...(json ? { response_format: { type: 'json_object' } } : {}),
     });
-    // NVIDIA's endpoint returns sporadic 500/503s that succeed on an immediate retry.
-    // Without this, one upstream blip surfaced to the learner as "AI request failed
-    // (HTTP 502)" and discarded an otherwise fine answer. Bounded, and never retries a
-    // 4xx (those are real: bad key, bad model, rate limit we should surface).
-    let httpRes: any = null;
+    // VyceAI sometimes answers 502 for a moment; one more try almost always succeeds.
+    let r = null as unknown as globalThis.Response;
     let raw = '';
     let body: any = {};
-    const maxAttempts = 3;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      httpRes = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      r = await fetch(`${VYCE_BASE_URL}/chat/completions`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${key}`,
-        },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         body: payload,
         ...(signal ? { signal } : {}),
       });
-      raw = await httpRes.text();
+      raw = await r.text();
       body = {};
       try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
-      if (httpRes.ok || httpRes.status === 429 || httpRes.status < 500 || attempt === maxAttempts) break;
+      if (r.ok || r.status < 500) break;
+      aiLog({ provider: 'vyce', model: model_, status: r.status, error: true, retry: attempt });
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+    }
+    if (!r.ok) {
+      aiLog({ provider: 'vyce', model: model_, status: r.status, error: true });
+      // Only a bad key means "not connected"; a 403 is a model this account cannot use, so its message is shown.
+      throw new ApiError(`VyceAI: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
+    }
+    const content = body?.choices?.[0]?.message?.content;
+    const text = typeof content === 'string' ? content : '';
+    aiLog({ provider: 'vyce', model: model_, status: r.status, text_len: text.length, json: !!json });
+    if (!text.trim()) {
+      throw new ApiError(`VyceAI returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || 'unknown'}).`, 502);
+    }
+    return text;
+  }
+
+  if (provider === 'nvidia') {
+    const key = nvidiaKey();
+    if (!key) throw new ApiError(notConnectedMessage('nvidia'), 401);
+    nvidiaStats.started += 1;
+    nvidiaStats.inFlight += 1;
+    // A model chosen in the app is used as it is, with no spreading and no switching on refusal. Without a chosen
+    // model, text requests start on the next model in the spread and image requests use the vision model.
+    const pinned = Boolean(model);
+    const spreadStart = nvidiaSpreadCursor++ % NVIDIA_SPREAD_MODELS.length;
+    let spreadIndex = spreadStart;
+    let model_ = pinned ? String(model) : images?.length ? DEFAULT_MODELS.nvidia : NVIDIA_SPREAD_MODELS[spreadIndex];
+    const payloadMessages = [
+      ...(system ? [{ role: 'system', content: system }] : []),
+      ...messages.map((m, i) => ({
+        role: m.role,
+        content: images?.length && i === messages.length - 1
+          ? [{ type: 'text', text: m.content }, ...images.map((url) => ({ type: 'image_url', image_url: { url } }))]
+          : m.content,
+      })),
+    ];
+    const buildPayload = (withFormat: boolean) => JSON.stringify({
+      model: model_,
+      messages: payloadMessages,
+      // Reading pages is transcription as much as writing, so keep it close to the source.
+      temperature: images?.length ? 0.3 : 0.7,
+      // Let a long clinical answer finish rather than starving the reasoning trace.
+      max_tokens: nvidiaTokenBudget(effort),
+      chat_template_kwargs: nvidiaReasoningKwargs(effort),
+      ...(json && withFormat ? { response_format: { type: 'json_object' } } : {}),
+    });
+    // Some models refuse response_format; for those the request goes without it and the JSON is read from the text.
+    let withFormat = Boolean(json) && !nvidiaNoJsonFormat.has(model_);
+    let payload = buildPayload(withFormat);
+    let httpRes: any = null;
+    let raw = '';
+    let body: any = {};
+    // Up to six tries. A refused call (429) waits 5 seconds and tries again, so a burst of questions drains instead of failing.
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      try {
+        httpRes = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          body: payload,
+          // A call that never returns would hold its question forever; give up after 60 seconds, or sooner if the client stops.
+          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000),
+        });
+      } catch (err: any) {
+        if (signal?.aborted) {
+          nvidiaFinish(model_, 'stopped');
+          throw err;
+        }
+        nvidiaAttempt(model_, err?.name === 'TimeoutError' ? 'timeout' : 'error', err?.name ?? 'error');
+        console.log(`[nvidia] ${new Date().toISOString().slice(11, 23)} ${opts.purpose ?? 'unlabelled'} model=${model_} failed=${err?.name ?? 'error'}`);
+        httpRes = null;
+        if (attempt >= 3) break;
+        await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+        continue;
+      }
+      raw = await httpRes.text();
+      console.log(`[nvidia] ${new Date().toISOString().slice(11, 23)} ${opts.purpose ?? 'unlabelled'} model=${model_} attempt=${attempt} status=${httpRes.status}`);
+      body = {};
+      try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+      if (httpRes.status === 400 && withFormat && /response_format/i.test(raw)) {
+        nvidiaNoJsonFormat.add(model_);
+        withFormat = false;
+        payload = buildPayload(false);
+        attempt -= 1;
+        continue;
+      }
+      const rateLimited = httpRes.status === 429;
+      nvidiaAttempt(model_, httpRes.ok ? 'ok' : rateLimited ? 'refused' : 'error', String(httpRes.status));
+      if (httpRes.ok || (httpRes.status < 500 && !rateLimited)) break;
       aiLog({ provider: 'nvidia', model: model_, status: httpRes.status, error: true, retry: attempt });
-      await new Promise((resolve) => setTimeout(resolve, 1200 * attempt));
+      // Server errors give up after three tries; refused calls keep trying until the sixth.
+      if (!rateLimited && attempt >= 3) break;
+      if (rateLimited && !images?.length && !pinned) {
+        // A refused call moves straight to the next model in the spread. It waits only after every model has refused.
+        spreadIndex = (spreadIndex + 1) % NVIDIA_SPREAD_MODELS.length;
+        model_ = NVIDIA_SPREAD_MODELS[spreadIndex];
+        withFormat = Boolean(json) && !nvidiaNoJsonFormat.has(model_);
+        payload = buildPayload(withFormat);
+        if (spreadIndex !== spreadStart) continue;
+      }
+      if (attempt < 6) await new Promise((resolve) => setTimeout(resolve, rateLimited ? 5000 : 1200 * attempt));
     }
     if (!httpRes || !httpRes.ok) {
       const status = httpRes?.status ?? 502;
       aiLog({ provider: 'nvidia', model: model_, status, error: true });
-      throw new ApiError(`NVIDIA: ${providerErrorText(body, status)}`, status === 401 ? 401 : 502);
+      nvidiaFinish(model_, 'failed', String(status));
+      // Keep NVIDIA's own words (quota, rate or model message) so the cause can be read in the app.
+      const detail = providerErrorText(body, status);
+      const extra = detail === `HTTP ${status}` && raw ? ` — ${raw.replace(/s+/g, ' ').slice(0, 160)}` : '';
+      throw new ApiError(`NVIDIA: ${detail}${extra}`, status === 401 ? 401 : 502);
     }
     const content = body?.choices?.[0]?.message?.content;
     const text = typeof content === 'string' ? content : '';
     aiLog({ provider: 'nvidia', model: model_, status: httpRes.status, text_len: text.length, json: !!json });
     if (!text.trim()) {
+      nvidiaFinish(model_, 'failed', 'empty');
       throw new ApiError(`NVIDIA returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || 'unknown'}).`, 502);
     }
+    nvidiaFinish(model_, 'ok');
     return text;
   }
 
@@ -532,17 +713,214 @@ app.get('/api/oauth/status', (req: Request, res: Response) => {
       grok: { connected: isProviderConnected('grok') },
       opencode: { connected: isProviderConnected('opencode') },
       nvidia: { connected: isProviderConnected('nvidia') },
+      vyce: { connected: isProviderConnected('vyce') },
       custom: { connected: isProviderConnected('custom') },
     },
     defaults: DEFAULT_MODELS,
   });
 });
 
+// POST /api/pyq/weights: how often each subtopic is asked in the previous-year papers for an exam, so a set can follow
+// the exam's own frequency. Subtopics with no PYQ match weigh 1. Reads the PYQ bundle on this machine, if present.
+app.post('/api/pyq/weights', (req: Request, res: Response) => {
+  const subtopics = Array.isArray(req.body?.subtopics) ? req.body.subtopics.map((s: any) => String(s)).slice(0, 200) : [];
+  const exam = String(req.body?.exam || '');
+  return res.json({ weights: pyqWeights(subtopics, exam), source: pyqSource() });
+});
+
+// POST /api/ai/split-topic: splits a typed topic into distinct subtopics. Runs once per module; cached per session.
+const splitCache = new Map<string, { subtopic: string; priority: number; facts: number }[]>();
+app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
+  const topic = String(req.body?.topic || '').trim().slice(0, 120);
+  const exam = String(req.body?.exam || 'NEET-PG');
+  const provider = String(req.body?.provider || '');
+  const model = String(req.body?.model || '');
+  if (!topic || !provider) return res.json({ subtopics: [] });
+  const key = JSON.stringify({ topic, exam, provider, model });
+  const cached = splitCache.get(key);
+  if (cached) return res.json({ subtopics: cached.map((s) => s.subtopic), priorities: cached.map((s) => s.priority), facts: cached.map((s) => s.facts) });
+  // The split reads the library and the web first, so it lists only subtopics that have content behind them.
+  let evidence = '';
+  try {
+    const found = await webResearch(topic, 1200);
+    evidence = found.sources.map((s: any, i: number) => `[${i + 1}] ${s.title}\n${s.text}`).join('\n').slice(0, 6000);
+  } catch {
+    evidence = '';
+  }
+  const prompt = [
+    `You are an expert medical exam item writer for ${exam}.`,
+    evidence
+      ? `Evidence from the textbook library and the web on this topic (a guide: list every subtopic the evidence supports, and every other subtopic an examiner tests on this topic):\n${evidence}`
+      : 'No evidence was found, so list the subtopics an exam would test.',
+    `Split the topic "${topic}" into its distinct subtopics, sorted as an examiner would sort them:`,
+    'for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. List every distinct subtopic an examiner tests on this topic: a narrow topic may have only two or three, a broad one thirty or more. Do not stop at a fixed number.',
+    'Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.',
+    'Give each subtopic a priority from 1 to 10 for how often it is tested.',
+    'Give each subtopic "facts": the number of high-yield, exam-testable facts in it (1 to 6). Count only facts an examiner would ask, not background detail.',
+    // JSON mode returns one object, so the list sits inside it under "subtopics".
+    `Return only a JSON object: {"subtopics": [{"subject": "${topic}", "subtopic": "<name: items>", "priority": <1-10>, "facts": <1-6>}, ...]}.`,
+    'Do not repeat any entry.',
+  ].join('\n');
+  // Reads the subtopic list from one reply. Returns [] when the reply has no usable list.
+  const splitWith = async (useModel: string | undefined, text = prompt, via = provider): Promise<{ subtopic: string; priority: number; facts: number }[]> => {
+    const raw = await runCompletion({ provider: via, model: useModel, messages: [{ role: 'user', content: text }], json: true, effort: 'min' });
+    const parsed = extractJson<any>(raw);
+    // Some models return one object, or a list wrapped in an object; both are read as a list.
+    const asList: any[] = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === 'object'
+        ? (Object.values(parsed).find(Array.isArray) as any[] | undefined) ?? [parsed]
+        : [];
+    console.log('[split-topic] model', useModel, 'raw', String(raw).slice(0, 120), 'items:', asList.length);
+    // Each subtopic carries the exam priority (1-10) the model gave it. The most important come first, and
+    // only those at 5 or above are kept, so the count reflects what is actually tested.
+    const rated = asList
+      .map((e: any) => (typeof e === 'string'
+        ? { subtopic: e, priority: 10, facts: 1 }
+        : { subtopic: e?.subtopic, priority: Number(e?.priority) || 0, facts: Math.min(6, Math.max(1, Math.round(Number(e?.facts) || 1))) }))
+      .filter((r: any) => typeof r.subtopic === 'string' && r.subtopic.trim());
+    // Every relevant subtopic is kept; the priority only sets the order.
+    const chosen = rated.sort((a: any, b: any) => b.priority - a.priority);
+    const seen = new Set<string>();
+    const unique: { subtopic: string; priority: number; facts: number }[] = [];
+    for (const r of chosen) {
+      const name = r.subtopic.trim();
+      if (seen.has(name)) continue;
+      seen.add(name);
+      unique.push({ subtopic: name, priority: r.priority, facts: r.facts });
+    }
+    return unique;
+  };
+  try {
+    // A small model sometimes gives no list. Retry once with the stronger default model, then fall back to the typed topic.
+    let subtopics = await splitWith(model || undefined).catch(() => []);
+    if (!subtopics.length && provider === 'nvidia') subtopics = await splitWith(DEFAULT_MODELS.nvidia).catch(() => []);
+    // One or two categories cannot spread a set, so a thin split is asked again with a stricter brief.
+    if (subtopics.length < 4) {
+      const strict = [
+        prompt,
+        'Your last reply gave too few subtopics. Return every distinct subtopic an examiner tests on this topic, each a different category.',
+        'For a drug or drug class, cover every organ system and effect type it is known for (for example renal, neurological, sensory, haematological, hepatic, cardiac, metabolic, skin, endocrine, pregnancy), plus its key interactions and monitoring.',
+        'For a disease, cover its causes, clinical features, investigations, treatment, complications and prognosis.',
+        'A single subtopic is not acceptable.',
+      ].join('\n');
+      const more = await splitWith(model || undefined, strict).catch(() => []);
+      if (more.length > subtopics.length) subtopics = more;
+    }
+    // VyceAI sometimes cannot answer this brief at all (long evidence); NVIDIA is the fallback for the split.
+    if (subtopics.length < 4 && provider === 'vyce') {
+      const alt = await splitWith(DEFAULT_MODELS.nvidia, prompt, 'nvidia').catch(() => []);
+      if (alt.length > subtopics.length) subtopics = alt;
+    }
+    // A failed or thin split (the provider was rate-limited or timed out) is never kept: the next request asks again.
+    const thin = subtopics.length < 4;
+    if (!subtopics.length) subtopics = [{ subtopic: topic, priority: 10, facts: 1 }];
+    if (!thin) {
+      if (splitCache.size >= 50) splitCache.delete(splitCache.keys().next().value as string);
+      splitCache.set(key, subtopics);
+    }
+    return res.json({ subtopics: subtopics.map((s) => s.subtopic), priorities: subtopics.map((s) => s.priority), facts: subtopics.map((s) => s.facts) });
+  } catch (err: any) {
+    console.log('[split-topic] failed:', err?.message || err);
+    return res.json({ subtopics: [topic], priorities: [10], facts: [1] });
+  }
+});
+
+// GET /api/ai/source-registry: the sources the question writer may read, with licence and status.
+app.get('/api/ai/source-registry', (_req: Request, res: Response) => {
+  return res.json({ sources: SOURCE_REGISTRY });
+});
+
+// Figures for imported question banks (eMedici). Read-only, from a folder set by
+// BANK_FIGURES_DIR (default ~/.pulse-med/bank-figures). The path is restricted to plain
+// folder/file names, so a request cannot read anything else on disk.
+const BANK_FIGURES_DIR = process.env.BANK_FIGURES_DIR || path.join(os.homedir(), '.pulse-med', 'bank-figures');
+app.get(/^\/api\/bank-figures\/(.+)$/, (req: Request, res: Response) => {
+  const rel = String(req.params[0] ?? '');
+  if (!/^[A-Za-z0-9_\-/]+\.(png|jpe?g|webp|gif)$/i.test(rel) || rel.split('/').includes('..')) {
+    return res.status(400).end();
+  }
+  const full = path.join(BANK_FIGURES_DIR, rel);
+  if (!fs.existsSync(full)) return res.status(404).end();
+  res.sendFile(full);
+});
+
+/** Ranking replies from the planner, kept for the session so later rounds of a module do not rank again. */
+const rankCache = new Map<string, string>();
+
+/** A subtopic's parts, as the writer focuses on them: "Antipsychotics: haloperidol, olanzapine" gives two. */
+function subtopicParts(subtopic: string): string[] {
+  const after = subtopic.includes(':') ? subtopic.split(':').slice(1).join(':') : subtopic;
+  // Each part keeps only its own name: "Antiepileptics: phenytoin" becomes "phenytoin".
+  return after
+    .split(/,|&| and /)
+    .map((s) => s.trim().split(':').pop()!.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Lists `count` distinct, specific topics for the chosen subjects and subtopics. Each topic is the focus of one
+ * question (one drug, one adverse effect, one clinical situation). Subject and subtopic must be copied from the
+ * selection; topics already written in this module (`excluded`, as "subtopic|focus") are not repeated.
+ */
+async function listDistinctTopics(
+  subjectSubtopics: { subject: string; subtopics: string[] }[],
+  count: number,
+  exam: string | undefined,
+  provider: string | undefined,
+  model: string | undefined,
+  excluded: Set<string>,
+): Promise<{ subject: string; subtopic: string; focus: string }[]> {
+  const avoid = [...excluded].map((k) => k.split('|')[1]).filter(Boolean).slice(0, 200);
+  const prompt = [
+    `You are an expert medical exam item writer for ${exam || 'NEET-PG'}.`,
+    `Allowed subjects and subtopics:`,
+    ...subjectSubtopics.map((s) => `  ${s.subject}: ${(s.subtopics || []).join(', ')}`),
+    '',
+    `List ${count} distinct, specific topics that an exam question can test within these subtopics. Each topic is one concrete focus: one drug, one adverse effect, one mechanism, one investigation, one clinical situation. No two topics may overlap.`,
+    avoid.length ? `Do not repeat these already written topics: ${avoid.join('; ')}.` : '',
+    `Return one JSON object with a single key "topics", whose value is an array of ${count} objects. Each object has "subject", "subtopic" and "focus". Copy "subject" and "subtopic" exactly from the list above. "focus" is 3 to 10 words.`,
+    `Output ONLY the JSON array.`,
+  ].filter(Boolean).join('\n');
+  const raw = await runCompletion({
+    provider: provider || 'gemini',
+    model: model || DEFAULT_MODELS.nvidia,
+    messages: [{ role: 'user', content: prompt }],
+    json: true,
+    effort: 'min',
+  });
+  const parsed = extractJson<any>(raw);
+  // Some models return a single object, or a list wrapped in an object; both are read as a list.
+  const list: any[] = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === 'object'
+      ? (Object.values(parsed).find(Array.isArray) as any[] | undefined) ?? [parsed]
+      : [];
+  const allowed = new Map<string, Set<string>>();
+  for (const s of subjectSubtopics) allowed.set(s.subject, new Set((s.subtopics || []).map((sub) => String(sub).trim())));
+  const seen = new Set<string>();
+  const out: { subject: string; subtopic: string; focus: string }[] = [];
+  for (const entry of list) {
+    const subject = String(entry?.subject ?? '');
+    const subtopic = String(entry?.subtopic ?? '').trim();
+    const focus = String(entry?.focus ?? '').trim();
+    if (!focus || !allowed.get(subject)?.has(subtopic)) continue;
+    const key = focus.toLowerCase();
+    if (seen.has(key) || excluded.has(`${subtopic}|${focus}`)) continue;
+    seen.add(key);
+    out.push({ subject, subtopic, focus });
+    if (out.length >= count) break;
+  }
+  return out;
+}
+
 // 1a-bis. POST /api/ai/plan-topics: plan topic distribution for MCQ generation.
 // Returns a ranked list of subject+subtopic pairs with importance weights,
 // so that important topics appear more often across concurrent batches.
 app.post('/api/ai/plan-topics', async (req: Request, res: Response) => {
-  const { subjectSubtopics, count, difficultyTier, provider, model, exam, effort } = req.body || {};
+  const { subjectSubtopics, count, difficultyTier, provider, model, exam, effort, exclude } = req.body || {};
+  // Topic units already written in this module ("subtopic|focus"). Later rounds skip them.
+  const excluded = new Set<string>(Array.isArray(exclude) ? exclude.map(String) : []);
   if (!subjectSubtopics || !Array.isArray(subjectSubtopics) || subjectSubtopics.length === 0) {
     return res.status(400).json({ error: 'subjectSubtopics is required' });
   }
@@ -568,47 +946,102 @@ app.post('/api/ai/plan-topics', async (req: Request, res: Response) => {
       ...subjectSubtopics.map((s: any) => `  ${s.subject}: ${(s.subtopics || []).join(', ')}`),
       '',
       `Return a JSON array of topic objects, each with "subject", "subtopic", and "priority" (1-10, where 10 = most important).`,
+      `Use ONLY the subjects and subtopics listed above, copied exactly. Do not add any other subject or subtopic.`,
       `Include approximately ${countN} entries total. If there are fewer unique pairs than ${countN}, repeat important ones.`,
       `Output ONLY the JSON array.`,
     ].join('\n');
 
-    const raw = await runCompletion({
-      provider: provider || 'gemini',
-      model: model || DEFAULT_MODELS.nvidia,
-      messages: [{ role: 'user', content: planPrompt }],
-      json: true,
-      effort: effort || undefined,
-    });
+    // The same subjects are ranked again in every later round of a module. Keep the first reply for this session.
+    const rankKey = JSON.stringify({ exam, provider, model, subjectSubtopics });
+    let raw = rankCache.get(rankKey) ?? '';
+    if (!raw) {
+      raw = await runCompletion({
+        provider: provider || 'gemini',
+        model: model || DEFAULT_MODELS.nvidia,
+        messages: [{ role: 'user', content: planPrompt }],
+        json: true,
+        // Ranking subtopics is a short judgement, so it runs without reasoning, like the rest of the pipeline.
+        effort: 'min',
+      });
+      if (rankCache.size >= 50) rankCache.delete(rankCache.keys().next().value as string);
+      rankCache.set(rankKey, raw);
+    }
 
     const parsed = extractJson<{ subject: string; subtopic: string; priority: number }[]>(raw);
-    const ranked = Array.isArray(parsed) ? parsed : [];
+    // Keep only pairs the user actually selected. The model can return subjects it was
+    // not given, which would leak other specialties into a focused module.
+    const allowed = new Map<string, Set<string>>();
+    for (const s of subjectSubtopics) {
+      allowed.set(s.subject, new Set((s.subtopics || []).map((sub: string) => String(sub).trim())));
+    }
+    const ranked = (Array.isArray(parsed) ? parsed : []).filter(
+      (entry) => allowed.get(entry?.subject)?.has(String(entry?.subtopic ?? '').trim()),
+    );
 
-    // Build weighted topic list: higher priority = more repetitions.
-    const weighted: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }[] = [];
+    // One distinct topic per question first. Each subtopic is split into its parts (for example, one drug
+    // class each). Subtopics are taken in priority order, round by round, so a topic repeats only after every
+    // subtopic has had its first question, and then only with a different part.
+    // The model can list one subtopic more than once; keep each subtopic once, at its highest priority.
+    const bestByTopic = new Map<string, any>();
     for (const entry of ranked) {
-      const repeats = Math.max(1, Math.min(entry.priority || 5, 10));
-      for (let i = 0; i < repeats; i++) {
+      const key = `${entry.subject}|${String(entry.subtopic).trim()}`;
+      const prior = bestByTopic.get(key);
+      if (!prior || (entry.priority || 0) > (prior.priority || 0)) bestByTopic.set(key, entry);
+    }
+    const sorted = [...bestByTopic.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0));
+    const weighted: { subject: string; subtopic: string; focus?: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }[] = [];
+    for (let round = 0; sorted.length > 0 && weighted.length < countN && round < 20; round++) {
+      for (const entry of sorted) {
+        if (weighted.length >= countN) break;
+        const parts = subtopicParts(entry.subtopic);
+        const focus = parts.length > 1 ? parts[round % parts.length] : undefined;
+        if (excluded.has(`${entry.subtopic}|${focus ?? ''}`)) continue;
         weighted.push({
           subject: entry.subject,
           subtopic: entry.subtopic,
+          focus,
           difficultyTier: tier as 'LOW' | 'MEDIUM' | 'HIGH',
         });
       }
     }
 
-    // If weighted list is empty (parse failed), fall back to round-robin.
+    // If the ranking failed, fall back to a round-robin over the same units, with the same rules: each unit
+    // once, parts split out, and units already written in this module skipped.
     if (weighted.length === 0) {
-      for (let i = 0; i < countN; i++) {
-        weighted.push({
-          subject: pool[i % pool.length].subject,
-          subtopic: pool[i % pool.length].subtopic,
-          difficultyTier: tier as 'LOW' | 'MEDIUM' | 'HIGH',
-        });
+      const units: { subject: string; subtopic: string; focus?: string }[] = [];
+      for (let round = 0; round < 20; round++) {
+        for (const entry of pool) {
+          const parts = subtopicParts(entry.subtopic);
+          const focus = parts.length > 1 ? parts[round % parts.length] : undefined;
+          if (round > 0 && parts.length <= 1) continue;
+          units.push({ subject: entry.subject, subtopic: entry.subtopic, focus });
+        }
       }
+      for (const unit of units) {
+        if (weighted.length >= countN) break;
+        if (excluded.has(`${unit.subtopic}|${unit.focus ?? ''}`)) continue;
+        weighted.push({ ...unit, difficultyTier: tier as 'LOW' | 'MEDIUM' | 'HIGH' });
+      }
+    }
+
+    // A subtopic with no parts gives one unit, so a single broad subtopic (for example "HIV drugs") would give one
+    // question topic. In that case the model first lists distinct, specific topics for the same subjects, one per
+    // question. Those are the topics the questions are then written on.
+    let planned = weighted;
+    if (weighted.length < countN) {
+      let expanded = await listDistinctTopics(subjectSubtopics, countN, exam, provider, model, excluded);
+      // The model sometimes lists fewer than asked. Ask again for the rest, avoiding the topics already listed.
+      for (let round = 0; expanded.length < countN && round < 2; round++) {
+        const avoidNow = new Set([...excluded, ...expanded.map((t) => `${t.subtopic}|${t.focus}`)]);
+        const more = await listDistinctTopics(subjectSubtopics, countN - expanded.length, exam, provider, model, avoidNow);
+        if (more.length === 0) break;
+        expanded = [...expanded, ...more];
+      }
+      if (expanded.length > weighted.length) planned = expanded.map((t) => ({ ...t, difficultyTier: tier as 'LOW' | 'MEDIUM' | 'HIGH' }));
     }
 
     // Trim to countN, preserving order.
-    const finalTopics = weighted.slice(0, countN);
+    const finalTopics = planned.slice(0, countN);
     return res.json({ topics: finalTopics, total: finalTopics.length });
   } catch (err: any) {
     // Fallback: simple round-robin.
@@ -714,6 +1147,14 @@ app.post('/api/oauth/complete', async (req: Request, res: Response) => {
 // 5. POST /api/oauth/logout: revoke the locally stored subscription tokens
 app.post('/api/oauth/logout', (req: Request, res: Response) => {
   const { provider } = req.body || {};
+  if (provider === 'vyce') {
+    try {
+      clearEnvValue('VYCE_API_KEY');
+      return res.json({ ok: true, connected: false, provider });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Could not remove the VyceAI key.' });
+    }
+  }
   if (provider === 'opencode') {
     // The OpenCode key is a plain API key in <PULSE_DATA_DIR>/.env, not an OAuth token.
     try {
@@ -778,6 +1219,21 @@ app.post('/api/settings/nvidia-key', (req: Request, res: Response) => {
     return res.json({ ok: true, connected: true });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Could not save the NVIDIA API key.' });
+  }
+});
+
+// 6d. POST /api/settings/vyce-key: save the VyceAI API key.
+// NEVER echoes the key back.
+app.post('/api/settings/vyce-key', (req: Request, res: Response) => {
+  const key = String(req.body?.apiKey || '').trim();
+  if (!/^[A-Za-z0-9_.\-]{10,}$/.test(key)) {
+    return res.status(400).json({ error: 'That does not look like a valid VyceAI API key.' });
+  }
+  try {
+    writeEnvValue('VYCE_API_KEY', key);
+    return res.json({ ok: true, connected: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Could not save the VyceAI API key.' });
   }
 });
 
@@ -1192,11 +1648,31 @@ async function listNvidiaModels(): Promise<{ models: { id: string; name: string;
   }
 }
 
+async function listVyceModels(): Promise<{ models: { id: string; name: string; source: string }[]; error?: string }> {
+  if (!isProviderConnected('vyce')) return { models: [], error: 'No VyceAI API key saved.' };
+  try {
+    const r = await fetch(`${VYCE_BASE_URL}/models`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${vyceKey()}` },
+    });
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(providerErrorText(b, r.status));
+    const rows: any[] = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
+    return {
+      models: rows
+        .map((m) => ({ id: String(m?.id ?? m?.name ?? ''), name: String(m?.name || m?.id || ''), source: 'account' }))
+        .filter((m) => m.id),
+    };
+  } catch (e: any) {
+    return { models: [], error: e?.message || 'Could not list VyceAI models.' };
+  }
+}
+
 app.get('/api/models/available', async (req: Request, res: Response) => {
   const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
   const probe = req.query.probe === '1' || req.query.probe === 'true';
   const only = String(req.query.provider || '').trim();
-  if (only && !['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'nvidia'].includes(only)) {
+  if (only && !['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'nvidia', 'vyce'].includes(only)) {
     return res.status(400).json({ error: `Unknown provider: ${only}` });
   }
   // The full, unprobed list is cacheable; targeted or probed requests are not.
@@ -1248,6 +1724,12 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
     if (nv.error) errors.nvidia = nv.error;
   }
 
+  if (!only || only === 'vyce') {
+    const vy = await listVyceModels();
+    providers.vyce = vy.models;
+    if (vy.error) errors.vyce = vy.error;
+  }
+
   const payload = {
     providers,
     errors,
@@ -1264,7 +1746,7 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
 app.post('/api/models/probe', async (req: Request, res: Response) => {
   const provider = String(req.body?.provider || '').trim();
   const model = String(req.body?.model || '').trim();
-  if (!['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'nvidia'].includes(provider)) {
+  if (!['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'nvidia', 'vyce'].includes(provider)) {
     return res.status(400).json({ error: 'Choose a provider to test.' });
   }
   if (!model || model.length > 200) {
@@ -1332,8 +1814,163 @@ app.get('/api/models/catalog', async (_req: Request, res: Response) => {
 // ==========================================
 
 // POST /api/ai/complete -> {text}. real provider calls only; errors are surfaced, never fabricated.
+/**
+ * Adds internet sources for a topic to the last message, so the writing call can check its own keyed answer
+ * against them in the same call. Web pages and Europe PMC are searched here; the book and drug labels come from literatureSources.
+ */
+async function withInternetSources(messages: OAuthChatMessage[], groundOn: { query?: unknown; subject?: unknown }): Promise<OAuthChatMessage[]> {
+  const query = String(groundOn.query || '').trim().slice(0, 200);
+  if (!query) return messages;
+  const subject = String(groundOn.subject || '');
+  const [web, found] = await Promise.all([
+    webResearch(query, 1200).then((r) => r.sources).catch(() => []),
+    literatureSources(query, subject).catch(() => []),
+  ]);
+  const seen = new Set<string>();
+  const sources = [...found, ...web].filter((s) => {
+    if (!s?.text || seen.has(s.url)) return false;
+    seen.add(s.url);
+    return true;
+  }).slice(0, 6);
+  if (!sources.length) return messages;
+  const block = sources.map((s, i) => `[${i + 1}] ${s.title}\n${s.url}\n${String(s.text).slice(0, 1200)}`).join('\n\n');
+  const last = messages[messages.length - 1];
+  return [
+    ...messages.slice(0, -1),
+    { ...last, content: `${last.content}\n\nInternet sources found for this topic. Read them, then check the keyed option against them before you answer: """${block}"""` },
+  ];
+}
+
+// Live progress page for NVIDIA generation. Open it in the browser pane or a browser at /nvidia-progress.
+app.get('/nvidia-progress', (_req: Request, res: Response) => {
+  res.type('html').send(fs.readFileSync(path.join(process.cwd(), 'server', 'nvidia-progress.html'), 'utf8'));
+});
+
+// Checks one generated item against the sources: is the keyed answer correct, and is every fact it relies on
+// (a study, a product, a therapy) supported by those sources? Returns 'supported' or 'unsupported' with a reason.
+app.post('/api/ai/verify-item', async (req: Request, res: Response) => {
+  const { provider, model, question, groundOn } = req.body || {};
+  if (!provider || !question || typeof question !== 'object') {
+    return res.status(400).json({ error: 'provider and question are required.' });
+  }
+  const controller = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) controller.abort(); });
+  const item = JSON.stringify({
+    stem: question.stem,
+    questionText: question.questionText,
+    options: question.options,
+    keyedAnswer: question.correctOption,
+    keyFact: question.keyFact,
+  });
+  const messages: OAuthChatMessage[] = [{
+    role: 'user',
+    content: `Check this exam item against the sources attached after this request.\n\nItem:\n${item}\n\nAnswer with one JSON object: {"keyCorrect": true or false, "premiseSupported": true or false, "reason": "one sentence"}.\n- keyCorrect is false only if the sources show the keyed answer is wrong, or another option is clearly better. If the sources simply do not mention the topic, keyCorrect is true.\n- premiseSupported is false only if the sources contradict the item or say the study, product or therapy it relies on does not exist. Mentioning nothing about it is not a contradiction.`,
+  }];
+  try {
+    const grounded = groundOn && typeof groundOn === 'object' ? await withInternetSources(messages, groundOn) : messages;
+    const text = await runCompletion({
+      provider,
+      model,
+      system: 'You are a strict medical fact checker for postgraduate exam items. Answer only with the JSON object.',
+      messages: grounded,
+      json: true,
+      effort: 'min',
+      purpose: 'verify',
+      signal: controller.signal,
+    });
+    const parsed = extractJson<{ keyCorrect?: boolean; premiseSupported?: boolean; reason?: string }>(text);
+    // Only a wrong key or a contradicted premise drops an item. Sources that are silent on a point do not.
+    const supported = parsed?.keyCorrect !== false && parsed?.premiseSupported !== false;
+    return res.json({ verdict: supported ? 'supported' : 'unsupported', reason: String(parsed?.reason ?? '').slice(0, 300) });
+  } catch (err: any) {
+    if (controller.signal.aborted) return;
+    const status = err instanceof ApiError ? err.status : 502;
+    return res.status(status).json({ error: err?.message || 'Verification failed.' });
+  }
+});
+
+// Saves a set of generated questions to exports/ in the project, so they can be read and checked later.
+app.post('/api/export/questions', (req: Request, res: Response) => {
+  const dir = path.join(process.cwd(), 'exports');
+  fs.mkdirSync(dir, { recursive: true });
+  const name = `questions-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  fs.writeFileSync(path.join(dir, name), JSON.stringify(req.body, null, 2), 'utf8');
+  res.json({ ok: true, file: path.join('exports', name) });
+});
+
+// Clears the NVIDIA counts. The app calls this when a new generation starts, so the progress page shows one run.
+app.post('/api/ai/nvidia-stats/reset', (_req: Request, res: Response) => {
+  nvidiaStats.started = 0;
+  nvidiaStats.inFlight = 0;
+  nvidiaStats.finished = { ok: 0, failed: 0, stopped: 0 };
+  nvidiaStats.byModel = {};
+  nvidiaStats.events = [];
+  nvidiaStats.accepted = 0;
+  nvidiaStats.dropped = {};
+  nvidiaStats.repairs = {};
+  res.json({ ok: true });
+});
+
+// The app reports each question it keeps, or the reason it drops one (for example a failed source check).
+app.post('/api/ai/nvidia-stats/question', (req: Request, res: Response) => {
+  const { outcome, reason, draft } = req.body || {};
+  if (outcome === 'accepted') nvidiaStats.accepted += 1;
+  else if (outcome === 'dropped') {
+    const key = String(reason || 'other');
+    nvidiaStats.dropped[key] = (nvidiaStats.dropped[key] ?? 0) + 1;
+    // Keep the dropped question itself, so the rejects can be examined later: one JSON line per drop.
+    if (draft && typeof draft === 'object') {
+      try {
+        const dir = path.join(process.cwd(), 'tools', 'quality', 'out');
+        fs.mkdirSync(dir, { recursive: true });
+        fs.appendFileSync(path.join(dir, 'dropped-questions.jsonl'), JSON.stringify({ at: new Date().toISOString(), reason: key, draft }) + '\n');
+      } catch {
+        // A failed write must not fail the generation.
+      }
+    }
+  }
+  res.json({ ok: true });
+});
+
+// The app reports each attempt to repair a rejected draft, so the progress page can show how many repairs were sent,
+// kept, or failed. Outcomes are counted individually; unknown values are ignored.
+app.post('/api/ai/nvidia-stats/repair', (req: Request, res: Response) => {
+  const { outcome } = req.body || {};
+  if (outcome === 'attempted' || outcome === 'accepted' || outcome === 'failed') {
+    nvidiaStats.repairs[outcome] = (nvidiaStats.repairs[outcome] ?? 0) + 1;
+  }
+  res.json({ ok: true });
+});
+
+// The engine used by the most recent generation request, so the progress page can show what is running.
+let lastEngine: { provider: string; model: string; at: string } | null = null;
+
+// Snapshot of the NVIDIA counts for the progress widget: totals, per-model attempts and the latest events.
+app.get('/api/ai/nvidia-stats', (_req: Request, res: Response) => {
+  const f = nvidiaStats.finished;
+  const totals = Object.values(nvidiaStats.byModel).reduce(
+    (sum, m) => ({ ok: sum.ok + m.ok, refused: sum.refused + m.refused, error: sum.error + m.error, timeout: sum.timeout + m.timeout }),
+    { ok: 0, refused: 0, error: 0, timeout: 0 },
+  );
+  res.json({
+    started: nvidiaStats.started,
+    inFlight: nvidiaStats.inFlight,
+    questionsOk: f.ok,
+    questionsFailed: f.failed,
+    questionsStopped: f.stopped,
+    accepted: nvidiaStats.accepted,
+    repairs: nvidiaStats.repairs,
+    dropped: nvidiaStats.dropped,
+    attempts: totals,
+    byModel: Object.fromEntries(Object.entries(nvidiaStats.byModel).map(([k, v]) => [k.replace('nvidia/', ''), v])),
+    events: nvidiaStats.events.slice(-25).reverse(),
+    engine: lastEngine,
+    serverTime: new Date().toISOString(),
+  });
+});
+
 app.post('/api/ai/complete', async (req: Request, res: Response) => {
-  const { provider, model, system, messages, json, effort } = req.body || {};
+  const { provider, model, system, messages, json, effort, groundOn } = req.body || {};
   if (!provider) {
     return res.status(400).json({ error: 'No AI provider selected. Connect an AI provider in Settings.' });
   }
@@ -1347,7 +1984,8 @@ app.post('/api/ai/complete', async (req: Request, res: Response) => {
     if (!res.writableFinished) controller.abort();
   });
   try {
-    const text = await runCompletion({ provider, model, system, messages, json, effort, signal: controller.signal, session: req.header('x-opencode-session') || undefined });
+    const grounded = groundOn && typeof groundOn === 'object' ? await withInternetSources(messages, groundOn) : messages;
+    const text = await runCompletion({ provider, model, system, messages: grounded, json, effort, purpose: 'write', signal: controller.signal, session: req.header('x-opencode-session') || undefined });
     if (controller.signal.aborted) return;
     if (!text || !text.trim()) {
       return res.status(502).json({ error: 'The AI provider returned an empty response. Try again.' });
@@ -1355,6 +1993,187 @@ app.post('/api/ai/complete', async (req: Request, res: Response) => {
     return res.json({ success: true, text, model: model || DEFAULT_MODELS[provider] });
   } catch (err: any) {
     if (controller.signal.aborted) return; // client stopped it; nothing to answer
+    const status = err instanceof ApiError ? err.status : 502;
+    if (!res.headersSent) return res.status(status).json({ error: err?.message || 'AI request failed.' });
+  }
+});
+
+// Generation jobs. The browser allows only a few open connections to one server, so a long completion would hold
+// one of them for the whole call. A job starts the completion here and returns at once; the browser checks it with
+// short requests. The server, not the browser, then runs as many calls at once as the provider allows.
+type CompletionJob = { controller: AbortController; done: boolean; status: number; body: unknown; retryAfter?: string; createdAt: number };
+const completionJobs = new Map<string, CompletionJob>();
+setInterval(() => {
+  const cutoff = Date.now() - 15 * 60_000;
+  for (const [id, job] of completionJobs) if (job.createdAt < cutoff) { job.controller.abort(); completionJobs.delete(id); }
+}, 60_000).unref();
+
+app.post('/api/ai/jobs', (req: Request, res: Response) => {
+  const { provider, model, system, messages, json, effort, groundOn } = req.body || {};
+  if (!provider) return res.status(400).json({ error: 'No AI provider selected. Connect an AI provider in Settings.' });
+  if (!Array.isArray(messages) || messages.length === 0 || messages.some((m: any) => !m || typeof m.content !== 'string')) {
+    return res.status(400).json({ error: 'messages must be an array of {role, content}.' });
+  }
+  const id = crypto.randomUUID();
+  const job: CompletionJob = { controller: new AbortController(), done: false, status: 200, body: null, createdAt: Date.now() };
+  completionJobs.set(id, job);
+  const session = req.header('x-opencode-session') || undefined;
+  lastEngine = { provider: String(provider), model: String(model || DEFAULT_MODELS[provider] || provider), at: new Date().toISOString() };
+  // NVIDIA calls are counted inside runCompletion; other providers are counted here, so the progress page covers them too.
+  const countHere = provider !== 'nvidia';
+  if (countHere) {
+    nvidiaStats.started += 1;
+    nvidiaStats.inFlight += 1;
+  }
+  void (async () => {
+    try {
+      const grounded = groundOn && typeof groundOn === 'object' ? await withInternetSources(messages, groundOn) : messages;
+      const text = await runCompletion({ provider, model, system, messages: grounded, json, effort, purpose: 'write', signal: job.controller.signal, session });
+      if (!text || !text.trim()) {
+        job.status = 502;
+        job.body = { error: 'The AI provider returned an empty response. Try again.' };
+      } else {
+        job.status = 200;
+        job.body = { success: true, text, model: model || DEFAULT_MODELS[provider] };
+      }
+    } catch (err: any) {
+      job.status = err instanceof ApiError ? err.status : 502;
+      job.body = { error: err?.message || 'AI request failed.' };
+    } finally {
+      job.done = true;
+      if (countHere) {
+        // Shown under the model's own name in the "By model" table.
+        nvidiaAttempt(String(model || DEFAULT_MODELS[provider] || provider), job.status === 200 ? 'ok' : 'error', String(job.status));
+        nvidiaStats.inFlight = Math.max(0, nvidiaStats.inFlight - 1);
+        if (job.status === 200) nvidiaStats.finished.ok += 1;
+        else if (job.controller.signal.aborted) nvidiaStats.finished.stopped += 1;
+        else nvidiaStats.finished.failed += 1;
+      }
+    }
+  })();
+  return res.json({ id });
+});
+
+// Checks a job. Returns { done: false } while it runs; once done, returns the result and forgets the job.
+app.get('/api/ai/jobs/:id', (req: Request, res: Response) => {
+  const job = completionJobs.get(String(req.params.id));
+  if (!job) return res.status(404).json({ error: 'Unknown or expired job.' });
+  if (!job.done) return res.json({ done: false });
+  completionJobs.delete(String(req.params.id));
+  return res.json({ done: true, status: job.status, body: job.body, retryAfter: job.retryAfter });
+});
+
+// Stops a job the browser no longer waits for (the user pressed Stop).
+app.delete('/api/ai/jobs/:id', (req: Request, res: Response) => {
+  const job = completionJobs.get(String(req.params.id));
+  if (job) {
+    job.controller.abort();
+    completionJobs.delete(String(req.params.id));
+  }
+  res.json({ ok: true });
+});
+
+// Words from an NVIDIA OCR response. The response shape is not fully documented, so this reads any
+// object that carries both a text string and a list of corner points, wherever it sits.
+export function nemotronWords(body: any): { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }[] {
+  const out: { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }[] = [];
+  const visit = (node: any) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    const text: unknown = typeof node.text === 'string' ? node.text : node.text_prediction?.text;
+    const shape = node.bounding_box ?? node.bbox ?? node.points ?? node.bounding_box?.points;
+    const pts: any[] | undefined = Array.isArray(shape) ? shape : Array.isArray(shape?.points) ? shape.points : undefined;
+    if (typeof text === 'string' && text.trim() && pts && pts.length) {
+      const xs: number[] = [];
+      const ys: number[] = [];
+      if (pts.every((v) => typeof v === 'number')) {
+        pts.forEach((v, i) => (i % 2 === 0 ? xs : ys).push(v));
+      } else {
+        for (const p of pts) {
+          const x = Array.isArray(p) ? p[0] : p?.x;
+          const y = Array.isArray(p) ? p[1] : p?.y;
+          if (typeof x === 'number' && typeof y === 'number') {
+            xs.push(x);
+            ys.push(y);
+          }
+        }
+      }
+      if (xs.length && ys.length) {
+        const conf = Number(node.confidence ?? node.text_prediction?.confidence);
+        out.push({
+          text: text.trim(),
+          confidence: Number.isFinite(conf) ? conf * (conf <= 1 ? 100 : 1) : 90,
+          bbox: { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) },
+        });
+      }
+      return;
+    }
+    Object.values(node).forEach(visit);
+  };
+  visit(body);
+  return out;
+}
+
+// POST /api/ocr/nemotron {image} -> {text, words}. One page image through NVIDIA's hosted nemotron-ocr-v2.
+// The image is a JPEG/PNG/WebP data URL; the client shrinks it first, because the API takes at most ~180k base64 characters.
+app.post('/api/ocr/nemotron', async (req: Request, res: Response) => {
+  const image = req.body?.image;
+  if (typeof image !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/.test(image)) {
+    return res.status(400).json({ error: 'image must be a JPEG, PNG or WebP data URL.' });
+  }
+  const key = nvidiaKey();
+  if (!key) return res.status(401).json({ error: notConnectedMessage('nvidia') });
+  if (image.split(',')[1].length > 180_000) {
+    return res.status(413).json({ error: 'The page image is too large for the NVIDIA OCR API. Use a smaller image.' });
+  }
+  try {
+    const r = await fetch('https://ai.api.nvidia.com/v1/cv/nvidia/nemotron-ocr-v2', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ input: [{ type: 'image_url', url: image }] }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const raw = await r.text();
+    let body: any = {};
+    try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+    if (!r.ok) return res.status(r.status === 429 ? 429 : 502).json({ error: `NVIDIA OCR: ${providerErrorText(body, r.status)}` });
+    const words = nemotronWords(body);
+    if (process.env.OCR_DEBUG) console.log('[ocr/nemotron] raw response:', raw.slice(0, 2000));
+    return res.json({ text: words.map((w) => w.text).join('\n'), words });
+  } catch (err: any) {
+    return res.status(502).json({ error: err?.message || 'The NVIDIA OCR request failed.' });
+  }
+});
+
+// POST /api/ai/complete-images -> {text}. Same as /api/ai/complete, with page images attached.
+// Only NVIDIA sends images, so other providers get a clear 400 and the client uses text alone.
+app.post('/api/ai/complete-images', async (req: Request, res: Response) => {
+  const { provider, model, system, messages, json, effort, images } = req.body || {};
+  if (provider !== 'nvidia') {
+    return res.status(400).json({ error: `Reading page images is not available with ${provider || 'this provider'}.` });
+  }
+  if (!Array.isArray(messages) || messages.length === 0 || messages.some((m: any) => !m || typeof m.content !== 'string')) {
+    return res.status(400).json({ error: 'messages must be an array of {role, content}.' });
+  }
+  if (!Array.isArray(images) || images.length === 0 || images.some((u: any) => typeof u !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/.test(u))) {
+    return res.status(400).json({ error: 'images must be JPEG, PNG or WebP data URLs.' });
+  }
+  const controller = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) controller.abort();
+  });
+  try {
+    const text = await runCompletion({ provider, model, system, messages, json, effort, images, signal: controller.signal });
+    if (controller.signal.aborted) return;
+    if (!text || !text.trim()) {
+      return res.status(502).json({ error: 'The AI provider returned an empty response. Try again.' });
+    }
+    return res.json({ success: true, text });
+  } catch (err: any) {
+    if (controller.signal.aborted) return;
     const status = err instanceof ApiError ? err.status : 502;
     if (!res.headersSent) return res.status(status).json({ error: err?.message || 'AI request failed.' });
   }
@@ -1423,6 +2242,8 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
     '{"reply": "your main markdown answer", "reasoningSteps": [{"step": "short step name", "detail": "one or two sentences"}], "pearl": "one-line high-yield board pearl or empty string", "citations": ["textbook / guideline citations"], "suggestedFollowups": ["2-3 probing follow-up questions the resident could ask next"]}',
     '- reasoningSteps: 2-5 steps when the answer involves reasoning; may be empty for simple facts.',
     '- "reply" must contain the complete answer itself, not a summary of the other fields.',
+    '- Start "reply" with one bold line giving the direct answer, for example "**Answer: C - voriconazole.**", then the explanation. A learner revising in a hurry should get the answer in the first line.',
+    '- Each citation must name the book with its edition and the chapter or guideline section, for example "Harrison\'s Principles of Internal Medicine, 21st Ed, Ch. 142 (Invasive aspergillosis)". Cite only sources you are confident exist; leave the list empty rather than guess a chapter.',
     // The reply is rendered as markdown. Without this the model often returns one unbroken
     // block of prose, which reads as a dense wall of text in the chat bubble.
     '- Format "reply" for readability: separate distinct topics or stages into their own paragraphs using \\n\\n, and use a short markdown heading or a "- " bullet list where the content is genuinely a list (e.g. investigations, differentials, management steps). Do not return one unbroken paragraph.',
@@ -1444,11 +2265,22 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
 
   const messages: OAuthChatMessage[] = [...history, { role: 'user', content: message }];
 
+  // Evidence for this question: a drug label and PubMed abstracts, fetched before the model answers.
+  // The model is told to rely on them where they apply and to cite them by title.
+  const evidence = await literatureSources(message.slice(0, 200), typeof body.subject === 'string' ? body.subject : '').catch(() => []);
+  const groundedSystem = evidence.length
+    ? [
+        system,
+        'Evidence retrieved for this question (use it where it applies, cite it by its title, and say when a point is from your own knowledge rather than these sources):',
+        ...evidence.map((s, i) => `[${i + 1}] ${s.title}\n${s.url}\n${String(s.text || '').slice(0, 1200)}`),
+      ].join('\n\n')
+    : system;
+
   try {
     const raw = await runCompletion({
       provider,
       model: typeof body.model === 'string' ? body.model : undefined,
-      system,
+      system: groundedSystem,
       messages,
       json: true,
       effort: typeof body.effort === 'string' ? body.effort : undefined,
@@ -1466,6 +2298,7 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
     }
 
     const result: any = { success: true, reply, modelUsed: body.model || DEFAULT_MODELS[provider] };
+    if (evidence.length) result.sources = evidence.map((s) => ({ title: s.title, url: s.url }));
 
     if (parsed && !Array.isArray(parsed)) {
       if (Array.isArray(parsed.reasoningSteps)) {
@@ -1544,8 +2377,9 @@ async function visionVerify(
     'Look ONLY at the pixels. Decide:',
     '1. Does this image actually depict that finding / condition / diagnosis?',
     '2. Is the modality consistent (an ECG is not a photo; a chest X-ray is not a histology slide)?',
-    'Set pass=true ONLY if you can actually see the claimed finding in THIS image. If the image is unrelated, a random photo, a chart, text, a different body part, or you are unsure, set pass=false.',
-    'Answer with ONLY this JSON object and nothing else: {"pass": true, "reason": "one short sentence"}',
+    'First say, in "shows", what this image specifically shows (the exact condition or finding if you can tell, for example "bovine spongiform encephalopathy, brain histology" or "adrenoleukodystrophy MRI").',
+    'Then set pass=true ONLY if what it shows is the SAME specific condition or finding as the claim. A picture of a different disease in the same modality (a brain slide for a kidney disease, an MRI of another white-matter disease) is pass=false. A picture that is only "consistent with" the claim, or where you cannot tell the specific condition from the pixels alone, is pass=false. If the image is unrelated, a chart, text or a different body part, pass=false.',
+    'Answer with ONLY this JSON object and nothing else: {"shows": "what the image shows", "pass": true, "reason": "one short sentence"}',
   ].join('\n');
   const payload = JSON.stringify({
     model: model_,
@@ -1843,6 +2677,8 @@ function qaComplete(provider: string, model: string): CompleteFn {
       system,
       messages,
       json,
+      // QA checks are short judgements on a finished question; thinking here made each review take minutes.
+      effort: 'min',
     });
   };
 }
@@ -1891,14 +2727,22 @@ app.post('/api/qa/review-batch', async (req: Request, res: Response) => {
   const provider = String(req.body?.provider || 'opencode');
   const model = String(req.body?.model || DEFAULT_MODELS[provider] || '');
   const complete = runLlm ? qaComplete(provider, model) : undefined;
-  const reviews: any[] = [];
-  for (const q of questions.slice(0, 200)) {
-    try {
-      reviews.push(await runQaPipeline(q, { complete, runLlm, bank: qaBank }));
-    } catch (err: any) {
-      reviews.push({ questionId: q?.id, error: err?.message || 'QA failed', status: 'REVIEWING' });
+  // Questions are reviewed three at a time; results keep the order they were sent in.
+  const list = questions.slice(0, 200);
+  const reviews: any[] = new Array(list.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < list.length) {
+      const i = next++;
+      const q = list[i];
+      try {
+        reviews[i] = await runQaPipeline(q, { complete, runLlm, bank: qaBank });
+      } catch (err: any) {
+        reviews[i] = { questionId: q?.id, error: err?.message || 'QA failed', status: 'REVIEWING' };
+      }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, list.length) }, worker));
   return res.json({ reviews });
 });
 
@@ -1924,7 +2768,8 @@ app.post('/api/qa/refine-batch', async (req: Request, res: Response) => {
 app.post('/api/web/research', async (req: Request, res: Response) => {
   const query = typeof req.body?.query === 'string' ? req.body.query : '';
   try {
-    const out = await webResearch(query);
+    const pageChars = Math.min(30000, Math.max(2500, Number(req.body?.pageChars) || 2500));
+    const out = await webResearch(query, pageChars);
     return res.json({ success: true, sources: out.sources, retrievedAt: out.retrievedAt });
   } catch (err: any) {
     return res.status(502).json({ error: err?.message || 'Web research failed.' });
@@ -2047,7 +2892,7 @@ app.get('/api/providers/status', (req: Request, res: Response) => {
   const customEndpoints = readCustomEndpoints();
   res.json({
     providers: [
-      ...(['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia'] as string[]).map((id) => ({
+      ...(['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia', 'vyce'] as string[]).map((id) => ({
         id,
         model: DEFAULT_MODELS[id],
         connected: isProviderConnected(id),
@@ -2083,7 +2928,13 @@ async function startServer() {
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      // HMR's websocket uses port 24678 by default, which another local copy can hold; the
+      // page then connects to the wrong server and logs errors. DISABLE_HMR turns it off, and
+      // HMR_PORT moves it.
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : process.env.HMR_PORT ? { port: Number(process.env.HMR_PORT) } : undefined,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

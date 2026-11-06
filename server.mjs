@@ -1,8 +1,9 @@
 // server.ts
 import express from "express";
-import path from "path";
-import os from "os";
-import fs from "fs";
+import path3 from "path";
+import os3 from "os";
+import fs3 from "fs";
+import { execFileSync } from "child_process";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
@@ -482,6 +483,78 @@ async function chat({ provider, model, system, messages, json, effort, search, s
   return text;
 }
 
+// server/books.mjs
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+var DATA_DIR = process.env.PULSE_DATA_DIR || path.join(os.homedir(), ".pulse-med");
+var LIBRARY_PATH = process.env.PULSE_LIBRARY_DB || path.join(DATA_DIR, "books", "pulse-library.db");
+var db = null;
+function library() {
+  if (db) return db;
+  if (!fs.existsSync(LIBRARY_PATH)) return null;
+  db = new DatabaseSync(LIBRARY_PATH, { readOnly: true });
+  return db;
+}
+var SUBJECT_MAP = [
+  [/forensic/i, ["Forensic Medicine"]],
+  [/pharmacolog/i, ["Pharmacology"]],
+  [/physiolog/i, ["Physiology"]],
+  [/biochem/i, ["Biochemistry"]],
+  [/patholog/i, ["Pathology"]],
+  [/microbiolog/i, ["Microbiology"]],
+  [/community|preventive|\bpsm\b/i, ["Community Medicine"]],
+  [/anatom/i, ["Anatomy"]],
+  [/general medicine|internal medicine/i, ["General Medicine"]],
+  [/surg/i, ["General Surgery"]],
+  [/obstet|gynae/i, ["Obstetrics & Gynaecology"]],
+  [/pediatric|paediatric/i, ["Pediatrics"]],
+  [/orthop/i, ["Orthopedics"]],
+  [/\bENT\b|oto-?rhino|otolaryng/i, ["ENT"]],
+  [/ophthalm/i, ["Ophthalmology"]],
+  [/dermatolog/i, ["Dermatology"]],
+  [/psychiatr/i, ["Psychiatry"]],
+  [/radio/i, ["Radiology"]]
+];
+function librarySubjects(subject) {
+  const s = String(subject || "");
+  const hit = SUBJECT_MAP.find(([re]) => re.test(s));
+  return hit ? hit[1] : [];
+}
+var STOP = /* @__PURE__ */ new Set(["with", "from", "that", "this", "have", "were", "their", "which", "also", "after", "before", "than", "such", "only", "other", "most", "some", "used", "will", "does", "into", "when", "while", "there", "these", "those", "about", "among", "through", "where", "being", "given", "shows", "patient", "patients", "should", "could", "would", "they", "them", "been", "make", "makes", "drug", "drugs"]);
+function searchLibrary(query, subject = "", limit = 2, excerptChars = 700) {
+  const database = library();
+  if (!database) return [];
+  const terms = [...new Set(String(query || "").toLowerCase().match(/[a-z][a-z-]{3,}/g) || [])].filter((t) => !STOP.has(t));
+  if (!terms.length) return [];
+  const subjects = librarySubjects(subject);
+  const subjectSql = subjects.length ? ` AND b.subject IN (${subjects.map(() => "?").join(",")})` : "";
+  const select = `SELECT b.id AS book_id, b.title AS title, p.page_no AS page_no, p.text AS text, bm25(pages_fts) AS rank
+    FROM pages_fts JOIN pages p ON p.id = pages_fts.rowid JOIN books b ON b.id = p.book_id
+    WHERE pages_fts MATCH ?${subjectSql} ORDER BY rank LIMIT ?`;
+  const attempts = [terms.map((t) => `"${t}"`).join(" AND ")];
+  if (terms.length > 1) attempts.push(terms.map((t) => `"${t}"`).join(" OR "));
+  let rows = [];
+  for (const match of attempts) {
+    rows = database.prepare(select).all(match, ...subjects, limit);
+    if (rows.length) break;
+  }
+  return rows.map((r) => {
+    const lower = String(r.text).toLowerCase();
+    const hits = terms.map((t) => lower.indexOf(t)).filter((i) => i >= 0);
+    const start = Math.max(0, (hits.length ? Math.min(...hits) : 0) - 150);
+    return {
+      title: `${r.title}, page ${r.page_no}`,
+      url: `book:${r.book_id}#page=${r.page_no}`,
+      text: String(r.text).slice(start, start + excerptChars)
+    };
+  });
+}
+function bookPassages(query, limit = 2, subject = "") {
+  return searchLibrary(query, subject, limit);
+}
+
 // server/web.mjs
 var UA = "Mozilla/5.0 (X11; Linux x86_64) PulseMed/0.2 (study tool)";
 var TRUSTED = /(nih\.gov|ncbi\.nlm|who\.int|cdc\.gov|nice\.org\.uk|medlineplus|mayoclinic|msdmanuals|statpearls|radiopaedia|cochrane|bmj\.com|thelancet|nejm|jamanetwork|icmr|mohfw|aiims)/i;
@@ -529,41 +602,283 @@ async function ddg(q) {
   }
   return out;
 }
-async function pubmed(q) {
-  const base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/";
-  const ids = (await (await get(`${base}esearch.fcgi?db=pubmed&retmode=json&retmax=3&sort=relevance&term=${encodeURIComponent(q)}`)).json()).esearchresult?.idlist ?? [];
-  if (!ids.length) return [];
-  const xml = await (await get(`${base}efetch.fcgi?db=pubmed&retmode=xml&id=${ids.join(",")}`)).text();
-  return [...xml.matchAll(/<PubmedArticle>([\s\S]*?)<\/PubmedArticle>/g)].map((m) => {
-    const a = m[1];
-    const pick = (re) => strip((a.match(re) || [])[1] || "");
-    const abs = [...a.matchAll(/<AbstractText([^>]*)>([\s\S]*?)<\/AbstractText>/g)].map((x) => {
-      const label = (x[1].match(/Label="([^"]+)"/) || [])[1];
-      return (label ? label + ": " : "") + strip(x[2]);
-    }).join(" ");
-    const id = pick(/<PMID[^>]*>(\d+)<\/PMID>/);
-    return { title: pick(/<ArticleTitle>([\s\S]*?)<\/ArticleTitle>/), url: `https://pubmed.ncbi.nlm.nih.gov/${id}/`, text: `${pick(/<Journal>[\s\S]*?<Title>([\s\S]*?)<\/Title>/)} ${pick(/<PubDate>[\s\S]*?<Year>(\d+)<\/Year>/)}. ${abs}`.slice(0, 2500) };
-  }).filter((s) => s.text.length > 40);
+var EUROPE_PMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search";
+async function europePmc(query, journals = []) {
+  const terms = String(query || "").replace(/["\\]/g, " ").trim().slice(0, 300);
+  if (!terms) return [];
+  const journalPart = journals.length ? `(${journals.map((j) => `JOURNAL:"${j}"`).join(" OR ")}) AND ` : "";
+  const url = `${EUROPE_PMC}?query=${encodeURIComponent(`${journalPart}(${terms}) AND HAS_ABSTRACT:y`)}&format=json&pageSize=3&resultType=core`;
+  const res = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(15e3) });
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => ({}));
+  return (data?.resultList?.result || []).filter((r) => r.abstractText).map((r) => ({
+    title: strip(r.title || "").slice(0, 300),
+    url: r.doi ? `https://doi.org/${r.doi}` : `https://europepmc.org/article/${r.source || "MED"}/${r.id}`,
+    text: `${r.journalTitle || ""} ${r.pubYear || ""}. ${strip(r.abstractText)}`.slice(0, 1500)
+  }));
 }
-async function pageText(url) {
+async function pageText(url, chars = 2500) {
   const r = await get(url);
   const type = r.headers.get("content-type") || "";
   if (!/text\/html|text\/plain|xml/.test(type)) throw new Error("not a web page");
-  return strip((await r.text()).slice(0, 15e5)).slice(0, 2500);
+  return strip((await r.text()).slice(0, 15e5)).slice(0, chars);
 }
-async function research(query) {
+async function research(query, pageChars = 2500) {
   const q = String(query || "").trim().slice(0, 300);
   if (!q) throw new Error("Nothing to search for.");
-  const [w, p] = await Promise.allSettled([ddg(q), pubmed(q)]);
+  const [w, p, label] = await Promise.allSettled([ddg(q), europePmc(q), openFdaByDrug(q)]);
   const web = (w.status === "fulfilled" ? w.value : []).sort((a, b) => Number(TRUSTED.test(b.url)) - Number(TRUSTED.test(a.url))).slice(0, 3);
-  const pm = p.status === "fulfilled" ? p.value : [];
-  const pages = await Promise.allSettled(web.map((x) => pageText(x.url)));
+  const papers = p.status === "fulfilled" ? p.value : [];
+  const pages = await Promise.allSettled(web.map((x) => pageText(x.url, pageChars)));
+  const books = bookPassages(q, 6).map((b) => ({ ...b, kind: "book" }));
+  const labels = label.status === "fulfilled" ? label.value.map((x) => ({ ...x, kind: "label" })) : [];
   const sources = [
+    ...labels,
+    ...books,
     ...web.map((x, i) => ({ title: x.title, url: x.url, text: (pages[i].status === "fulfilled" && pages[i].value.length > 200 ? pages[i].value : x.snippet) || x.snippet, kind: "web" })),
-    ...pm.map((x) => ({ ...x, kind: "pubmed" }))
+    ...papers.map((x) => ({ ...x, kind: "europepmc" }))
   ].filter((s) => s.text).map((s, i) => ({ n: i + 1, ...s }));
   if (!sources.length) throw new Error("No sources found (check your internet connection, or try different wording).");
   return { sources, retrievedAt: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10) };
+}
+var SUBJECT_JOURNALS = [
+  [/physiolog/i, ["Indian J Physiol Pharmacol"]],
+  [/biochem/i, ["Indian J Biochem Biophys"]],
+  [/patholog/i, ["Indian J Pathol Microbiol"]],
+  [/pharmacolog/i, ["Indian J Pharmacol"]],
+  [/microbiolog/i, ["Indian J Med Microbiol"]],
+  [/forensic/i, ["Indian J Forensic Med Toxicol"]],
+  [/community|preventive|\bpsm\b/i, ["Indian J Community Med"]],
+  [/general medicine|internal medicine/i, ["J Assoc Physicians India", "Indian J Med Res"]],
+  [/surg/i, ["Indian J Surg"]],
+  [/obstet|gynae/i, ["J Obstet Gynaecol India"]],
+  [/pediatric|paediatric/i, ["Indian Pediatr"]],
+  [/orthop/i, ["Indian J Orthop"]],
+  [/\bENT\b|oto-?rhino|otolaryng/i, ["Indian J Otolaryngol Head Neck Surg"]],
+  [/ophthalm/i, ["Indian J Ophthalmol"]],
+  [/dermatolog/i, ["Indian J Dermatol Venereol Leprol"]],
+  [/psychiatr/i, ["Indian J Psychiatry"]],
+  [/anesth|anaesth/i, ["Indian J Anaesth"]],
+  [/radio/i, ["Indian J Radiol Imaging"]]
+];
+function journalsFor(subject) {
+  const s = String(subject || "");
+  const hit = SUBJECT_JOURNALS.find(([re]) => re.test(s));
+  return hit ? hit[1] : [];
+}
+async function openFdaLabel(query) {
+  const phrase = String(query || "").replace(/["\\]/g, " ").trim();
+  if (!phrase) return [];
+  const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(`indications_and_usage:"${phrase}"`)}&limit=1`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(15e3) });
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => ({}));
+  const hit = data?.results?.[0];
+  if (!hit) return [];
+  const name = hit.openfda?.generic_name?.[0] || hit.openfda?.brand_name?.[0] || "Drug label";
+  const text = [hit.indications_and_usage?.[0], hit.warnings?.[0] || hit.boxed_warning?.[0]].filter(Boolean).join(" ").replace(/\s+/g, " ");
+  if (!text) return [];
+  return [{ title: `${name} (FDA drug label)`, url: "https://open.fda.gov/apis/drug/label/", text: text.slice(0, 1200) }];
+}
+var NOT_A_DRUG = /* @__PURE__ */ new Set([
+  "adverse",
+  "effects",
+  "effect",
+  "side",
+  "drug",
+  "drugs",
+  "toxicity",
+  "treatment",
+  "features",
+  "feature",
+  "criteria",
+  "causes",
+  "cause",
+  "diagnosis",
+  "diagnostic",
+  "management",
+  "clinical",
+  "disease",
+  "syndrome",
+  "investigation",
+  "investigations",
+  "the",
+  "and",
+  "with",
+  "from",
+  "for",
+  "about",
+  "overview",
+  "complications",
+  "anatomy",
+  "physiology"
+]);
+async function openFdaByDrug(query) {
+  const words = [...new Set(String(query || "").toLowerCase().match(/[a-z][a-z-]{4,}/g) || [])].filter((w) => !NOT_A_DRUG.has(w));
+  for (const word of words.slice(0, 6)) {
+    const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(`openfda.generic_name:"${word}"`)}&limit=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15e3) }).catch(() => null);
+    if (!res || !res.ok) continue;
+    const hit = (await res.json().catch(() => ({})))?.results?.[0];
+    if (!hit) continue;
+    const name = hit.openfda?.generic_name?.[0] || word;
+    const text = [hit.adverse_reactions?.[0], hit.warnings_and_cautions?.[0] || hit.warnings?.[0]].filter(Boolean).join(" ").replace(/\s+/g, " ");
+    if (text) return [{ title: `${name} (FDA label: adverse reactions)`, url: "https://open.fda.gov/apis/drug/label/", text: text.slice(0, 2500) }];
+  }
+  const classWords = String(query || "").toLowerCase().match(/[a-z][a-z-]{2,}/g) || [];
+  const phrase = classWords.filter((w) => !NOT_A_DRUG.has(w)).map((w) => w.replace(/s$/, "")).join(" ").trim();
+  if (phrase) {
+    const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(`openfda.pharm_class_epc:"${phrase}"`)}&limit=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15e3) }).catch(() => null);
+    const hit = res && res.ok ? (await res.json().catch(() => ({})))?.results?.[0] : null;
+    if (hit) {
+      const name = hit.openfda?.generic_name?.[0] || phrase;
+      const text = [hit.adverse_reactions?.[0], hit.warnings_and_cautions?.[0] || hit.warnings?.[0]].filter(Boolean).join(" ").replace(/\s+/g, " ");
+      if (text) return [{ title: `${name} (FDA label, ${phrase} class: adverse reactions)`, url: "https://open.fda.gov/apis/drug/label/", text: text.slice(0, 2500) }];
+    }
+  }
+  return [];
+}
+function usesDrugLabels(subject) {
+  return !subject || /pharmacolog|medicine|therap|drug|anesth|anaesth|toxicolog/i.test(String(subject));
+}
+async function literatureSources(query, subject) {
+  const drugSubject = usesDrugLabels(subject);
+  const book = bookPassages(query, 2, subject);
+  const [label, subjectPapers] = await Promise.all([
+    drugSubject ? openFdaLabel(query).catch(() => []) : Promise.resolve([]),
+    europePmc(query, journalsFor(subject)).catch(() => [])
+  ]);
+  let papers = subjectPapers;
+  if (subjectPapers.length < 2) {
+    const wider = await europePmc(query, []).catch(() => []);
+    const seen = new Set(subjectPapers.map((p) => p.title));
+    papers = [...subjectPapers, ...wider.filter((p) => !seen.has(p.title))];
+  }
+  return [...book, ...label, ...papers].slice(0, 4);
+}
+var SOURCE_REGISTRY = [
+  { id: "europepmc", name: "Europe PMC abstracts (subject Indian journals)", licence: "Abstracts free; full text varies by article", fetch: "Europe PMC REST API", status: "live" },
+  { id: "openfda", name: "openFDA drug labels", licence: "US government data (openFDA terms)", fetch: "api.fda.gov", status: "live" },
+  { id: "library", name: "Your textbook library (pulse-library.db, 37 books)", licence: "Books the user owns; excerpts only", fetch: "local SQLite full-text index", status: "live" },
+  { id: "bookshelf", name: "NCBI Bookshelf (StatPearls and open textbooks)", licence: "Varies per book; StatPearls is free to read", fetch: "NCBI web pages", status: "blocked: NCBI shows a bot check instead of chapter text" },
+  { id: "reference-pages", name: "Reference websites (TeachMeAnatomy, CV Physiology, LibreTexts, WebPath, DermNet, EyeWiki, NHSRC treatment guidelines and others)", licence: "Varies per site; check before quoting", fetch: "page text only; no search yet", status: "reference: readable pages, not searched per question" }
+];
+
+// server/pyqFrequency.mjs
+import fs2 from "fs";
+import os2 from "os";
+import path2 from "path";
+var DATASET_DIRS = [
+  process.env.PYQ_DATASET_DIR,
+  path2.join(os2.homedir(), "OneDrive", "Desktop", "pyq-dataset"),
+  path2.join(os2.homedir(), "Desktop", "pyq-dataset")
+].filter(Boolean);
+var EXAM_LABEL = { INI_CET: "INI-CET", NEET_PG: "NEET" };
+var STOP2 = /* @__PURE__ */ new Set([
+  "drugs",
+  "drug",
+  "classes",
+  "class",
+  "effects",
+  "effect",
+  "adverse",
+  "monitoring",
+  "mechanism",
+  "mechanisms",
+  "therapy",
+  "treatment",
+  "management",
+  "clinical",
+  "features",
+  "diagnosis",
+  "investigation",
+  "investigations",
+  "complications",
+  "pharmacology",
+  "pharmacokinetics",
+  "resistance",
+  "general",
+  "introduction",
+  "overview",
+  "other",
+  "others",
+  "agents",
+  "agent",
+  "with",
+  "from",
+  "their",
+  "uses",
+  "use",
+  "spectrum",
+  "activity",
+  "prophylaxis",
+  "stewardship",
+  "empirical",
+  "first",
+  "second",
+  "third",
+  "fourth",
+  "fifth",
+  "generation",
+  "generations",
+  "types",
+  "type",
+  "group",
+  "groups"
+]);
+var cache = null;
+function loadBundle() {
+  if (cache) return cache;
+  cache = { exams: {} };
+  for (const dir of DATASET_DIRS) {
+    const file = path2.join(dir, "pyq_dataset.json");
+    if (!fs2.existsSync(file)) continue;
+    try {
+      const data = JSON.parse(fs2.readFileSync(file, "utf8"));
+      for (const q of data.questions || []) {
+        const label = String(q.exam || "");
+        const text = `${q.question || ""} ${q.explanation || ""}`.toLowerCase();
+        (cache.exams[label] ||= []).push(text);
+      }
+      cache.source = file;
+      break;
+    } catch {
+    }
+  }
+  return cache;
+}
+function namesOf(subtopic) {
+  const text = String(subtopic || "").toLowerCase().replace(/[()\[\]\/&]/g, ",").replace(/\band\b/g, ",");
+  const words = text.split(/[,:;]+/).flatMap((part) => part.split(/\s+/));
+  const names = /* @__PURE__ */ new Set();
+  for (const raw of words) {
+    const w = raw.replace(/[^a-z-]/g, "").replace(/^-+|-+$/g, "");
+    if (w.length >= 5 && !STOP2.has(w)) names.add(w);
+  }
+  return [...names];
+}
+function pyqCount(subtopic, exam) {
+  const label = EXAM_LABEL[exam];
+  if (!label) return null;
+  const texts = loadBundle().exams[label];
+  if (!texts) return null;
+  const names = namesOf(subtopic);
+  if (!names.length) return null;
+  let n = 0;
+  for (const t of texts) if (names.some((name) => t.includes(name))) n += 1;
+  return n;
+}
+function pyqWeights(subtopics, exam) {
+  const out = {};
+  for (const s of subtopics) {
+    const n = pyqCount(s, exam);
+    out[s] = n == null ? 1 : Math.max(1, n);
+  }
+  return out;
+}
+function pyqSource() {
+  return loadBundle().source || null;
 }
 
 // server/images.mjs
@@ -574,9 +889,32 @@ import { homedir as homedir2 } from "node:os";
 var DATA_ROOT2 = process.env.PULSE_DATA_DIR || join2(homedir2(), ".pulse-med");
 var CACHE_DIR = join2(DATA_ROOT2, "image-cache");
 var OPENI = "https://openi.nlm.nih.gov";
-var UA2 = "PulseMed-Education/1.0 (offline exam study app)";
+var UA2 = "PulseMed-Education/1.0 (exam study app; https://github.com/rrrockstarforever-cell/Abhijeet-Sharma)";
 var SEARCH_TTL_MS = 30 * 60 * 1e3;
 var searchCache = /* @__PURE__ */ new Map();
+var DISK_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
+var EMPTY_TTL_MS = 10 * 60 * 1e3;
+var DISK_FILE = join2(CACHE_DIR, "search-results.json");
+var diskCache = null;
+function diskGet(key) {
+  try {
+    if (!diskCache) diskCache = existsSync2(DISK_FILE) ? JSON.parse(readFileSync2(DISK_FILE, "utf8")) : {};
+    const hit = diskCache[key];
+    return hit && Date.now() - hit.at < DISK_TTL_MS ? hit.results : null;
+  } catch {
+    diskCache = {};
+    return null;
+  }
+}
+function diskSet(key, results) {
+  try {
+    if (!diskCache) diskCache = {};
+    diskCache[key] = { at: Date.now(), results };
+    mkdirSync2(CACHE_DIR, { recursive: true });
+    writeFileSync2(DISK_FILE, JSON.stringify(diskCache));
+  } catch {
+  }
+}
 var stripHtml = (value) => String(value ?? "").replace(/<[^>]*>/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\s+/g, " ").trim();
 function licenceOf(entry) {
   const cc = String(entry.ccLicense || "").toLowerCase();
@@ -617,22 +955,82 @@ function normalise(entry) {
     thumbUrl: entry.imgGrid150 ? `${OPENI}${entry.imgGrid150}` : `${OPENI}${large}`
   };
 }
-async function searchImages(query, { limit = 6 } = {}) {
+var WIKI_CONCURRENCY = 2;
+var WIKI_GAP_MS = 250;
+var wikiActive = 0;
+var wikiLastStart = 0;
+var wikiWaiting = [];
+async function wikiFetch(url, init = {}) {
+  if (wikiActive >= WIKI_CONCURRENCY) await new Promise((resolve) => wikiWaiting.push(resolve));
+  wikiActive += 1;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const wait = wikiLastStart + WIKI_GAP_MS - Date.now();
+      wikiLastStart = Math.max(Date.now(), wikiLastStart) + (wait > 0 ? wait : 0);
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      const res = await fetch(url, init);
+      if ((res.status === 429 || res.status === 503) && attempt < 3) {
+        const retryAfter = Number(res.headers.get("retry-after"));
+        await new Promise((resolve) => setTimeout(resolve, Math.min(8e3, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1e3 : 1200 * (attempt + 1))));
+        continue;
+      }
+      return res;
+    }
+  } finally {
+    wikiActive -= 1;
+    wikiWaiting.shift()?.();
+  }
+}
+var MODALITY_WORDS = {
+  ecg: ["ecg", "ekg", "electrocardiogram", "electrocardiograph"],
+  "x-ray": ["x-ray", "xray", "radiograph"],
+  xray: ["x-ray", "xray", "radiograph"],
+  histology: ["histolog", "biopsy", "micrograph", "histopatholog"],
+  fundus: ["fundus", "fundal", "retina"]
+};
+var FILLER_WORDS = /* @__PURE__ */ new Set(["photo", "photograph", "clinical", "image", "picture", "showing", "with", "from", "patient", "typical", "findings", "finding", "changes", "change", "disease", "lesion", "lesions"]);
+function relevanceOf(item, query) {
+  const hay = `${item?.title ?? ""} ${item?.caption ?? ""}`.toLowerCase();
+  const words = String(query || "").toLowerCase().split(/[^a-z0-9-]+/).filter((w) => (w.length > 3 || ["ecg", "ekg", "ct", "mri"].includes(w)) && !FILLER_WORDS.has(w));
+  if (!words.length) return 1;
+  let hits = 0;
+  for (const w of words) {
+    const forms = MODALITY_WORDS[w] ?? [w.length > 5 ? w.slice(0, w.length - 2) : w];
+    if (forms.some((f) => f.length <= 3 ? new RegExp(`\\b${f}\\b`).test(hay) : hay.includes(f))) hits += 1;
+  }
+  return hits / words.length;
+}
+async function searchImages(query, { limit = 10, noExtra = false } = {}) {
   const q = String(query || "").replace(/\s+/g, " ").trim();
   if (!q) return { results: [], errors: [] };
-  const cacheKey = `${q.toLowerCase()}::${limit}`;
+  const cacheKey = `r3::${q.toLowerCase()}::${limit}`;
   const hit = searchCache.get(cacheKey);
-  if (hit && Date.now() - hit.at < SEARCH_TTL_MS) {
+  if (hit && Date.now() - hit.at < (hit.results.length ? SEARCH_TTL_MS : EMPTY_TTL_MS)) {
     return { results: hit.results, errors: [], cached: true };
+  }
+  const onDisk = noExtra ? null : diskGet(cacheKey);
+  if (onDisk?.length) {
+    searchCache.set(cacheKey, { at: Date.now(), results: onDisk });
+    return { results: onDisk, errors: [], cached: true };
   }
   const errors = [];
   let commons = [];
   let openi = [];
-  const commonsP = searchCommons(q, { limit: Math.ceil(limit / 2) }).then((rows) => {
-    commons = rows;
+  let article = [];
+  let category = [];
+  const core = q.split(/\s+/).filter((w) => !/^(histology|histological|histopathology|biopsy|micrograph|ecg|ekg|x-ray|xray|radiograph|ct|mri|ultrasound|smear|fundus|photo|photograph|clinical|image|picture)$/i.test(w)).join(" ") || q;
+  const articleP = (noExtra ? Promise.resolve([]) : searchWikipediaArticle(core, { limit })).then((rows) => {
+    article = rows;
     return rows;
   }).catch((err) => {
-    errors.push(`Wikimedia Commons: ${err?.message || err}`);
+    errors.push(`Wikipedia: ${err?.message || err}`);
+    return [];
+  });
+  const categoryP = (noExtra ? Promise.resolve([]) : searchCommonsCategory(core, { limit })).then((rows) => {
+    category = rows;
+    return rows;
+  }).catch((err) => {
+    errors.push(`Commons category: ${err?.message || err}`);
     return [];
   });
   const openiP = searchOpenI(q, { limit }).then((rows) => {
@@ -642,15 +1040,39 @@ async function searchImages(query, { limit = 6 } = {}) {
     errors.push(`Open-i: ${err?.message || err}`);
     return [];
   });
-  await Promise.race([
-    Promise.all([commonsP, openiP]),
-    new Promise((resolve) => setTimeout(resolve, 1e4))
-  ]);
+  const within = (p, ms) => Promise.race([p, new Promise((resolve) => setTimeout(resolve, ms))]);
+  await within(Promise.all([articleP, categoryP]), 6e3);
+  const relevantStage1 = [...category, ...article].filter((item) => relevanceOf(item, q) >= 0.6).length;
+  if (relevantStage1 < 3) {
+    const describing = /^(microscopy|microscopic|findings?|appearance|features?|showing|typical|changes?|picture|image|photo|photograph|clinical|lesions?|of|in|the|and|with|a|an)$/i;
+    const plain = q.split(/\s+/).filter((w) => !describing.test(w));
+    const phrasings = [...new Set([q, core, plain.join(" "), plain.slice(0, 3).join(" "), plain.slice(0, 2).join(" ")].filter((p) => p && p.split(/\s+/).length >= 1))];
+    const commonsP = (async () => {
+      for (const p of phrasings) {
+        const rows = await searchCommons(p, { limit: Math.ceil(limit / 2) });
+        if (rows.length) return rows;
+      }
+      return [];
+    })().then((rows) => {
+      commons = rows;
+      return rows;
+    }).catch((err) => {
+      errors.push(`Wikimedia Commons: ${err?.message || err}`);
+      return [];
+    });
+    await within(commonsP, 9e3);
+  }
+  await within(openiP, 1500);
   const seen = /* @__PURE__ */ new Set();
   const merged = [];
-  for (const item of [...commons, ...openi]) {
+  const pool = [];
+  for (const item of [...category, ...article, ...commons, ...openi]) {
     if (seen.has(item.imageUrl)) continue;
     seen.add(item.imageUrl);
+    pool.push({ item, score: relevanceOf(item, q), at: pool.length });
+  }
+  pool.sort((a, b) => Math.round(b.score * 10) - Math.round(a.score * 10) || a.at - b.at);
+  for (const { item } of pool) {
     merged.push(item);
     if (merged.length >= limit) break;
   }
@@ -662,7 +1084,8 @@ async function searchImages(query, { limit = 6 } = {}) {
     top: merged[0] ? `${merged[0].provider}: ${merged[0].title}`.slice(0, 160) : null,
     errors
   });
-  if (merged.length) searchCache.set(cacheKey, { at: Date.now(), results: merged });
+  searchCache.set(cacheKey, { at: Date.now(), results: merged });
+  if (merged.length && !noExtra) diskSet(cacheKey, merged);
   return { results: merged, errors };
 }
 async function searchCommons(q, { limit = 3 } = {}) {
@@ -677,13 +1100,15 @@ async function searchCommons(q, { limit = 3 } = {}) {
     iiprop: "url|extmetadata|size|mime",
     iiurlwidth: "1000"
   });
-  const res = await fetch(`https://commons.wikimedia.org/w/api.php?${params}`, {
+  const res = await wikiFetch(`https://commons.wikimedia.org/w/api.php?${params}`, {
     headers: { "User-Agent": UA2, Accept: "application/json" },
     signal: AbortSignal.timeout(15e3)
   });
   if (!res.ok) throw new Error(`Commons returned HTTP ${res.status}`);
   const body = await res.json().catch(() => ({}));
-  const pages = body?.query?.pages ? Object.values(body.query.pages) : [];
+  return mapCommonsPages(body?.query?.pages ? Object.values(body.query.pages) : [], limit, "Wikimedia Commons");
+}
+function mapCommonsPages(pages, limit, provider) {
   const out = [];
   for (const page of pages) {
     const info = page?.imageinfo?.[0];
@@ -697,7 +1122,7 @@ async function searchCommons(q, { limit = 3 } = {}) {
     if (!imageUrl) continue;
     out.push({
       id: createHash("sha1").update(imageUrl).digest("hex").slice(0, 16),
-      provider: "Wikimedia Commons",
+      provider,
       title: stripHtml(page.title.replace(/^File:/, "")).slice(0, 160),
       caption: stripHtml(meta.ImageDescription?.value).slice(0, 400),
       credit: stripHtml(meta.Artist?.value).slice(0, 160) || "Wikimedia Commons contributor",
@@ -712,6 +1137,28 @@ async function searchCommons(q, { limit = 3 } = {}) {
     if (out.length >= limit) break;
   }
   return out;
+}
+var IMAGEINFO = { prop: "imageinfo", iiprop: "url|extmetadata|size|mime", iiurlwidth: "1000" };
+async function searchWikipediaArticle(q, { limit = 6 } = {}) {
+  const find = new URLSearchParams({ action: "query", format: "json", list: "search", srsearch: q, srlimit: "1", srnamespace: "0" });
+  const hit = await wikiFetch(`https://en.wikipedia.org/w/api.php?${find}`, { headers: { "User-Agent": UA2, Accept: "application/json" }, signal: AbortSignal.timeout(12e3) });
+  if (!hit.ok) throw new Error(`Wikipedia returned HTTP ${hit.status}`);
+  const title = (await hit.json().catch(() => ({})))?.query?.search?.[0]?.title;
+  if (!title) return [];
+  const params = new URLSearchParams({ action: "query", format: "json", generator: "images", titles: title, gimlimit: "40", redirects: "1", ...IMAGEINFO });
+  const res = await wikiFetch(`https://en.wikipedia.org/w/api.php?${params}`, { headers: { "User-Agent": UA2, Accept: "application/json" }, signal: AbortSignal.timeout(15e3) });
+  if (!res.ok) throw new Error(`Wikipedia returned HTTP ${res.status}`);
+  const body = await res.json().catch(() => ({}));
+  return mapCommonsPages(body?.query?.pages ? Object.values(body.query.pages) : [], limit, "Wikipedia article");
+}
+async function searchCommonsCategory(q, { limit = 6 } = {}) {
+  const name = q.trim().replace(/\s+/g, " ");
+  const title = `Category:${name.charAt(0).toUpperCase()}${name.slice(1)}`;
+  const params = new URLSearchParams({ action: "query", format: "json", generator: "categorymembers", gcmtitle: title, gcmtype: "file", gcmlimit: "30", ...IMAGEINFO });
+  const res = await wikiFetch(`https://commons.wikimedia.org/w/api.php?${params}`, { headers: { "User-Agent": UA2, Accept: "application/json" }, signal: AbortSignal.timeout(12e3) });
+  if (!res.ok) throw new Error(`Commons category returned HTTP ${res.status}`);
+  const body = await res.json().catch(() => ({}));
+  return mapCommonsPages(body?.query?.pages ? Object.values(body.query.pages) : [], limit, "Wikimedia Commons");
 }
 async function searchOpenI(q, { limit = 6 } = {}) {
   const params = new URLSearchParams({ query: q, m: "1", n: String(Math.max(12, limit * 4)) });
@@ -783,6 +1230,525 @@ var REFERENCE_SOURCES = [
   { name: "Life in the Fast Lane", url: "https://litfl.com/library/", note: "ECGs and emergency cases. Copyright \u2014 reference only." },
   { name: "CDC PHIL", url: "https://wwwn.cdc.gov/phil/", note: "Public-health images; many are public domain, surfaced here via Wikimedia Commons." }
 ];
+
+// server/imageBank.mjs
+import { mkdirSync as mkdirSync3, existsSync as existsSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join3 } from "node:path";
+import { homedir as homedir3 } from "node:os";
+var DATA_ROOT3 = process.env.PULSE_DATA_DIR || join3(homedir3(), ".pulse-med");
+var BANK_DIR = join3(DATA_ROOT3, "image-bank");
+var BANK_FILE = join3(BANK_DIR, "bank.json");
+var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+var SEED_TOPICS = [
+  // ---- Radiology ----
+  { subject: "Radiology", modality: "X-ray", ground_truth: "lobar pneumonia", query: "lobar pneumonia chest x-ray" },
+  { subject: "Radiology", modality: "X-ray", ground_truth: "pneumothorax", query: "pneumothorax chest x-ray" },
+  { subject: "Radiology", modality: "X-ray", ground_truth: "pulmonary tuberculosis with cavity", query: "cavitary pulmonary tuberculosis x-ray" },
+  { subject: "Radiology", modality: "X-ray", ground_truth: "femoral neck fracture", query: "femoral neck fracture x-ray" },
+  { subject: "Radiology", modality: "X-ray", ground_truth: "rib fracture", query: "rib fracture chest x-ray" },
+  { subject: "Radiology", modality: "CT", ground_truth: "cerebral haemorrhage", query: "intracerebral haemorrhage CT" },
+  { subject: "Radiology", modality: "CT", ground_truth: "pancreatitis", query: "acute pancreatitis CT" },
+  { subject: "Radiology", modality: "CT", ground_truth: "hydronephrosis", query: "hydronephrosis CT" },
+  { subject: "Radiology", modality: "MRI", ground_truth: "meningioma", query: "meningioma MRI brain" },
+  { subject: "Radiology", modality: "MRI", ground_truth: "lumbar disc herniation", query: "lumbar disc herniation MRI" },
+  { subject: "Radiology", modality: "ultrasound", ground_truth: "acute cholecystitis with gallstones", query: "gallstones ultrasound" },
+  { subject: "Radiology", modality: "ultrasound", ground_truth: "hydatid liver cyst", query: "liver cyst ultrasound" },
+  // ---- Cardiology (ECG) ----
+  { subject: "Cardiology", modality: "ECG", ground_truth: "atrial fibrillation", query: "atrial fibrillation ECG" },
+  { subject: "Cardiology", modality: "ECG", ground_truth: "ventricular tachycardia", query: "ventricular tachycardia ECG" },
+  { subject: "Cardiology", modality: "ECG", ground_truth: "ST elevation myocardial infarction", query: "ST elevation myocardial infarction ECG" },
+  { subject: "Cardiology", modality: "ECG", ground_truth: "complete heart block", query: "complete heart block ECG" },
+  { subject: "Cardiology", modality: "ECG", ground_truth: "hyperkalaemia with peaked T waves", query: "hyperkalemia peaked T waves ECG" },
+  { subject: "Cardiology", modality: "ECG", ground_truth: "Wolff-Parkinson-White syndrome", query: "Wolff Parkinson White ECG" },
+  { subject: "Cardiology", modality: "X-ray", ground_truth: "cardiomegaly", query: "cardiomegaly chest x-ray" },
+  // ---- Dermatology ----
+  { subject: "Dermatology", modality: "clinical photo", ground_truth: "erythema multiforme", query: "erythema multiforme skin" },
+  { subject: "Dermatology", modality: "clinical photo", ground_truth: "psoriasis", query: "plaque psoriasis skin" },
+  { subject: "Dermatology", modality: "clinical photo", ground_truth: "basal cell carcinoma", query: "basal cell carcinoma skin" },
+  { subject: "Dermatology", modality: "clinical photo", ground_truth: "herpes zoster", query: "herpes zoster shingles skin" },
+  { subject: "Dermatology", modality: "clinical photo", ground_truth: "impetigo", query: "impetigo skin" },
+  { subject: "Dermatology", modality: "clinical photo", ground_truth: "pemphigus vulgaris", query: "pemphigus vulgaris skin" },
+  { subject: "Dermatology", modality: "clinical photo", ground_truth: "urticaria", query: "urticaria hives skin" },
+  // ---- Ophthalmology ----
+  { subject: "Ophthalmology", modality: "fundus", ground_truth: "papilloedema", query: "papilloedema fundus" },
+  { subject: "Ophthalmology", modality: "fundus", ground_truth: "diabetic retinopathy", query: "diabetic retinopathy fundus" },
+  { subject: "Ophthalmology", modality: "fundus", ground_truth: "central retinal artery occlusion with cherry-red spot", query: "central retinal artery occlusion fundus" },
+  { subject: "Ophthalmology", modality: "fundus", ground_truth: "retinitis pigmentosa", query: "retinitis pigmentosa fundus" },
+  { subject: "Ophthalmology", modality: "clinical photo", ground_truth: "cataract", query: "cataract eye" },
+  { subject: "Ophthalmology", modality: "clinical photo", ground_truth: "conjunctivitis", query: "bacterial conjunctivitis eye" },
+  // ---- Pathology / histology ----
+  { subject: "Pathology", modality: "histology", ground_truth: "membranous nephropathy", query: "membranous nephropathy histology" },
+  { subject: "Pathology", modality: "histology", ground_truth: "acute appendicitis", query: "acute appendicitis histology" },
+  { subject: "Pathology", modality: "histology", ground_truth: "squamous cell carcinoma", query: "squamous cell carcinoma histology" },
+  { subject: "Pathology", modality: "histology", ground_truth: "tuberculous granuloma with caseation", query: "tuberculous granuloma histology" },
+  { subject: "Pathology", modality: "histology", ground_truth: "chronic gastritis with H. pylori", query: "Helicobacter pylori gastritis histology" },
+  { subject: "Pathology", modality: "histology", ground_truth: "cirrhosis", query: "liver cirrhosis histology" },
+  // ---- Orthopaedics ----
+  { subject: "Orthopaedics", modality: "X-ray", ground_truth: "Colles fracture", query: "Colles fracture x-ray wrist" },
+  { subject: "Orthopaedics", modality: "X-ray", ground_truth: "tibial shaft fracture", query: "tibia fracture x-ray" },
+  { subject: "Orthopaedics", modality: "X-ray", ground_truth: "osteoarthritis of the knee", query: "knee osteoarthritis x-ray" },
+  { subject: "Orthopaedics", modality: "X-ray", ground_truth: "shoulder dislocation", query: "anterior shoulder dislocation x-ray" },
+  { subject: "Orthopaedics", modality: "MRI", ground_truth: "anterior cruciate ligament tear", query: "anterior cruciate ligament tear MRI" }
+];
+function readBankFile() {
+  try {
+    if (!existsSync3(BANK_FILE)) return { entries: [], builtAt: null };
+    const raw = readFileSync3(BANK_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const entries = Array.isArray(parsed?.entries) ? parsed.entries : Array.isArray(parsed) ? parsed : [];
+    return { entries: entries.filter((e) => e && typeof e.image_id === "string"), builtAt: parsed?.builtAt ?? null };
+  } catch {
+    return { entries: [], builtAt: null };
+  }
+}
+function writeBankFile(entries, builtAt) {
+  mkdirSync3(BANK_DIR, { recursive: true });
+  writeFileSync3(BANK_FILE, JSON.stringify({ builtAt, entries }, null, 2), "utf8");
+}
+var REJECT_FILE = join3(BANK_DIR, "rejected.json");
+function loadRejected() {
+  try {
+    if (!existsSync3(REJECT_FILE)) return /* @__PURE__ */ new Map();
+    const parsed = JSON.parse(readFileSync3(REJECT_FILE, "utf8"));
+    const rows = Array.isArray(parsed?.entries) ? parsed.entries : [];
+    return new Map(rows.filter((r) => r && typeof r.image_id === "string").map((r) => [r.image_id, r]));
+  } catch {
+    return /* @__PURE__ */ new Map();
+  }
+}
+function rejectImage(image_id, ground_truth, reason) {
+  if (!image_id) return;
+  try {
+    const all = loadRejected();
+    all.set(image_id, {
+      image_id,
+      ground_truth: ground_truth || "",
+      reason: String(reason || "").slice(0, 200),
+      rejectedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    mkdirSync3(BANK_DIR, { recursive: true });
+    writeFileSync3(REJECT_FILE, JSON.stringify({ entries: [...all.values()] }, null, 2), "utf8");
+  } catch {
+  }
+}
+function pruneRejected() {
+  const rejected = loadRejected();
+  if (rejected.size === 0) return 0;
+  const current = readBankFile();
+  const kept = current.entries.filter((e) => !rejected.has(e.image_id));
+  const removed = current.entries.length - kept.length;
+  if (removed > 0) {
+    writeBankFile(kept, current.builtAt);
+    try {
+      writeFileSync3(REJECT_FILE, JSON.stringify({ entries: [...rejected.values()].slice(-500) }, null, 2), "utf8");
+    } catch {
+    }
+  }
+  return removed;
+}
+function loadImageBank() {
+  return readBankFile().entries;
+}
+function guessBodyPart(text) {
+  const t = String(text || "").toLowerCase();
+  const map = [
+    [/chest|lung|pulmonary|thorax|pneumo/, "chest"],
+    [/brain|cerebr|intracran|mening|head/, "brain"],
+    [/knee|femur|tibia|hip|shoulder|wrist|bone|fracture|dislocat|osteo/, "musculoskeletal"],
+    [/kidney|renal|nephro|urinary|hydronephro/, "kidney"],
+    [/liver|hepato|biliary|gallbladder|gallstone|cholecyst/, "hepatobiliary"],
+    [/skin|derm|cutaneous|rash|lesion/, "skin"],
+    [/eye|retina|fundus|optic|cornea|conjunctiva|cataract/, "eye"],
+    [/heart|cardiac|myocard|ecg|arrhythm/, "heart"],
+    [/stomach|gastr|colon|bowel|append|intestin/, "gastrointestinal"],
+    [/pancrea/, "pancreas"]
+  ];
+  for (const [re, part] of map) if (re.test(t)) return part;
+  return "";
+}
+async function buildImageBank(options = {}) {
+  const {
+    seeds = SEED_TOPICS,
+    limitPerSeed = 3,
+    onProgress,
+    throttleMs = 1200,
+    maxAttempts = 4,
+    // Optional async (entry) => boolean. When supplied, an entry is only added if it
+    // RESOLVES TRUE — used to confirm with vision that the image really shows the seed's
+    // claimed finding before it enters the bank. Keyword search alone returns merely
+    // "related" images (a Colles-fracture seed once matched a pseudarthrosis film), so
+    // pre-verifying at harvest time is what keeps the bank trustworthy.
+    verify
+  } = options;
+  const pruned = pruneRejected();
+  const existing = readBankFile();
+  const byId = new Map(existing.entries.map((e) => [e.image_id, e]));
+  const errors = [];
+  if (pruned > 0) errors.push(`Pre-run prune: removed ${pruned} previously-rejected image(s).`);
+  let added = 0;
+  let rejected = 0;
+  for (let i = 0; i < seeds.length; i++) {
+    const seed = seeds[i];
+    let attempt = 0;
+    let done = false;
+    while (!done && attempt < maxAttempts) {
+      attempt += 1;
+      try {
+        const { results, errors: searchErrors } = await searchImages(seed.query, { limit: limitPerSeed });
+        const throttled = (searchErrors || []).some((e) => /429|rate|too many/i.test(e));
+        for (const row of results || []) {
+          if (!row?.id || !row?.imageUrl) continue;
+          if (byId.has(row.id)) continue;
+          const entry = {
+            image_id: row.id,
+            source: row.provider || "Unknown",
+            sourceUrl: row.articleUrl || row.licenceUrl || "",
+            imageUrl: row.imageUrl,
+            previewUrl: row.proxyUrl || "",
+            licence: row.licence || "",
+            licenceUrl: row.licenceUrl || "",
+            attribution: row.credit || "",
+            ground_truth: seed.ground_truth,
+            modality: seed.modality,
+            subject: seed.subject,
+            body_part: guessBodyPart(`${seed.ground_truth} ${seed.query}`),
+            addedAt: (/* @__PURE__ */ new Date()).toISOString()
+          };
+          if (typeof verify === "function") {
+            let ok = false;
+            try {
+              ok = await verify(entry) === true;
+            } catch {
+              ok = false;
+            }
+            if (!ok) {
+              rejected += 1;
+              continue;
+            }
+            entry.verifiedAt = (/* @__PURE__ */ new Date()).toISOString();
+          }
+          byId.set(row.id, entry);
+          added += 1;
+        }
+        if (throttled && !(results || []).length && attempt < maxAttempts) {
+          await sleep(throttleMs * 2 ** attempt);
+          continue;
+        }
+        if (throttled) for (const err of searchErrors) errors.push(`${seed.query}: ${err}`);
+        done = true;
+      } catch (err) {
+        const msg = err?.message || String(err);
+        if (/429|rate|too many/i.test(msg) && attempt < maxAttempts) {
+          await sleep(throttleMs * 2 ** attempt);
+          continue;
+        }
+        errors.push(`${seed.query}: ${msg}`);
+        done = true;
+      }
+    }
+    if (i < seeds.length - 1) await sleep(throttleMs);
+    if (typeof onProgress === "function") onProgress(i + 1, seeds.length, added);
+  }
+  const entries = [...byId.values()];
+  const builtAt = (/* @__PURE__ */ new Date()).toISOString();
+  writeBankFile(entries, builtAt);
+  const bySubject = {};
+  for (const e of entries) bySubject[e.subject] = (bySubject[e.subject] || 0) + 1;
+  return { total: entries.length, added, rejected, bySubject, errors };
+}
+function queryImageBank({ subject, modality, limit = 6, includeRejected = false } = {}) {
+  const rejected = includeRejected ? /* @__PURE__ */ new Map() : loadRejected();
+  let rows = loadImageBank().filter((e) => !rejected.has(e.image_id));
+  if (subject) rows = rows.filter((e) => e.subject === subject);
+  if (modality) {
+    const m = String(modality).toLowerCase();
+    rows = rows.filter((e) => String(e.modality || "").toLowerCase().includes(m));
+  }
+  for (let i = rows.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [rows[i], rows[j]] = [rows[j], rows[i]];
+  }
+  return rows.slice(0, Math.max(0, limit));
+}
+function searchBankByText(query, { subject, limit = 4 } = {}) {
+  const tokens2 = String(query || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length > 2 && !STOPWORDS.has(t));
+  if (!tokens2.length) return [];
+  const rejected = loadRejected();
+  const rows = loadImageBank().filter((e) => !rejected.has(e.image_id));
+  const wantedSubject = subject ? String(subject).toLowerCase() : "";
+  const scored = rows.map((e) => {
+    const hay = `${e.ground_truth || ""} ${e.body_part || ""} ${e.subject || ""} ${e.modality || ""}`.toLowerCase();
+    let score = 0;
+    for (const t of tokens2) if (hay.includes(t)) score += 1;
+    if (wantedSubject && String(e.subject || "").toLowerCase() === wantedSubject) score += 0.5;
+    return { e, score };
+  });
+  return scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).slice(0, Math.max(0, limit)).map((s) => s.e);
+}
+var STOPWORDS = /* @__PURE__ */ new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "this",
+  "that",
+  "image",
+  "picture",
+  "photo",
+  "show",
+  "shows",
+  "showing",
+  "helpful",
+  "would",
+  "clear",
+  "clearer",
+  "need",
+  "needs",
+  "see",
+  "view",
+  "best",
+  "classic",
+  "typical",
+  "case",
+  "patient",
+  "clinical",
+  "illustration",
+  "diagram",
+  "figure"
+]);
+function getBankImage(imageId) {
+  const id = String(imageId || "");
+  if (!id) return null;
+  return loadImageBank().find((e) => e.image_id === id) || null;
+}
+function bankStats() {
+  const { entries, builtAt } = readBankFile();
+  const bySubject = {};
+  const byModality = {};
+  for (const e of entries) {
+    bySubject[e.subject] = (bySubject[e.subject] || 0) + 1;
+    byModality[e.modality] = (byModality[e.modality] || 0) + 1;
+  }
+  return { total: entries.length, bySubject, byModality, builtAt };
+}
+
+// server/visionQuestion.mjs
+var DEFAULT_VISION_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b";
+var NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+var EXAM_LABEL2 = {
+  NEET_PG: "NEET-PG (NBEMS, India)",
+  INI_CET: "INI-CET (AIIMS, India)",
+  AMC_CAT: "AMC CAT (Australia)"
+};
+var SYSTEM = [
+  "You are a senior item writer for Indian and Australian postgraduate medical entrance exams (NEET-PG, INI-CET, AMC CAT).",
+  "You are shown a REAL clinical image. The image is the primary source of truth.",
+  "Write questions that DISCRIMINATE between well-prepared candidates: exactly one defensible best answer, and distractors that are real, plausible close mimics of the same category \u2014 never absurd, never obviously wrong.",
+  "Always respond with ONLY a single valid JSON object (no markdown fences, no commentary)."
+].join(" ");
+var INSTRUCTION_TEMPLATE = (o) => [
+  `You are shown a real clinical image (modality: ${o.modality || "clinical image"}; subject: ${o.subject || "medicine"}).`,
+  `The authoritative diagnosis/finding this image shows is: "${o.groundTruth}". You MUST keep this exact diagnosis \u2014 never change, soften or replace it.`,
+  `Exam: ${o.examLabel}. Write ONE exam-standard MCQ whose correct answer can be reached ONLY by correctly interpreting THIS image.`,
+  "Rules:",
+  "- The stem must describe the relevant clinical context WITHOUT giving the answer away, and must NOT name the diagnosis directly.",
+  "- Exactly one option must be the correct diagnosis/finding; every other option must be a plausible close mimic of the SAME category (no obviously wrong fillers).",
+  '- The explanation MUST explicitly reference the visual features in THIS image that point to the answer (e.g. "the radiograph shows a dense right lower zone opacity with air bronchograms...").',
+  `- Return exactly ${o.optionCount} options, keyed "A".."${"ABCDE"[o.optionCount - 1]}", with a single correct one.`,
+  '- If you cannot actually see the claimed finding in this image, DO NOT invent a question. Return exactly {"error":"image_mismatch"}.',
+  "Return ONLY this JSON object:",
+  `{"stem":"...","questionText":"...","options":{${Array.from({ length: o.optionCount }, (_, i) => `"${"ABCDE"[i]}":"..."`).join(",")}},"correctOption":"A","explanation":"...","boardPearl":"...","citations":["..."]}`
+].join("\n");
+function parseLooseJson(text) {
+  if (!text || typeof text !== "string") return null;
+  let t = text.trim();
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) t = fence[1].trim();
+  const start = t.search(/[[{]/);
+  if (start > 0) t = t.slice(start);
+  const end = Math.max(t.lastIndexOf("}"), t.lastIndexOf("]"));
+  if (end > -1) t = t.slice(0, end + 1);
+  try {
+    return JSON.parse(t);
+  } catch {
+  }
+  const first = t.indexOf("{");
+  if (first >= 0) {
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let i = first; i < t.length; i++) {
+      const c = t[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') {
+        inStr = true;
+        continue;
+      }
+      if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            return JSON.parse(t.slice(first, i + 1));
+          } catch {
+          }
+          break;
+        }
+      }
+    }
+  }
+  const patched = t.replace(/:\s*([A-Za-z][^,{}\[\]"]*?)(?=\s*[,}])/g, (_m, v) => `: ${JSON.stringify(v.trim())}`);
+  try {
+    return JSON.parse(patched);
+  } catch {
+    return null;
+  }
+}
+function contentToText(message) {
+  const content = message?.content;
+  if (typeof content === "string" && content.trim()) return content;
+  if (Array.isArray(content)) {
+    const joined = content.map((p) => typeof p === "string" ? p : p?.text || "").join("");
+    if (joined.trim()) return joined;
+  }
+  if (typeof message?.reasoning_content === "string") return message.reasoning_content;
+  return "";
+}
+async function generateQuestionFromImage(opts) {
+  const {
+    imageUrl,
+    groundTruth,
+    modality = "",
+    subject = "",
+    exam = "NEET_PG",
+    difficultyTier = "MEDIUM",
+    optionCount = 4,
+    apiKey,
+    model,
+    timeoutMs = Number(process.env.VISION_TIMEOUT_MS || 18e4)
+  } = opts || {};
+  if (!imageUrl) throw new Error("imageUrl is required.");
+  if (!groundTruth || !String(groundTruth).trim()) throw new Error("groundTruth is required.");
+  if (!apiKey) throw new Error("No vision provider connected \u2014 cannot write from image.");
+  const count = optionCount === 5 ? 5 : 4;
+  const { buffer, type } = await fetchImage(imageUrl);
+  if (!/^image\/(jpeg|png|webp)$/i.test(type)) {
+    throw new Error(`Unsupported image type (${type}) for vision generation.`);
+  }
+  const dataUrl = `data:${type};base64,${buffer.toString("base64")}`;
+  const instruction = INSTRUCTION_TEMPLATE({
+    groundTruth: String(groundTruth).slice(0, 300),
+    modality: String(modality || "").slice(0, 40),
+    subject: String(subject || "").slice(0, 60),
+    examLabel: EXAM_LABEL2[exam] || exam,
+    optionCount: count
+  });
+  const messages = [
+    { role: "system", content: SYSTEM },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: instruction },
+        { type: "image_url", image_url: { url: dataUrl } }
+      ]
+    }
+  ];
+  const callVision = async (maxTokens) => {
+    const payload = JSON.stringify({
+      model: model || DEFAULT_VISION_MODEL,
+      messages,
+      // The vision model card recommends temperature 0.6 / top_p 0.95 for images.
+      temperature: 0.6,
+      top_p: 0.95,
+      max_tokens: maxTokens,
+      // This is a reasoning model whose hidden trace is billed against max_tokens, which
+      // is exactly why a modest cap produced finish_reason:"length" and empty content.
+      // Writing a full clinical MCQ does benefit from some reasoning, so keep the trace
+      // but trim it with medium_effort rather than letting it run unbounded.
+      chat_template_kwargs: { enable_thinking: true, medium_effort: true }
+    });
+    const res = await fetch(NVIDIA_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: payload,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    const raw = await res.text();
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+    }
+    if (!res.ok) {
+      const err = new Error(`Vision generation failed (HTTP ${res.status}): ${body?.error?.message || body?.message || raw.slice(0, 160)}`);
+      err.status = res.status;
+      throw err;
+    }
+    const choice = body?.choices?.[0];
+    return { text: contentToText(choice?.message), finish: choice?.finish_reason };
+  };
+  const isTransient = (err) => err?.status >= 500 || /inference connection|ECONNRESET|socket hang up|fetch failed|EAI_AGAIN/i.test(String(err?.message || ""));
+  const callVisionWithRetry = async (maxTokens) => {
+    try {
+      return await callVision(maxTokens);
+    } catch (err) {
+      if (!isTransient(err)) throw err;
+      await new Promise((r) => setTimeout(r, 1500));
+      return await callVision(maxTokens);
+    }
+  };
+  let budget = Number(process.env.VISION_MAX_TOKENS || 8192);
+  let { text, finish } = await callVisionWithRetry(budget);
+  let parsed = parseLooseJson(text);
+  if ((!parsed || typeof parsed !== "object" || parsed.error === "image_mismatch") && finish === "length") {
+    budget *= 2;
+    ({ text, finish } = await callVisionWithRetry(budget));
+    parsed = parseLooseJson(text);
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(
+      finish === "length" ? `Vision model ran out of tokens before answering (even at ${budget}).` : "Vision model did not return usable JSON."
+    );
+  }
+  if (parsed.error === "image_mismatch") {
+    throw new Error("image_mismatch");
+  }
+  const stem = typeof parsed.stem === "string" ? parsed.stem.trim() : "";
+  if (!stem) throw new Error("Vision model returned no stem.");
+  const options = {};
+  if (parsed.options && typeof parsed.options === "object" && !Array.isArray(parsed.options)) {
+    for (const [k, v] of Object.entries(parsed.options)) {
+      if (typeof v === "string" && v.trim()) options[String(k).trim().toUpperCase()] = v.trim();
+    }
+  } else if (Array.isArray(parsed.options)) {
+    for (const o of parsed.options) {
+      if (o && typeof o.text === "string" && o.text.trim()) {
+        options[String(o.id ?? "").trim().toUpperCase()] = o.text.trim();
+      }
+    }
+  }
+  const keys = ["A", "B", "C", "D", "E"].slice(0, count);
+  for (const k of keys) {
+    if (!options[k]) throw new Error(`Vision model returned an incomplete option set (missing ${k}).`);
+  }
+  const correctOption = String(parsed.correctOption || "").trim().toUpperCase();
+  if (!keys.includes(correctOption)) throw new Error("Vision model returned an invalid correctOption.");
+  const citations = Array.isArray(parsed.citations) ? parsed.citations.filter((c) => typeof c === "string" && c.trim()).map((c) => c.trim()).slice(0, 5) : [];
+  return {
+    stem,
+    questionText: typeof parsed.questionText === "string" && parsed.questionText.trim() ? parsed.questionText.trim() : stem,
+    options: Object.fromEntries(keys.map((k) => [k, options[k]])),
+    correctOption,
+    explanation: typeof parsed.explanation === "string" ? parsed.explanation.trim() : "",
+    boardPearl: typeof parsed.boardPearl === "string" ? parsed.boardPearl.trim() : "",
+    citations
+  };
+}
 
 // server/qa/examProfiles.ts
 var AMC_CAT = {
@@ -1212,6 +2178,11 @@ function detectRefinementSignals(q) {
     if (longOnes === 1) reasons.push("Exactly one option is much longer than the rest.");
     const shortOnes = lens.filter((l) => l < avg * 0.55).length;
     if (shortOnes === 1) reasons.push("Exactly one option is much shorter than the rest.");
+    const correctLen = correct ? String(correct.text ?? "").trim().length : 0;
+    const sortedDesc = [...lens].sort((a, b) => b - a);
+    if (correctLen > 0 && correctLen === sortedDesc[0] && sortedDesc[0] > (sortedDesc[1] ?? 0) * 1.15) {
+      reasons.push("The correct option is the longest and stands out, a test-wise giveaway.");
+    }
   }
   if (options.some((o) => /all of the above|none of the above/i.test(String(o.text ?? "")))) {
     reasons.push('Contains an "all/none of the above" option.');
@@ -1353,11 +2324,11 @@ async function refineBatch(questions, complete, concurrency = 5) {
 }
 
 // server/utils/debugLog.ts
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync3 } from "node:fs";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync4 } from "node:fs";
 var DEBUG_LOG_PATH = "C:/Users/Abhijeet Sharma/PulseMed-105/.agents/debug.log";
 function serverDebugLog(hypothesis, message) {
   try {
-    mkdirSync3("C:/Users/Abhijeet Sharma/PulseMed-105/.agents", { recursive: true });
+    mkdirSync4("C:/Users/Abhijeet Sharma/PulseMed-105/.agents", { recursive: true });
     appendFileSync2(DEBUG_LOG_PATH, `[${(/* @__PURE__ */ new Date()).toISOString()}] [DEBUG ${hypothesis}] ${message}
 `, "utf8");
   } catch {
@@ -1365,6 +2336,9 @@ function serverDebugLog(hypothesis, message) {
 }
 
 // src/lib/ai.ts
+var RESEARCH_TTL_MS = 5 * 6e4;
+var stageLog = [];
+globalThis.__stageLog = stageLog;
 function extractJson(raw) {
   if (!raw) return null;
   let text = raw.trim();
@@ -1384,15 +2358,18 @@ function extractJson(raw) {
 // server.ts
 dotenv.config();
 var __filename = fileURLToPath(import.meta.url);
-var __dirname = path.dirname(__filename);
+var __dirname = path3.dirname(__filename);
 var app = express();
 var PORT = parseInt(process.env.PORT || "3000", 10);
-var DATA_DIR = process.env.PULSE_DATA_DIR || path.join(os.homedir(), ".pulse-med");
-var ENV_FILE = path.join(DATA_DIR, ".env");
+var DATA_DIR2 = process.env.PULSE_DATA_DIR || path3.join(os3.homedir(), ".pulse-med");
+var ENV_FILE = path3.join(DATA_DIR2, ".env");
 try {
   dotenv.config({ path: ENV_FILE });
 } catch {
 }
+app.use("/api/ai/complete-images", express.json({ limit: "30mb" }));
+app.use("/api/ocr/nemotron", express.json({ limit: "1mb" }));
+app.use("/api/export/questions", express.json({ limit: "5mb" }));
 app.use(express.json());
 var OPENCODE_DEFAULT_MODEL = "deepseek-v4.1-flash";
 var DEFAULT_MODELS = {
@@ -1402,7 +2379,8 @@ var DEFAULT_MODELS = {
   grok: "grok-4.7",
   opencode: OPENCODE_DEFAULT_MODEL,
   custom: "gpt-4o-mini",
-  nvidia: "nvidia/nemotron-3.5-super-vl-120b-a12b"
+  nvidia: "nvidia/nemotron-3.5-super-vl-120b-a12b",
+  vyce: "deepseek-v4.1"
 };
 var INTERNAL_PROVIDER = {
   chatgpt: "codex",
@@ -1421,6 +2399,26 @@ function geminiKey() {
 function nvidiaKey() {
   return (process.env.NVIDIA_API_KEY || "").trim();
 }
+var VYCE_BASE_URL = "https://vyceai.com/v1";
+function vyceKey() {
+  return (process.env.VYCE_API_KEY || "").trim();
+}
+function nvidiaReasoningKwargs(effort) {
+  const level = String(effort || "").trim().toLowerCase();
+  if (level === "min" || level === "minimal") return { enable_thinking: false };
+  if (level === "low" || level === "brief") return { enable_thinking: true, medium_effort: true };
+  if (level === "high") return { enable_thinking: true };
+  if (level === "ultra") return { enable_thinking: true };
+  return { enable_thinking: true, medium_effort: true };
+}
+function nvidiaTokenBudget(effort) {
+  const level = String(effort || "").trim().toLowerCase();
+  if (level === "min" || level === "minimal") return 2048;
+  if (level === "low" || level === "brief") return 4096;
+  if (level === "high") return 16384;
+  if (level === "ultra") return 24e3;
+  return 8192;
+}
 var geminiClient = null;
 function getGemini() {
   const key = geminiKey();
@@ -1431,22 +2429,22 @@ function getGemini() {
   return geminiClient.client;
 }
 function writeEnvValue(name, value) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs3.mkdirSync(DATA_DIR2, { recursive: true });
   let lines = [];
-  if (fs.existsSync(ENV_FILE)) {
-    const existing = fs.readFileSync(ENV_FILE, "utf8").split(/\r?\n/);
+  if (fs3.existsSync(ENV_FILE)) {
+    const existing = fs3.readFileSync(ENV_FILE, "utf8").split(/\r?\n/);
     const matcher = new RegExp(`^${name}\\s*=`);
     lines = existing.filter((l) => l.trim() !== "" && !matcher.test(l));
   }
   lines.push(`${name}=${value}`, "");
-  fs.writeFileSync(ENV_FILE, lines.join("\n"), "utf8");
+  fs3.writeFileSync(ENV_FILE, lines.join("\n"), "utf8");
   process.env[name] = value;
 }
 function clearEnvValue(name) {
-  if (fs.existsSync(ENV_FILE)) {
+  if (fs3.existsSync(ENV_FILE)) {
     const matcher = new RegExp(`^${name}\\s*=`);
-    const lines = fs.readFileSync(ENV_FILE, "utf8").split(/\r?\n/).filter((l) => l.trim() !== "" && !matcher.test(l));
-    fs.writeFileSync(ENV_FILE, lines.length ? lines.join("\n") + "\n" : "", "utf8");
+    const lines = fs3.readFileSync(ENV_FILE, "utf8").split(/\r?\n/).filter((l) => l.trim() !== "" && !matcher.test(l));
+    fs3.writeFileSync(ENV_FILE, lines.length ? lines.join("\n") + "\n" : "", "utf8");
   }
   delete process.env[name];
 }
@@ -1459,11 +2457,11 @@ var OPENCODE_SESSION = `pulsemed-${Math.random().toString(36).slice(2)}`;
 var OPENCODE_MODELS_URL = "https://opencode.ai/inference/v1/models";
 var OPENCODE_GO_MODELS_URL = "https://opencode.ai/inference/go/v1/models";
 function opencodeAuthFile() {
-  return process.env.OPENCODE_AUTH_FILE || path.join(os.homedir(), ".local", "share", "opencode", "auth.json");
+  return process.env.OPENCODE_AUTH_FILE || path3.join(os3.homedir(), ".local", "share", "opencode", "auth.json");
 }
 function opencodeKeyFromCli() {
   try {
-    const raw = JSON.parse(fs.readFileSync(opencodeAuthFile(), "utf8"));
+    const raw = JSON.parse(fs3.readFileSync(opencodeAuthFile(), "utf8"));
     const entry = raw?.opencode ?? raw?.["opencode-go"] ?? raw?.["opencode-zen"];
     const key = entry?.key ?? entry?.apiKey ?? entry?.access;
     return typeof key === "string" ? key.trim() : "";
@@ -1471,8 +2469,26 @@ function opencodeKeyFromCli() {
     return "";
   }
 }
+var signInCache = null;
+function opencodeKeyFromSignIn() {
+  if (signInCache && Date.now() - signInCache.at < 5 * 6e4) return signInCache.key;
+  const cli = process.env.OPENCODE_CLI_PATH || path3.join(process.env.LOCALAPPDATA || "", "Programs", "ai.opencode.desktop", "resources", "opencode-cli.exe");
+  let key = "";
+  try {
+    const list = JSON.parse(execFileSync(cli, ["auth", "export"], { encoding: "utf8", timeout: 15e3, windowsHide: true }));
+    const signedIn = (id) => list.find((c) => c?.integrationID === id && c?.active && c?.value?.type === "oauth");
+    const fresh = (c) => typeof c?.value?.expires === "number" && c.value.expires > Date.now() && typeof c?.value?.access === "string";
+    const oauth = [signedIn("opencode-go"), signedIn("opencode")].find(fresh);
+    const goKey = list.find((c) => c?.integrationID === "opencode-go" && c?.active && c?.value?.type === "key");
+    key = oauth ? oauth.value.access : goKey?.value?.key ?? "";
+  } catch {
+    key = "";
+  }
+  signInCache = { key, at: Date.now() };
+  return key;
+}
 function opencodeKey() {
-  return (process.env.OPENCODE_API_KEY || opencodeKeyFromCli()).trim();
+  return (opencodeKeyFromSignIn() || process.env.OPENCODE_API_KEY || opencodeKeyFromCli()).trim();
 }
 function saveOpenCodeKey(key) {
   writeEnvValue("OPENCODE_API_KEY", key);
@@ -1487,6 +2503,7 @@ function isProviderConnected(providerId) {
   if (providerId === "gemini") return Boolean(geminiKey());
   if (providerId === "opencode") return Boolean(opencodeKey());
   if (providerId === "nvidia") return Boolean(nvidiaKey());
+  if (providerId === "vyce") return Boolean(vyceKey());
   if (providerId === "custom") return Boolean(getActiveCustomEndpoint());
   try {
     const s = status();
@@ -1507,13 +2524,47 @@ function notConnectedMessage(providerId) {
   if (providerId === "nvidia") {
     return "NVIDIA is not connected. Paste your NVIDIA API key in Settings \u2192 AI Subscription Hub.";
   }
+  if (providerId === "vyce") {
+    return "VyceAI is not connected. Paste your VyceAI API key in Settings \u2192 AI Subscription Hub.";
+  }
   if (providerId === "custom") {
     return "Custom provider is not connected. Add a custom endpoint in Settings \u2192 AI Subscription Hub.";
   }
   return `${providerId.charAt(0).toUpperCase() + providerId.slice(1)} is not signed in. Connect an AI provider in Settings \u2192 AI Subscription Hub.`;
 }
+var nvidiaNoJsonFormat = /* @__PURE__ */ new Set();
+var NVIDIA_SPREAD_MODELS = [
+  "nvidia/nemotron-3.5-super-vl-120b-a12b"
+];
+var nvidiaSpreadCursor = 0;
+var nvidiaStats = {
+  started: 0,
+  inFlight: 0,
+  finished: { ok: 0, failed: 0, stopped: 0 },
+  // Questions the app kept, and those it dropped by reason (after the model replied).
+  accepted: 0,
+  dropped: {},
+  // Repair outcomes for rejected drafts: attempted (sent), accepted (kept after its checks), failed (no repair returned).
+  repairs: {},
+  byModel: {},
+  events: []
+};
+function nvidiaEvent(model, outcome, detail = "") {
+  nvidiaStats.events.push({ at: (/* @__PURE__ */ new Date()).toISOString().slice(11, 19), model: model.replace("nvidia/", ""), outcome, detail });
+  if (nvidiaStats.events.length > 40) nvidiaStats.events.shift();
+}
+function nvidiaAttempt(model, outcome, detail = "") {
+  const counts = nvidiaStats.byModel[model] ??= { ok: 0, refused: 0, error: 0, timeout: 0 };
+  counts[outcome] += 1;
+  nvidiaEvent(model, outcome, detail);
+}
+function nvidiaFinish(model, outcome, detail = "") {
+  nvidiaStats.inFlight = Math.max(0, nvidiaStats.inFlight - 1);
+  nvidiaStats.finished[outcome] += 1;
+  nvidiaEvent(model, `question ${outcome}`, detail);
+}
 async function runCompletion(opts) {
-  const { provider, model, system, messages, json, effort, search, signal } = opts;
+  const { provider, model, system, messages, json, effort, search, signal, images } = opts;
   if (provider === "opencode") {
     const key = opencodeKey();
     if (!key) throw new ApiError(notConnectedMessage("opencode"), 401);
@@ -1683,45 +2734,147 @@ async function runCompletion(opts) {
     }
     return text;
   }
-  if (provider === "nvidia") {
-    const key = nvidiaKey();
-    if (!key) throw new ApiError(notConnectedMessage("nvidia"), 401);
-    const model_ = model || DEFAULT_MODELS.nvidia;
-    const payloadMessages = [
-      ...system ? [{ role: "system", content: system }] : [],
-      ...messages.map((m) => ({ role: m.role, content: m.content }))
-    ];
+  if (provider === "vyce") {
+    const key = vyceKey();
+    if (!key) throw new ApiError(notConnectedMessage("vyce"), 401);
+    const model_ = model || DEFAULT_MODELS.vyce;
     const payload = JSON.stringify({
       model: model_,
-      messages: payloadMessages,
+      messages: [
+        ...system ? [{ role: "system", content: system }] : [],
+        ...messages.map((m) => ({ role: m.role, content: m.content }))
+      ],
       temperature: 0.7,
       ...json ? { response_format: { type: "json_object" } } : {}
     });
-    const r = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`
-      },
-      body: payload,
-      ...signal ? { signal } : {}
-    });
-    const raw = await r.text();
+    let r = null;
+    let raw = "";
     let body = {};
-    try {
-      body = raw ? JSON.parse(raw) : {};
-    } catch {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      r = await fetch(`${VYCE_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: payload,
+        ...signal ? { signal } : {}
+      });
+      raw = await r.text();
+      body = {};
+      try {
+        body = raw ? JSON.parse(raw) : {};
+      } catch {
+      }
+      if (r.ok || r.status < 500) break;
+      aiLog({ provider: "vyce", model: model_, status: r.status, error: true, retry: attempt });
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 1e3 * attempt));
     }
     if (!r.ok) {
-      aiLog({ provider: "nvidia", model: model_, status: r.status, error: true });
-      throw new ApiError(`NVIDIA: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
+      aiLog({ provider: "vyce", model: model_, status: r.status, error: true });
+      throw new ApiError(`VyceAI: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
     }
     const content = body?.choices?.[0]?.message?.content;
     const text = typeof content === "string" ? content : "";
-    aiLog({ provider: "nvidia", model: model_, status: r.status, text_len: text.length, json: !!json });
+    aiLog({ provider: "vyce", model: model_, status: r.status, text_len: text.length, json: !!json });
     if (!text.trim()) {
+      throw new ApiError(`VyceAI returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || "unknown"}).`, 502);
+    }
+    return text;
+  }
+  if (provider === "nvidia") {
+    const key = nvidiaKey();
+    if (!key) throw new ApiError(notConnectedMessage("nvidia"), 401);
+    nvidiaStats.started += 1;
+    nvidiaStats.inFlight += 1;
+    const pinned = Boolean(model);
+    const spreadStart = nvidiaSpreadCursor++ % NVIDIA_SPREAD_MODELS.length;
+    let spreadIndex = spreadStart;
+    let model_ = pinned ? String(model) : images?.length ? DEFAULT_MODELS.nvidia : NVIDIA_SPREAD_MODELS[spreadIndex];
+    const payloadMessages = [
+      ...system ? [{ role: "system", content: system }] : [],
+      ...messages.map((m, i) => ({
+        role: m.role,
+        content: images?.length && i === messages.length - 1 ? [{ type: "text", text: m.content }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))] : m.content
+      }))
+    ];
+    const buildPayload = (withFormat2) => JSON.stringify({
+      model: model_,
+      messages: payloadMessages,
+      // Reading pages is transcription as much as writing, so keep it close to the source.
+      temperature: images?.length ? 0.3 : 0.7,
+      // Let a long clinical answer finish rather than starving the reasoning trace.
+      max_tokens: nvidiaTokenBudget(effort),
+      chat_template_kwargs: nvidiaReasoningKwargs(effort),
+      ...json && withFormat2 ? { response_format: { type: "json_object" } } : {}
+    });
+    let withFormat = Boolean(json) && !nvidiaNoJsonFormat.has(model_);
+    let payload = buildPayload(withFormat);
+    let httpRes = null;
+    let raw = "";
+    let body = {};
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      try {
+        httpRes = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+          body: payload,
+          // A call that never returns would hold its question forever; give up after 60 seconds, or sooner if the client stops.
+          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(6e4)]) : AbortSignal.timeout(6e4)
+        });
+      } catch (err) {
+        if (signal?.aborted) {
+          nvidiaFinish(model_, "stopped");
+          throw err;
+        }
+        nvidiaAttempt(model_, err?.name === "TimeoutError" ? "timeout" : "error", err?.name ?? "error");
+        console.log(`[nvidia] ${(/* @__PURE__ */ new Date()).toISOString().slice(11, 23)} ${opts.purpose ?? "unlabelled"} model=${model_} failed=${err?.name ?? "error"}`);
+        httpRes = null;
+        if (attempt >= 3) break;
+        await new Promise((resolve) => setTimeout(resolve, 2e3 * attempt));
+        continue;
+      }
+      raw = await httpRes.text();
+      console.log(`[nvidia] ${(/* @__PURE__ */ new Date()).toISOString().slice(11, 23)} ${opts.purpose ?? "unlabelled"} model=${model_} attempt=${attempt} status=${httpRes.status}`);
+      body = {};
+      try {
+        body = raw ? JSON.parse(raw) : {};
+      } catch {
+      }
+      if (httpRes.status === 400 && withFormat && /response_format/i.test(raw)) {
+        nvidiaNoJsonFormat.add(model_);
+        withFormat = false;
+        payload = buildPayload(false);
+        attempt -= 1;
+        continue;
+      }
+      const rateLimited = httpRes.status === 429;
+      nvidiaAttempt(model_, httpRes.ok ? "ok" : rateLimited ? "refused" : "error", String(httpRes.status));
+      if (httpRes.ok || httpRes.status < 500 && !rateLimited) break;
+      aiLog({ provider: "nvidia", model: model_, status: httpRes.status, error: true, retry: attempt });
+      if (!rateLimited && attempt >= 3) break;
+      if (rateLimited && !images?.length && !pinned) {
+        spreadIndex = (spreadIndex + 1) % NVIDIA_SPREAD_MODELS.length;
+        model_ = NVIDIA_SPREAD_MODELS[spreadIndex];
+        withFormat = Boolean(json) && !nvidiaNoJsonFormat.has(model_);
+        payload = buildPayload(withFormat);
+        if (spreadIndex !== spreadStart) continue;
+      }
+      if (attempt < 6) await new Promise((resolve) => setTimeout(resolve, rateLimited ? 5e3 : 1200 * attempt));
+    }
+    if (!httpRes || !httpRes.ok) {
+      const status2 = httpRes?.status ?? 502;
+      aiLog({ provider: "nvidia", model: model_, status: status2, error: true });
+      nvidiaFinish(model_, "failed", String(status2));
+      const detail = providerErrorText(body, status2);
+      const extra = detail === `HTTP ${status2}` && raw ? ` \u2014 ${raw.replace(/s+/g, " ").slice(0, 160)}` : "";
+      throw new ApiError(`NVIDIA: ${detail}${extra}`, status2 === 401 ? 401 : 502);
+    }
+    const content = body?.choices?.[0]?.message?.content;
+    const text = typeof content === "string" ? content : "";
+    aiLog({ provider: "nvidia", model: model_, status: httpRes.status, text_len: text.length, json: !!json });
+    if (!text.trim()) {
+      nvidiaFinish(model_, "failed", "empty");
       throw new ApiError(`NVIDIA returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || "unknown"}).`, 502);
     }
+    nvidiaFinish(model_, "ok");
     return text;
   }
   const internal = INTERNAL_PROVIDER[provider];
@@ -1761,13 +2914,154 @@ app.get("/api/oauth/status", (req, res) => {
       grok: { connected: isProviderConnected("grok") },
       opencode: { connected: isProviderConnected("opencode") },
       nvidia: { connected: isProviderConnected("nvidia") },
+      vyce: { connected: isProviderConnected("vyce") },
       custom: { connected: isProviderConnected("custom") }
     },
     defaults: DEFAULT_MODELS
   });
 });
+app.post("/api/pyq/weights", (req, res) => {
+  const subtopics = Array.isArray(req.body?.subtopics) ? req.body.subtopics.map((s) => String(s)).slice(0, 200) : [];
+  const exam = String(req.body?.exam || "");
+  return res.json({ weights: pyqWeights(subtopics, exam), source: pyqSource() });
+});
+var splitCache = /* @__PURE__ */ new Map();
+app.post("/api/ai/split-topic", async (req, res) => {
+  const topic = String(req.body?.topic || "").trim().slice(0, 120);
+  const exam = String(req.body?.exam || "NEET-PG");
+  const provider = String(req.body?.provider || "");
+  const model = String(req.body?.model || "");
+  if (!topic || !provider) return res.json({ subtopics: [] });
+  const key = JSON.stringify({ topic, exam, provider, model });
+  const cached = splitCache.get(key);
+  if (cached) return res.json({ subtopics: cached.map((s) => s.subtopic), priorities: cached.map((s) => s.priority), facts: cached.map((s) => s.facts) });
+  let evidence = "";
+  try {
+    const found = await research(topic, 1200);
+    evidence = found.sources.map((s, i) => `[${i + 1}] ${s.title}
+${s.text}`).join("\n").slice(0, 6e3);
+  } catch {
+    evidence = "";
+  }
+  const prompt = [
+    `You are an expert medical exam item writer for ${exam}.`,
+    evidence ? `Evidence from the textbook library and the web on this topic (a guide: list every subtopic the evidence supports, and every other subtopic an examiner tests on this topic):
+${evidence}` : "No evidence was found, so list the subtopics an exam would test.",
+    `Split the topic "${topic}" into its distinct subtopics, sorted as an examiner would sort them:`,
+    "for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. List every distinct subtopic an examiner tests on this topic: a narrow topic may have only two or three, a broad one thirty or more. Do not stop at a fixed number.",
+    "Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.",
+    "Give each subtopic a priority from 1 to 10 for how often it is tested.",
+    'Give each subtopic "facts": the number of high-yield, exam-testable facts in it (1 to 6). Count only facts an examiner would ask, not background detail.',
+    // JSON mode returns one object, so the list sits inside it under "subtopics".
+    `Return only a JSON object: {"subtopics": [{"subject": "${topic}", "subtopic": "<name: items>", "priority": <1-10>, "facts": <1-6>}, ...]}.`,
+    "Do not repeat any entry."
+  ].join("\n");
+  const splitWith = async (useModel, text = prompt, via = provider) => {
+    const raw = await runCompletion({ provider: via, model: useModel, messages: [{ role: "user", content: text }], json: true, effort: "min" });
+    const parsed = extractJson(raw);
+    const asList = Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" ? Object.values(parsed).find(Array.isArray) ?? [parsed] : [];
+    console.log("[split-topic] model", useModel, "raw", String(raw).slice(0, 120), "items:", asList.length);
+    const rated = asList.map((e) => typeof e === "string" ? { subtopic: e, priority: 10, facts: 1 } : { subtopic: e?.subtopic, priority: Number(e?.priority) || 0, facts: Math.min(6, Math.max(1, Math.round(Number(e?.facts) || 1))) }).filter((r) => typeof r.subtopic === "string" && r.subtopic.trim());
+    const chosen = rated.sort((a, b) => b.priority - a.priority);
+    const seen = /* @__PURE__ */ new Set();
+    const unique = [];
+    for (const r of chosen) {
+      const name = r.subtopic.trim();
+      if (seen.has(name)) continue;
+      seen.add(name);
+      unique.push({ subtopic: name, priority: r.priority, facts: r.facts });
+    }
+    return unique;
+  };
+  try {
+    let subtopics = await splitWith(model || void 0).catch(() => []);
+    if (!subtopics.length && provider === "nvidia") subtopics = await splitWith(DEFAULT_MODELS.nvidia).catch(() => []);
+    if (subtopics.length < 4) {
+      const strict = [
+        prompt,
+        "Your last reply gave too few subtopics. Return every distinct subtopic an examiner tests on this topic, each a different category.",
+        "For a drug or drug class, cover every organ system and effect type it is known for (for example renal, neurological, sensory, haematological, hepatic, cardiac, metabolic, skin, endocrine, pregnancy), plus its key interactions and monitoring.",
+        "For a disease, cover its causes, clinical features, investigations, treatment, complications and prognosis.",
+        "A single subtopic is not acceptable."
+      ].join("\n");
+      const more = await splitWith(model || void 0, strict).catch(() => []);
+      if (more.length > subtopics.length) subtopics = more;
+    }
+    if (subtopics.length < 4 && provider === "vyce") {
+      const alt = await splitWith(DEFAULT_MODELS.nvidia, prompt, "nvidia").catch(() => []);
+      if (alt.length > subtopics.length) subtopics = alt;
+    }
+    const thin = subtopics.length < 4;
+    if (!subtopics.length) subtopics = [{ subtopic: topic, priority: 10, facts: 1 }];
+    if (!thin) {
+      if (splitCache.size >= 50) splitCache.delete(splitCache.keys().next().value);
+      splitCache.set(key, subtopics);
+    }
+    return res.json({ subtopics: subtopics.map((s) => s.subtopic), priorities: subtopics.map((s) => s.priority), facts: subtopics.map((s) => s.facts) });
+  } catch (err) {
+    console.log("[split-topic] failed:", err?.message || err);
+    return res.json({ subtopics: [topic], priorities: [10], facts: [1] });
+  }
+});
+app.get("/api/ai/source-registry", (_req, res) => {
+  return res.json({ sources: SOURCE_REGISTRY });
+});
+var BANK_FIGURES_DIR = process.env.BANK_FIGURES_DIR || path3.join(os3.homedir(), ".pulse-med", "bank-figures");
+app.get(/^\/api\/bank-figures\/(.+)$/, (req, res) => {
+  const rel = String(req.params[0] ?? "");
+  if (!/^[A-Za-z0-9_\-/]+\.(png|jpe?g|webp|gif)$/i.test(rel) || rel.split("/").includes("..")) {
+    return res.status(400).end();
+  }
+  const full = path3.join(BANK_FIGURES_DIR, rel);
+  if (!fs3.existsSync(full)) return res.status(404).end();
+  res.sendFile(full);
+});
+var rankCache = /* @__PURE__ */ new Map();
+function subtopicParts(subtopic) {
+  const after = subtopic.includes(":") ? subtopic.split(":").slice(1).join(":") : subtopic;
+  return after.split(/,|&| and /).map((s) => s.trim().split(":").pop().trim()).filter(Boolean);
+}
+async function listDistinctTopics(subjectSubtopics, count, exam, provider, model, excluded) {
+  const avoid = [...excluded].map((k) => k.split("|")[1]).filter(Boolean).slice(0, 200);
+  const prompt = [
+    `You are an expert medical exam item writer for ${exam || "NEET-PG"}.`,
+    `Allowed subjects and subtopics:`,
+    ...subjectSubtopics.map((s) => `  ${s.subject}: ${(s.subtopics || []).join(", ")}`),
+    "",
+    `List ${count} distinct, specific topics that an exam question can test within these subtopics. Each topic is one concrete focus: one drug, one adverse effect, one mechanism, one investigation, one clinical situation. No two topics may overlap.`,
+    avoid.length ? `Do not repeat these already written topics: ${avoid.join("; ")}.` : "",
+    `Return one JSON object with a single key "topics", whose value is an array of ${count} objects. Each object has "subject", "subtopic" and "focus". Copy "subject" and "subtopic" exactly from the list above. "focus" is 3 to 10 words.`,
+    `Output ONLY the JSON array.`
+  ].filter(Boolean).join("\n");
+  const raw = await runCompletion({
+    provider: provider || "gemini",
+    model: model || DEFAULT_MODELS.nvidia,
+    messages: [{ role: "user", content: prompt }],
+    json: true,
+    effort: "min"
+  });
+  const parsed = extractJson(raw);
+  const list = Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" ? Object.values(parsed).find(Array.isArray) ?? [parsed] : [];
+  const allowed = /* @__PURE__ */ new Map();
+  for (const s of subjectSubtopics) allowed.set(s.subject, new Set((s.subtopics || []).map((sub) => String(sub).trim())));
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const entry of list) {
+    const subject = String(entry?.subject ?? "");
+    const subtopic = String(entry?.subtopic ?? "").trim();
+    const focus = String(entry?.focus ?? "").trim();
+    if (!focus || !allowed.get(subject)?.has(subtopic)) continue;
+    const key = focus.toLowerCase();
+    if (seen.has(key) || excluded.has(`${subtopic}|${focus}`)) continue;
+    seen.add(key);
+    out.push({ subject, subtopic, focus });
+    if (out.length >= count) break;
+  }
+  return out;
+}
 app.post("/api/ai/plan-topics", async (req, res) => {
-  const { subjectSubtopics, count, difficultyTier, provider, model, exam, effort } = req.body || {};
+  const { subjectSubtopics, count, difficultyTier, provider, model, exam, effort, exclude } = req.body || {};
+  const excluded = new Set(Array.isArray(exclude) ? exclude.map(String) : []);
   if (!subjectSubtopics || !Array.isArray(subjectSubtopics) || subjectSubtopics.length === 0) {
     return res.status(400).json({ error: "subjectSubtopics is required" });
   }
@@ -1789,39 +3083,82 @@ app.post("/api/ai/plan-topics", async (req, res) => {
       ...subjectSubtopics.map((s) => `  ${s.subject}: ${(s.subtopics || []).join(", ")}`),
       "",
       `Return a JSON array of topic objects, each with "subject", "subtopic", and "priority" (1-10, where 10 = most important).`,
+      `Use ONLY the subjects and subtopics listed above, copied exactly. Do not add any other subject or subtopic.`,
       `Include approximately ${countN} entries total. If there are fewer unique pairs than ${countN}, repeat important ones.`,
       `Output ONLY the JSON array.`
     ].join("\n");
-    const raw = await runCompletion({
-      provider: provider || "gemini",
-      model: model || DEFAULT_MODELS.nvidia,
-      messages: [{ role: "user", content: planPrompt }],
-      json: true,
-      effort: effort || void 0
-    });
+    const rankKey = JSON.stringify({ exam, provider, model, subjectSubtopics });
+    let raw = rankCache.get(rankKey) ?? "";
+    if (!raw) {
+      raw = await runCompletion({
+        provider: provider || "gemini",
+        model: model || DEFAULT_MODELS.nvidia,
+        messages: [{ role: "user", content: planPrompt }],
+        json: true,
+        // Ranking subtopics is a short judgement, so it runs without reasoning, like the rest of the pipeline.
+        effort: "min"
+      });
+      if (rankCache.size >= 50) rankCache.delete(rankCache.keys().next().value);
+      rankCache.set(rankKey, raw);
+    }
     const parsed = extractJson(raw);
-    const ranked = Array.isArray(parsed) ? parsed : [];
-    const weighted = [];
+    const allowed = /* @__PURE__ */ new Map();
+    for (const s of subjectSubtopics) {
+      allowed.set(s.subject, new Set((s.subtopics || []).map((sub) => String(sub).trim())));
+    }
+    const ranked = (Array.isArray(parsed) ? parsed : []).filter(
+      (entry) => allowed.get(entry?.subject)?.has(String(entry?.subtopic ?? "").trim())
+    );
+    const bestByTopic = /* @__PURE__ */ new Map();
     for (const entry of ranked) {
-      const repeats = Math.max(1, Math.min(entry.priority || 5, 10));
-      for (let i = 0; i < repeats; i++) {
+      const key = `${entry.subject}|${String(entry.subtopic).trim()}`;
+      const prior = bestByTopic.get(key);
+      if (!prior || (entry.priority || 0) > (prior.priority || 0)) bestByTopic.set(key, entry);
+    }
+    const sorted = [...bestByTopic.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0));
+    const weighted = [];
+    for (let round = 0; sorted.length > 0 && weighted.length < countN && round < 20; round++) {
+      for (const entry of sorted) {
+        if (weighted.length >= countN) break;
+        const parts = subtopicParts(entry.subtopic);
+        const focus = parts.length > 1 ? parts[round % parts.length] : void 0;
+        if (excluded.has(`${entry.subtopic}|${focus ?? ""}`)) continue;
         weighted.push({
           subject: entry.subject,
           subtopic: entry.subtopic,
+          focus,
           difficultyTier: tier
         });
       }
     }
     if (weighted.length === 0) {
-      for (let i = 0; i < countN; i++) {
-        weighted.push({
-          subject: pool[i % pool.length].subject,
-          subtopic: pool[i % pool.length].subtopic,
-          difficultyTier: tier
-        });
+      const units = [];
+      for (let round = 0; round < 20; round++) {
+        for (const entry of pool) {
+          const parts = subtopicParts(entry.subtopic);
+          const focus = parts.length > 1 ? parts[round % parts.length] : void 0;
+          if (round > 0 && parts.length <= 1) continue;
+          units.push({ subject: entry.subject, subtopic: entry.subtopic, focus });
+        }
+      }
+      for (const unit of units) {
+        if (weighted.length >= countN) break;
+        if (excluded.has(`${unit.subtopic}|${unit.focus ?? ""}`)) continue;
+        weighted.push({ ...unit, difficultyTier: tier });
       }
     }
-    const finalTopics = weighted.slice(0, countN);
+    let planned = weighted;
+    if (weighted.length < countN) {
+      let expanded = await listDistinctTopics(subjectSubtopics, countN, exam, provider, model, excluded);
+      for (let round = 0; expanded.length < countN && round < 2; round++) {
+        const avoidNow = /* @__PURE__ */ new Set([...excluded, ...expanded.map((t) => `${t.subtopic}|${t.focus}`)]);
+        const more = await listDistinctTopics(subjectSubtopics, countN - expanded.length, exam, provider, model, avoidNow);
+        if (more.length === 0) break;
+        expanded = [...expanded, ...more];
+      }
+      if (expanded.length > weighted.length) planned = expanded.map((t) => ({ ...t, difficultyTier: tier }));
+    }
+    const finalTopics = planned.slice(0, countN);
     return res.json({ topics: finalTopics, total: finalTopics.length });
   } catch (err) {
     const fallback = [];
@@ -1913,6 +3250,14 @@ app.post("/api/oauth/complete", async (req, res) => {
 });
 app.post("/api/oauth/logout", (req, res) => {
   const { provider } = req.body || {};
+  if (provider === "vyce") {
+    try {
+      clearEnvValue("VYCE_API_KEY");
+      return res.json({ ok: true, connected: false, provider });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Could not remove the VyceAI key." });
+    }
+  }
   if (provider === "opencode") {
     try {
       clearEnvValue("OPENCODE_API_KEY");
@@ -1969,11 +3314,23 @@ app.post("/api/settings/nvidia-key", (req, res) => {
     return res.status(500).json({ error: err?.message || "Could not save the NVIDIA API key." });
   }
 });
-var CUSTOM_ENDPOINTS_FILE = path.join(DATA_DIR, "custom-endpoints.json");
+app.post("/api/settings/vyce-key", (req, res) => {
+  const key = String(req.body?.apiKey || "").trim();
+  if (!/^[A-Za-z0-9_.\-]{10,}$/.test(key)) {
+    return res.status(400).json({ error: "That does not look like a valid VyceAI API key." });
+  }
+  try {
+    writeEnvValue("VYCE_API_KEY", key);
+    return res.json({ ok: true, connected: true });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Could not save the VyceAI API key." });
+  }
+});
+var CUSTOM_ENDPOINTS_FILE = path3.join(DATA_DIR2, "custom-endpoints.json");
 function readCustomEndpoints() {
   try {
-    if (!fs.existsSync(CUSTOM_ENDPOINTS_FILE)) return [];
-    const raw = fs.readFileSync(CUSTOM_ENDPOINTS_FILE, "utf8");
+    if (!fs3.existsSync(CUSTOM_ENDPOINTS_FILE)) return [];
+    const raw = fs3.readFileSync(CUSTOM_ENDPOINTS_FILE, "utf8");
     const data = JSON.parse(raw);
     return Array.isArray(data) ? data : [];
   } catch {
@@ -1981,8 +3338,8 @@ function readCustomEndpoints() {
   }
 }
 function writeCustomEndpoints(endpoints) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(CUSTOM_ENDPOINTS_FILE, JSON.stringify(endpoints, null, 2), "utf8");
+  fs3.mkdirSync(DATA_DIR2, { recursive: true });
+  fs3.writeFileSync(CUSTOM_ENDPOINTS_FILE, JSON.stringify(endpoints, null, 2), "utf8");
 }
 function findCustomEndpoint(id) {
   return readCustomEndpoints().find((e) => e.id === id);
@@ -2313,11 +3670,28 @@ async function listNvidiaModels() {
     return { models: [], error: e?.message || "Could not list NVIDIA models." };
   }
 }
+async function listVyceModels() {
+  if (!isProviderConnected("vyce")) return { models: [], error: "No VyceAI API key saved." };
+  try {
+    const r = await fetch(`${VYCE_BASE_URL}/models`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${vyceKey()}` }
+    });
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(providerErrorText(b, r.status));
+    const rows = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
+    return {
+      models: rows.map((m) => ({ id: String(m?.id ?? m?.name ?? ""), name: String(m?.name || m?.id || ""), source: "account" })).filter((m) => m.id)
+    };
+  } catch (e) {
+    return { models: [], error: e?.message || "Could not list VyceAI models." };
+  }
+}
 app.get("/api/models/available", async (req, res) => {
   const refresh = req.query.refresh === "1" || req.query.refresh === "true";
   const probe = req.query.probe === "1" || req.query.probe === "true";
   const only = String(req.query.provider || "").trim();
-  if (only && !["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "nvidia"].includes(only)) {
+  if (only && !["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "nvidia", "vyce"].includes(only)) {
     return res.status(400).json({ error: `Unknown provider: ${only}` });
   }
   if (!only && !probe && !refresh && availableModelsCache && Date.now() - availableModelsCache.at < 3e5) {
@@ -2359,6 +3733,11 @@ app.get("/api/models/available", async (req, res) => {
     providers.nvidia = nv.models;
     if (nv.error) errors.nvidia = nv.error;
   }
+  if (!only || only === "vyce") {
+    const vy = await listVyceModels();
+    providers.vyce = vy.models;
+    if (vy.error) errors.vyce = vy.error;
+  }
   const payload = {
     providers,
     errors,
@@ -2372,7 +3751,7 @@ app.get("/api/models/available", async (req, res) => {
 app.post("/api/models/probe", async (req, res) => {
   const provider = String(req.body?.provider || "").trim();
   const model = String(req.body?.model || "").trim();
-  if (!["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "nvidia"].includes(provider)) {
+  if (!["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "nvidia", "vyce"].includes(provider)) {
     return res.status(400).json({ error: "Choose a provider to test." });
   }
   if (!model || model.length > 200) {
@@ -2425,8 +3804,150 @@ app.get("/api/models/catalog", async (_req, res) => {
     return res.status(502).json({ error: `Could not load the live model catalog (${err?.message || "network error"}).` });
   }
 });
+async function withInternetSources(messages, groundOn) {
+  const query = String(groundOn.query || "").trim().slice(0, 200);
+  if (!query) return messages;
+  const subject = String(groundOn.subject || "");
+  const [web, found] = await Promise.all([
+    research(query, 1200).then((r) => r.sources).catch(() => []),
+    literatureSources(query, subject).catch(() => [])
+  ]);
+  const seen = /* @__PURE__ */ new Set();
+  const sources = [...found, ...web].filter((s) => {
+    if (!s?.text || seen.has(s.url)) return false;
+    seen.add(s.url);
+    return true;
+  }).slice(0, 6);
+  if (!sources.length) return messages;
+  const block = sources.map((s, i) => `[${i + 1}] ${s.title}
+${s.url}
+${String(s.text).slice(0, 1200)}`).join("\n\n");
+  const last = messages[messages.length - 1];
+  return [
+    ...messages.slice(0, -1),
+    { ...last, content: `${last.content}
+
+Internet sources found for this topic. Read them, then check the keyed option against them before you answer: """${block}"""` }
+  ];
+}
+app.get("/nvidia-progress", (_req, res) => {
+  res.type("html").send(fs3.readFileSync(path3.join(process.cwd(), "server", "nvidia-progress.html"), "utf8"));
+});
+app.post("/api/ai/verify-item", async (req, res) => {
+  const { provider, model, question, groundOn } = req.body || {};
+  if (!provider || !question || typeof question !== "object") {
+    return res.status(400).json({ error: "provider and question are required." });
+  }
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) controller.abort();
+  });
+  const item = JSON.stringify({
+    stem: question.stem,
+    questionText: question.questionText,
+    options: question.options,
+    keyedAnswer: question.correctOption,
+    keyFact: question.keyFact
+  });
+  const messages = [{
+    role: "user",
+    content: `Check this exam item against the sources attached after this request.
+
+Item:
+${item}
+
+Answer with one JSON object: {"keyCorrect": true or false, "premiseSupported": true or false, "reason": "one sentence"}.
+- keyCorrect is false only if the sources show the keyed answer is wrong, or another option is clearly better. If the sources simply do not mention the topic, keyCorrect is true.
+- premiseSupported is false only if the sources contradict the item or say the study, product or therapy it relies on does not exist. Mentioning nothing about it is not a contradiction.`
+  }];
+  try {
+    const grounded = groundOn && typeof groundOn === "object" ? await withInternetSources(messages, groundOn) : messages;
+    const text = await runCompletion({
+      provider,
+      model,
+      system: "You are a strict medical fact checker for postgraduate exam items. Answer only with the JSON object.",
+      messages: grounded,
+      json: true,
+      effort: "min",
+      purpose: "verify",
+      signal: controller.signal
+    });
+    const parsed = extractJson(text);
+    const supported = parsed?.keyCorrect !== false && parsed?.premiseSupported !== false;
+    return res.json({ verdict: supported ? "supported" : "unsupported", reason: String(parsed?.reason ?? "").slice(0, 300) });
+  } catch (err) {
+    if (controller.signal.aborted) return;
+    const status2 = err instanceof ApiError ? err.status : 502;
+    return res.status(status2).json({ error: err?.message || "Verification failed." });
+  }
+});
+app.post("/api/export/questions", (req, res) => {
+  const dir = path3.join(process.cwd(), "exports");
+  fs3.mkdirSync(dir, { recursive: true });
+  const name = `questions-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`;
+  fs3.writeFileSync(path3.join(dir, name), JSON.stringify(req.body, null, 2), "utf8");
+  res.json({ ok: true, file: path3.join("exports", name) });
+});
+app.post("/api/ai/nvidia-stats/reset", (_req, res) => {
+  nvidiaStats.started = 0;
+  nvidiaStats.inFlight = 0;
+  nvidiaStats.finished = { ok: 0, failed: 0, stopped: 0 };
+  nvidiaStats.byModel = {};
+  nvidiaStats.events = [];
+  nvidiaStats.accepted = 0;
+  nvidiaStats.dropped = {};
+  nvidiaStats.repairs = {};
+  res.json({ ok: true });
+});
+app.post("/api/ai/nvidia-stats/question", (req, res) => {
+  const { outcome, reason, draft } = req.body || {};
+  if (outcome === "accepted") nvidiaStats.accepted += 1;
+  else if (outcome === "dropped") {
+    const key = String(reason || "other");
+    nvidiaStats.dropped[key] = (nvidiaStats.dropped[key] ?? 0) + 1;
+    if (draft && typeof draft === "object") {
+      try {
+        const dir = path3.join(process.cwd(), "tools", "quality", "out");
+        fs3.mkdirSync(dir, { recursive: true });
+        fs3.appendFileSync(path3.join(dir, "dropped-questions.jsonl"), JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), reason: key, draft }) + "\n");
+      } catch {
+      }
+    }
+  }
+  res.json({ ok: true });
+});
+app.post("/api/ai/nvidia-stats/repair", (req, res) => {
+  const { outcome } = req.body || {};
+  if (outcome === "attempted" || outcome === "accepted" || outcome === "failed") {
+    nvidiaStats.repairs[outcome] = (nvidiaStats.repairs[outcome] ?? 0) + 1;
+  }
+  res.json({ ok: true });
+});
+var lastEngine = null;
+app.get("/api/ai/nvidia-stats", (_req, res) => {
+  const f = nvidiaStats.finished;
+  const totals = Object.values(nvidiaStats.byModel).reduce(
+    (sum, m) => ({ ok: sum.ok + m.ok, refused: sum.refused + m.refused, error: sum.error + m.error, timeout: sum.timeout + m.timeout }),
+    { ok: 0, refused: 0, error: 0, timeout: 0 }
+  );
+  res.json({
+    started: nvidiaStats.started,
+    inFlight: nvidiaStats.inFlight,
+    questionsOk: f.ok,
+    questionsFailed: f.failed,
+    questionsStopped: f.stopped,
+    accepted: nvidiaStats.accepted,
+    repairs: nvidiaStats.repairs,
+    dropped: nvidiaStats.dropped,
+    attempts: totals,
+    byModel: Object.fromEntries(Object.entries(nvidiaStats.byModel).map(([k, v]) => [k.replace("nvidia/", ""), v])),
+    events: nvidiaStats.events.slice(-25).reverse(),
+    engine: lastEngine,
+    serverTime: (/* @__PURE__ */ new Date()).toISOString()
+  });
+});
 app.post("/api/ai/complete", async (req, res) => {
-  const { provider, model, system, messages, json, effort } = req.body || {};
+  const { provider, model, system, messages, json, effort, groundOn } = req.body || {};
   if (!provider) {
     return res.status(400).json({ error: "No AI provider selected. Connect an AI provider in Settings." });
   }
@@ -2438,12 +3959,179 @@ app.post("/api/ai/complete", async (req, res) => {
     if (!res.writableFinished) controller.abort();
   });
   try {
-    const text = await runCompletion({ provider, model, system, messages, json, effort, signal: controller.signal, session: req.header("x-opencode-session") || void 0 });
+    const grounded = groundOn && typeof groundOn === "object" ? await withInternetSources(messages, groundOn) : messages;
+    const text = await runCompletion({ provider, model, system, messages: grounded, json, effort, purpose: "write", signal: controller.signal, session: req.header("x-opencode-session") || void 0 });
     if (controller.signal.aborted) return;
     if (!text || !text.trim()) {
       return res.status(502).json({ error: "The AI provider returned an empty response. Try again." });
     }
     return res.json({ success: true, text, model: model || DEFAULT_MODELS[provider] });
+  } catch (err) {
+    if (controller.signal.aborted) return;
+    const status2 = err instanceof ApiError ? err.status : 502;
+    if (!res.headersSent) return res.status(status2).json({ error: err?.message || "AI request failed." });
+  }
+});
+var completionJobs = /* @__PURE__ */ new Map();
+setInterval(() => {
+  const cutoff = Date.now() - 15 * 6e4;
+  for (const [id, job] of completionJobs) if (job.createdAt < cutoff) {
+    job.controller.abort();
+    completionJobs.delete(id);
+  }
+}, 6e4).unref();
+app.post("/api/ai/jobs", (req, res) => {
+  const { provider, model, system, messages, json, effort, groundOn } = req.body || {};
+  if (!provider) return res.status(400).json({ error: "No AI provider selected. Connect an AI provider in Settings." });
+  if (!Array.isArray(messages) || messages.length === 0 || messages.some((m) => !m || typeof m.content !== "string")) {
+    return res.status(400).json({ error: "messages must be an array of {role, content}." });
+  }
+  const id = crypto.randomUUID();
+  const job = { controller: new AbortController(), done: false, status: 200, body: null, createdAt: Date.now() };
+  completionJobs.set(id, job);
+  const session = req.header("x-opencode-session") || void 0;
+  lastEngine = { provider: String(provider), model: String(model || DEFAULT_MODELS[provider] || provider), at: (/* @__PURE__ */ new Date()).toISOString() };
+  const countHere = provider !== "nvidia";
+  if (countHere) {
+    nvidiaStats.started += 1;
+    nvidiaStats.inFlight += 1;
+  }
+  void (async () => {
+    try {
+      const grounded = groundOn && typeof groundOn === "object" ? await withInternetSources(messages, groundOn) : messages;
+      const text = await runCompletion({ provider, model, system, messages: grounded, json, effort, purpose: "write", signal: job.controller.signal, session });
+      if (!text || !text.trim()) {
+        job.status = 502;
+        job.body = { error: "The AI provider returned an empty response. Try again." };
+      } else {
+        job.status = 200;
+        job.body = { success: true, text, model: model || DEFAULT_MODELS[provider] };
+      }
+    } catch (err) {
+      job.status = err instanceof ApiError ? err.status : 502;
+      job.body = { error: err?.message || "AI request failed." };
+    } finally {
+      job.done = true;
+      if (countHere) {
+        nvidiaAttempt(String(model || DEFAULT_MODELS[provider] || provider), job.status === 200 ? "ok" : "error", String(job.status));
+        nvidiaStats.inFlight = Math.max(0, nvidiaStats.inFlight - 1);
+        if (job.status === 200) nvidiaStats.finished.ok += 1;
+        else if (job.controller.signal.aborted) nvidiaStats.finished.stopped += 1;
+        else nvidiaStats.finished.failed += 1;
+      }
+    }
+  })();
+  return res.json({ id });
+});
+app.get("/api/ai/jobs/:id", (req, res) => {
+  const job = completionJobs.get(String(req.params.id));
+  if (!job) return res.status(404).json({ error: "Unknown or expired job." });
+  if (!job.done) return res.json({ done: false });
+  completionJobs.delete(String(req.params.id));
+  return res.json({ done: true, status: job.status, body: job.body, retryAfter: job.retryAfter });
+});
+app.delete("/api/ai/jobs/:id", (req, res) => {
+  const job = completionJobs.get(String(req.params.id));
+  if (job) {
+    job.controller.abort();
+    completionJobs.delete(String(req.params.id));
+  }
+  res.json({ ok: true });
+});
+function nemotronWords(body) {
+  const out = [];
+  const visit = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    const text = typeof node.text === "string" ? node.text : node.text_prediction?.text;
+    const shape = node.bounding_box ?? node.bbox ?? node.points ?? node.bounding_box?.points;
+    const pts = Array.isArray(shape) ? shape : Array.isArray(shape?.points) ? shape.points : void 0;
+    if (typeof text === "string" && text.trim() && pts && pts.length) {
+      const xs = [];
+      const ys = [];
+      if (pts.every((v) => typeof v === "number")) {
+        pts.forEach((v, i) => (i % 2 === 0 ? xs : ys).push(v));
+      } else {
+        for (const p of pts) {
+          const x = Array.isArray(p) ? p[0] : p?.x;
+          const y = Array.isArray(p) ? p[1] : p?.y;
+          if (typeof x === "number" && typeof y === "number") {
+            xs.push(x);
+            ys.push(y);
+          }
+        }
+      }
+      if (xs.length && ys.length) {
+        const conf = Number(node.confidence ?? node.text_prediction?.confidence);
+        out.push({
+          text: text.trim(),
+          confidence: Number.isFinite(conf) ? conf * (conf <= 1 ? 100 : 1) : 90,
+          bbox: { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) }
+        });
+      }
+      return;
+    }
+    Object.values(node).forEach(visit);
+  };
+  visit(body);
+  return out;
+}
+app.post("/api/ocr/nemotron", async (req, res) => {
+  const image = req.body?.image;
+  if (typeof image !== "string" || !/^data:image\/(jpeg|png|webp);base64,/.test(image)) {
+    return res.status(400).json({ error: "image must be a JPEG, PNG or WebP data URL." });
+  }
+  const key = nvidiaKey();
+  if (!key) return res.status(401).json({ error: notConnectedMessage("nvidia") });
+  if (image.split(",")[1].length > 18e4) {
+    return res.status(413).json({ error: "The page image is too large for the NVIDIA OCR API. Use a smaller image." });
+  }
+  try {
+    const r = await fetch("https://ai.api.nvidia.com/v1/cv/nvidia/nemotron-ocr-v2", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ input: [{ type: "image_url", url: image }] }),
+      signal: AbortSignal.timeout(12e4)
+    });
+    const raw = await r.text();
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+    }
+    if (!r.ok) return res.status(r.status === 429 ? 429 : 502).json({ error: `NVIDIA OCR: ${providerErrorText(body, r.status)}` });
+    const words = nemotronWords(body);
+    if (process.env.OCR_DEBUG) console.log("[ocr/nemotron] raw response:", raw.slice(0, 2e3));
+    return res.json({ text: words.map((w) => w.text).join("\n"), words });
+  } catch (err) {
+    return res.status(502).json({ error: err?.message || "The NVIDIA OCR request failed." });
+  }
+});
+app.post("/api/ai/complete-images", async (req, res) => {
+  const { provider, model, system, messages, json, effort, images } = req.body || {};
+  if (provider !== "nvidia") {
+    return res.status(400).json({ error: `Reading page images is not available with ${provider || "this provider"}.` });
+  }
+  if (!Array.isArray(messages) || messages.length === 0 || messages.some((m) => !m || typeof m.content !== "string")) {
+    return res.status(400).json({ error: "messages must be an array of {role, content}." });
+  }
+  if (!Array.isArray(images) || images.length === 0 || images.some((u) => typeof u !== "string" || !/^data:image\/(jpeg|png|webp);base64,/.test(u))) {
+    return res.status(400).json({ error: "images must be JPEG, PNG or WebP data URLs." });
+  }
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) controller.abort();
+  });
+  try {
+    const text = await runCompletion({ provider, model, system, messages, json, effort, images, signal: controller.signal });
+    if (controller.signal.aborted) return;
+    if (!text || !text.trim()) {
+      return res.status(502).json({ error: "The AI provider returned an empty response. Try again." });
+    }
+    return res.json({ success: true, text });
   } catch (err) {
     if (controller.signal.aborted) return;
     const status2 = err instanceof ApiError ? err.status : 502;
@@ -2480,8 +4168,8 @@ app.post("/api/ai/tutor-chat", async (req, res) => {
   }
   let provider = typeof body.provider === "string" ? body.provider : "";
   if (!provider) {
-    const candidates = ["chatgpt", "claude", "grok", "opencode"];
-    provider = candidates.find((p) => isProviderConnected(p)) || (isProviderConnected("gemini") ? "gemini" : "");
+    const candidates = ["nvidia", "chatgpt", "claude", "grok", "opencode", "gemini"];
+    provider = candidates.find((p) => isProviderConnected(p)) || "";
   }
   if (!provider) {
     return res.status(401).json({ error: "No AI provider is connected yet. Connect an AI provider in Settings \u2192 AI Subscription Hub." });
@@ -2500,15 +4188,31 @@ Known trap note: ${String(contextQuestion.trapExplanation).slice(0, 400)}` : ""}
     "Respond with ONLY a single valid JSON object (no markdown fences) shaped exactly like:",
     '{"reply": "your main markdown answer", "reasoningSteps": [{"step": "short step name", "detail": "one or two sentences"}], "pearl": "one-line high-yield board pearl or empty string", "citations": ["textbook / guideline citations"], "suggestedFollowups": ["2-3 probing follow-up questions the resident could ask next"]}',
     "- reasoningSteps: 2-5 steps when the answer involves reasoning; may be empty for simple facts.",
-    '- "reply" must contain the complete answer itself, not a summary of the other fields.'
+    '- "reply" must contain the complete answer itself, not a summary of the other fields.',
+    '- Start "reply" with one bold line giving the direct answer, for example "**Answer: C - voriconazole.**", then the explanation. A learner revising in a hurry should get the answer in the first line.',
+    `- Each citation must name the book with its edition and the chapter or guideline section, for example "Harrison's Principles of Internal Medicine, 21st Ed, Ch. 142 (Invasive aspergillosis)". Cite only sources you are confident exist; leave the list empty rather than guess a chapter.`,
+    // The reply is rendered as markdown. Without this the model often returns one unbroken
+    // block of prose, which reads as a dense wall of text in the chat bubble.
+    '- Format "reply" for readability: separate distinct topics or stages into their own paragraphs using \\n\\n, and use a short markdown heading or a "- " bullet list where the content is genuinely a list (e.g. investigations, differentials, management steps). Do not return one unbroken paragraph.',
+    // Optional illustration request. The model DESCRIBES the figure it wants; it must never
+    // choose or link an image, because the server has to vision-verify whatever is shown.
+    body.requestImage ? '- If (and only if) a clinical figure would materially help, make the LAST line of "reply" exactly: IMAGE_CUE: <short description of the single most useful image, e.g. "chest X-ray of tension pneumothorax">. Describe only the finding and modality \u2014 never output a URL, filename or markdown image. If no figure would genuinely help, make the last line: IMAGE_CUE: NONE' : ""
   ].filter(Boolean).join("\n");
   const history = Array.isArray(body.history) ? body.history.filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string").slice(-8).map((m) => ({ role: m.role, content: m.content })) : [];
   const messages = [...history, { role: "user", content: message }];
+  const evidence = await literatureSources(message.slice(0, 200), typeof body.subject === "string" ? body.subject : "").catch(() => []);
+  const groundedSystem = evidence.length ? [
+    system,
+    "Evidence retrieved for this question (use it where it applies, cite it by its title, and say when a point is from your own knowledge rather than these sources):",
+    ...evidence.map((s, i) => `[${i + 1}] ${s.title}
+${s.url}
+${String(s.text || "").slice(0, 1200)}`)
+  ].join("\n\n") : system;
   try {
     const raw = await runCompletion({
       provider,
       model: typeof body.model === "string" ? body.model : void 0,
-      system,
+      system: groundedSystem,
       messages,
       json: true,
       effort: typeof body.effort === "string" ? body.effort : void 0,
@@ -2523,6 +4227,7 @@ Known trap note: ${String(contextQuestion.trapExplanation).slice(0, 400)}` : ""}
       reply = raw.trim();
     }
     const result = { success: true, reply, modelUsed: body.model || DEFAULT_MODELS[provider] };
+    if (evidence.length) result.sources = evidence.map((s) => ({ title: s.title, url: s.url }));
     if (parsed && !Array.isArray(parsed)) {
       if (Array.isArray(parsed.reasoningSteps)) {
         const steps = parsed.reasoningSteps.filter((s) => s && typeof s.step === "string" && typeof s.detail === "string" && s.step.trim() && s.detail.trim()).map((s) => ({ step: s.step, detail: s.detail })).slice(0, 6);
@@ -2565,6 +4270,237 @@ app.get("/api/images/proxy", async (req, res) => {
     return res.status(502).json({ error: err?.message || "Could not load that image." });
   }
 });
+async function visionVerify(imageUrl, claim, modality, key, attempt = 0) {
+  const { buffer, type } = await fetchImage(imageUrl);
+  if (!/^image\/(jpeg|png|webp)$/i.test(type)) {
+    return { pass: false, reason: `Unsupported image type (${type}) \u2014 image skipped.` };
+  }
+  const dataUrl = `data:${type};base64,${buffer.toString("base64")}`;
+  const model_ = process.env.VISION_MODEL || DEFAULT_MODELS.nvidia;
+  const instruction = [
+    "One image is shown, attached to a medical exam question.",
+    `The question claims the image shows: "${claim}"${modality ? ` (modality: ${modality})` : ""}.`,
+    "Look ONLY at the pixels. Decide:",
+    "1. Does this image actually depict that finding / condition / diagnosis?",
+    "2. Is the modality consistent (an ECG is not a photo; a chest X-ray is not a histology slide)?",
+    'First say, in "shows", what this image specifically shows (the exact condition or finding if you can tell, for example "bovine spongiform encephalopathy, brain histology" or "adrenoleukodystrophy MRI").',
+    'Then set pass=true ONLY if what it shows is the SAME specific condition or finding as the claim. A picture of a different disease in the same modality (a brain slide for a kidney disease, an MRI of another white-matter disease) is pass=false. A picture that is only "consistent with" the claim, or where you cannot tell the specific condition from the pixels alone, is pass=false. If the image is unrelated, a chart, text or a different body part, pass=false.',
+    'Answer with ONLY this JSON object and nothing else: {"shows": "what the image shows", "pass": true, "reason": "one short sentence"}'
+  ].join("\n");
+  const payload = JSON.stringify({
+    model: model_,
+    messages: [
+      { role: "system", content: "You are a strict medical-image verifier. Reply with only a JSON object." },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: instruction },
+          { type: "image_url", image_url: { url: dataUrl } }
+        ]
+      }
+    ],
+    temperature: 0,
+    // This is a reasoning model: a small budget is spent entirely on hidden
+    // reasoning (finish_reason "length") and returns empty content. Give it room.
+    max_tokens: Number(process.env.VISION_MAX_TOKENS || 2048),
+    // A yes/no verification needs no deliberation at all, and the reasoning trace was
+    // what silently ate the budget and produced empty verdicts. Turn it off outright.
+    chat_template_kwargs: { enable_thinking: false },
+    stream: false
+  });
+  const r = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: payload,
+    // The reasoning model occasionally takes a very long time on a hard image; too
+    // short a timeout silently discards a perfectly good image. Overridable.
+    signal: AbortSignal.timeout(Number(process.env.VISION_TIMEOUT_MS || 18e4))
+  });
+  const raw = await r.text();
+  let body = {};
+  try {
+    body = raw ? JSON.parse(raw) : {};
+  } catch {
+  }
+  if (!r.ok) {
+    if (r.status >= 500 && attempt < 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      return visionVerify(imageUrl, claim, modality, key, attempt + 1);
+    }
+    aiLog({ provider: "nvidia", model: model_, status: r.status, error: true, route: "images/verify" });
+    return { pass: false, reason: `Vision check failed (HTTP ${r.status}) \u2014 image skipped.` };
+  }
+  const msg = body?.choices?.[0]?.message;
+  const content = msg?.content;
+  let text = typeof content === "string" ? content : Array.isArray(content) ? content.map((p) => typeof p === "string" ? p : p?.text || "").join("") : "";
+  if (!text.trim() && typeof msg?.reasoning_content === "string") text = msg.reasoning_content;
+  const finish = body?.choices?.[0]?.finish_reason;
+  const passMatch = text.match(/"pass"\s*:\s*(true|false)/i);
+  const reasonMatch = text.match(/"reason"\s*:\s*"?([^"}\n]+)"?/i);
+  const parsed = parseJsonBlock(text);
+  const pass = parsed?.pass === true || !parsed && passMatch?.[1]?.toLowerCase() === "true";
+  const parsedReason = typeof parsed?.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : reasonMatch?.[1]?.trim();
+  const reason = parsedReason ? parsedReason.slice(0, 240) : pass ? "Verified." : finish === "length" ? "Vision model ran out of tokens before answering \u2014 image skipped." : "Model did not confirm the claimed finding.";
+  aiLog({ provider: "nvidia", model: model_, status: r.status, route: "images/verify", pass, finish, text_len: text.length });
+  return process.env.VISION_DEBUG ? { pass, reason, debug: { raw: text.slice(0, 1500), finish } } : { pass, reason };
+}
+app.post("/api/images/verify", async (req, res) => {
+  const imageUrl = typeof req.body?.imageUrl === "string" ? req.body.imageUrl : "";
+  const claim = typeof req.body?.claim === "string" ? req.body.claim.trim().slice(0, 800) : "";
+  const modality = typeof req.body?.modality === "string" ? req.body.modality.trim().slice(0, 40) : "";
+  if (!imageUrl || !claim) {
+    return res.status(400).json({ error: "imageUrl and claim are required." });
+  }
+  const key = nvidiaKey();
+  if (!key) {
+    return res.json({ pass: false, reason: "No vision provider connected \u2014 image skipped." });
+  }
+  try {
+    const verdict = await visionVerify(imageUrl, claim, modality, key);
+    return res.json(verdict);
+  } catch (err) {
+    return res.json({ pass: false, reason: err?.message || "Vision check failed \u2014 image skipped." });
+  }
+});
+app.get("/api/images/bank", (_req, res) => {
+  try {
+    return res.json({ success: true, ...bankStats() });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Could not read the image bank." });
+  }
+});
+app.post("/api/images/bank/build", async (req, res) => {
+  try {
+    const wantVerify = req.body?.verify === true;
+    const key = wantVerify ? nvidiaKey() : null;
+    const summary = await buildImageBank({
+      limitPerSeed: Number(req.body?.limitPerSeed) || 3,
+      verify: wantVerify && key ? async (entry) => {
+        const claim = `${entry.ground_truth}${entry.modality ? ` (${entry.modality})` : ""}`;
+        try {
+          const verdict = await visionVerify(entry.imageUrl, claim, entry.modality, key);
+          return verdict.pass === true;
+        } catch {
+          return false;
+        }
+      } : void 0
+    });
+    return res.json({ success: true, ...summary, verified: Boolean(wantVerify && key) });
+  } catch (err) {
+    return res.status(502).json({ error: err?.message || "Image-bank build failed." });
+  }
+});
+app.get("/api/images/qa-results", (_req, res) => {
+  try {
+    const file = path3.join(DATA_DIR2, "image-first-results.json");
+    if (!fs3.existsSync(file)) return res.json({ success: true, available: false, run: null });
+    const run = JSON.parse(fs3.readFileSync(file, "utf8"));
+    return res.json({ success: true, available: true, run });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Could not read the last image-first run." });
+  }
+});
+app.get("/api/images/bank/entry", (req, res) => {
+  const id = typeof req.query.id === "string" ? req.query.id : "";
+  const entry = id ? getBankImage(id) : null;
+  if (!entry) return res.status(404).json({ error: "No bank entry with that id." });
+  return res.json({ success: true, entry });
+});
+app.get("/api/images/bank/entries", (req, res) => {
+  try {
+    const subject = typeof req.query.subject === "string" ? req.query.subject : void 0;
+    const modality = typeof req.query.modality === "string" ? req.query.modality : void 0;
+    const limit = Number(req.query.limit) || 6;
+    const rows = subject || modality ? queryImageBank({ subject, modality, limit }) : loadImageBank().slice(0, limit);
+    return res.json({ success: true, total: loadImageBank().length, results: rows });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Could not read the image bank." });
+  }
+});
+app.post("/api/images/find-for-explanation", async (req, res) => {
+  const body = req.body || {};
+  const cue = typeof body.cue === "string" ? body.cue.trim().slice(0, 300) : "";
+  const subject = typeof body.subject === "string" ? body.subject : "";
+  if (!cue) return res.json({ found: false, reason: "No image cue was supplied." });
+  try {
+    const candidates = searchBankByText(cue, { subject, limit: 4 });
+    if (!candidates.length) {
+      return res.json({ found: false, reason: "No bank image matches that description." });
+    }
+    const key = nvidiaKey();
+    if (!key) {
+      return res.json({ found: false, reason: "No vision provider connected \u2014 image skipped." });
+    }
+    for (const entry of candidates) {
+      const claim = `${entry.ground_truth}${entry.modality ? ` (${entry.modality})` : ""}`;
+      let verdict;
+      try {
+        verdict = await visionVerify(entry.imageUrl, claim, entry.modality, key);
+      } catch (err) {
+        verdict = { pass: false, reason: err?.message || "Vision check failed." };
+      }
+      if (verdict.pass) {
+        return res.json({
+          found: true,
+          imageId: entry.image_id,
+          // SECURITY/EXAM-INTEGRITY: the ground truth is Omitted from the response the
+          // UI renders up-front. Attribution + licence only; the finding is withheld
+          // because it can be the answer to the very question being explained.
+          imageUrl: entry.previewUrl || entry.imageUrl,
+          source: entry.source,
+          sourceUrl: entry.sourceUrl,
+          licence: entry.licence,
+          attribution: entry.attribution,
+          modality: entry.modality,
+          subject: entry.subject,
+          verification: verdict.reason
+        });
+      }
+      aiLog({ provider: "nvidia", route: "images/find-for-explanation", pass: false, reason: verdict.reason.slice(0, 160), image_id: entry.image_id });
+    }
+    return res.json({ found: false, reason: "No bank image passed verification for that description." });
+  } catch (err) {
+    return res.json({ found: false, reason: err?.message || "Image lookup failed." });
+  }
+});
+app.post("/api/images/generate-question", async (req, res) => {
+  const body = req.body || {};
+  const imageUrl = typeof body.imageUrl === "string" ? body.imageUrl : "";
+  const groundTruth = typeof body.groundTruth === "string" ? body.groundTruth.trim() : "";
+  const imageId = typeof body.imageId === "string" ? body.imageId : "";
+  if (!imageUrl || !groundTruth) {
+    return res.status(400).json({ error: "imageUrl and groundTruth are required." });
+  }
+  const key = nvidiaKey();
+  if (!key) {
+    return res.status(401).json({ error: notConnectedMessage("nvidia") });
+  }
+  try {
+    const question = await generateQuestionFromImage({
+      imageUrl,
+      groundTruth,
+      modality: typeof body.modality === "string" ? body.modality : "",
+      subject: typeof body.subject === "string" ? body.subject : "",
+      exam: typeof body.exam === "string" ? body.exam : "NEET_PG",
+      difficultyTier: typeof body.difficultyTier === "string" ? body.difficultyTier : "MEDIUM",
+      optionCount: Number(body.optionCount) === 5 ? 5 : 4,
+      apiKey: key,
+      model: typeof body.model === "string" ? body.model : process.env.VISION_MODEL || DEFAULT_MODELS.nvidia
+    });
+    return res.json({ success: true, question, model: process.env.VISION_MODEL || DEFAULT_MODELS.nvidia });
+  } catch (err) {
+    const msg = String(err?.message || "Image-first generation failed.");
+    const status2 = msg === "image_mismatch" ? 422 : 502;
+    if (msg === "image_mismatch" && imageId) {
+      try {
+        rejectImage(imageId, groundTruth, msg);
+      } catch {
+      }
+    }
+    aiLog({ provider: "nvidia", route: "images/generate-question", error: true, status: status2, reason: msg.slice(0, 200) });
+    return res.status(status2).json({ error: msg });
+  }
+});
 app.get("/api/images/sources", (_req, res) => {
   res.json({
     embedded: [
@@ -2583,7 +4519,9 @@ function qaComplete(provider, model) {
       model: modelOverride || model || DEFAULT_MODELS[provider] || DEFAULT_MODELS.opencode,
       system,
       messages,
-      json
+      json,
+      // QA checks are short judgements on a finished question; thinking here made each review take minutes.
+      effort: "min"
     });
   };
 }
@@ -2629,14 +4567,21 @@ app.post("/api/qa/review-batch", async (req, res) => {
   const provider = String(req.body?.provider || "opencode");
   const model = String(req.body?.model || DEFAULT_MODELS[provider] || "");
   const complete = runLlm ? qaComplete(provider, model) : void 0;
-  const reviews = [];
-  for (const q of questions.slice(0, 200)) {
-    try {
-      reviews.push(await runQaPipeline(q, { complete, runLlm, bank: qaBank }));
-    } catch (err) {
-      reviews.push({ questionId: q?.id, error: err?.message || "QA failed", status: "REVIEWING" });
+  const list = questions.slice(0, 200);
+  const reviews = new Array(list.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < list.length) {
+      const i = next++;
+      const q = list[i];
+      try {
+        reviews[i] = await runQaPipeline(q, { complete, runLlm, bank: qaBank });
+      } catch (err) {
+        reviews[i] = { questionId: q?.id, error: err?.message || "QA failed", status: "REVIEWING" };
+      }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, list.length) }, worker));
   return res.json({ reviews });
 });
 app.post("/api/qa/refine-batch", async (req, res) => {
@@ -2657,17 +4602,104 @@ app.post("/api/qa/refine-batch", async (req, res) => {
 app.post("/api/web/research", async (req, res) => {
   const query = typeof req.body?.query === "string" ? req.body.query : "";
   try {
-    const out = await research(query);
+    const pageChars = Math.min(3e4, Math.max(2500, Number(req.body?.pageChars) || 2500));
+    const out = await research(query, pageChars);
     return res.json({ success: true, sources: out.sources, retrievedAt: out.retrievedAt });
   } catch (err) {
     return res.status(502).json({ error: err?.message || "Web research failed." });
+  }
+});
+var OFFICIAL_EXAM_SOURCES = {
+  NEET_PG: {
+    label: "NBEMS (National Board of Examinations)",
+    hosts: ["natboard.edu.in", "nbe.edu.in"],
+    queries: ["NBEMS NEET-PG exam date notification", "NEET-PG 2027 information bulletin exam date"]
+  },
+  INI_CET: {
+    label: "AIIMS (aiimsexams.ac.in)",
+    hosts: ["aiimsexams.ac.in", "aiims.edu"],
+    queries: ["AIIMS INI-CET exam date notification", "aiimsexams INI-CET 2027 schedule prospectus"]
+  },
+  AMC_CAT: {
+    label: "Australian Medical Council (amc.org.au)",
+    hosts: ["amc.org.au"],
+    queries: ["AMC MCQ examination dates", "AMC CAT MCQ exam dates 2027 schedule"]
+  }
+};
+app.post("/api/exams/dates", async (req, res) => {
+  const exam = String(req.body?.exam || "").trim().toUpperCase();
+  const spec = OFFICIAL_EXAM_SOURCES[exam];
+  if (!spec) {
+    return res.status(400).json({ error: "Unknown exam. Use NEET_PG, INI_CET or AMC_CAT." });
+  }
+  try {
+    const batches = await Promise.allSettled(spec.queries.map((q) => research(q)));
+    const sources = batches.flatMap((b) => b.status === "fulfilled" ? b.value.sources : []);
+    const official = sources.filter((s) => {
+      try {
+        const host = new URL(String(s.url)).hostname.toLowerCase().replace(/^www\./, "");
+        return spec.hosts.some((h) => host === h || host.endsWith(`.${h}`));
+      } catch {
+        return false;
+      }
+    });
+    const seen = /* @__PURE__ */ new Set();
+    const candidates = [];
+    for (const s of official) {
+      const text = String(s.text || "");
+      for (const m of text.matchAll(/\b(\d{1,2})[\s-](January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\s,-]+(\d{4})\b/g)) {
+        const day = Number(m[1]);
+        const monName = m[2].slice(0, 3).toLowerCase();
+        const months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+        const mi = months.indexOf(monName);
+        if (mi < 0 || day < 1 || day > 31) continue;
+        const d = new Date(Number(m[3]), mi, day, 9, 0);
+        if (Number.isNaN(d.getTime()) || d.getTime() < Date.now()) continue;
+        const iso = d.toISOString();
+        const key = iso.slice(0, 10);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push({
+          iso,
+          sourceUrl: String(s.url),
+          sourceTitle: String(s.title || "").slice(0, 120),
+          context: text.slice(Math.max(0, (m.index || 0) - 60), (m.index || 0) + 90).replace(/\s+/g, " ").trim()
+        });
+      }
+    }
+    candidates.sort((a, b) => a.iso.localeCompare(b.iso));
+    const officialLinks = [
+      ...new Map(
+        official.map((s) => {
+          try {
+            const host = new URL(String(s.url)).hostname.replace(/^www\./, "");
+            return { host, url: String(s.url), title: String(s.title || "").slice(0, 120) };
+          } catch {
+            return null;
+          }
+        }).filter(Boolean).map((l) => [l.host, l])
+      ).values()
+    ].slice(0, 4);
+    return res.json({
+      success: true,
+      exam,
+      officialBody: spec.label,
+      officialDomains: spec.hosts,
+      officialPagesFound: official.length,
+      officialLinks,
+      candidates: candidates.slice(0, 6),
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      note: candidates.length ? "Dates were read from official pages that were reachable. Confirm before saving." : official.length ? "The official page was found, but its dates are loaded with JavaScript, so none could be read. Enter the date manually from the official notice." : "No official page could be reached. Enter the date manually from the official notice."
+    });
+  } catch (err) {
+    return res.status(502).json({ error: err?.message || "Could not check exam dates." });
   }
 });
 app.get("/api/providers/status", (req, res) => {
   const customEndpoints = readCustomEndpoints();
   res.json({
     providers: [
-      ...["gemini", "chatgpt", "claude", "grok", "opencode", "nvidia"].map((id) => ({
+      ...["gemini", "chatgpt", "claude", "grok", "opencode", "nvidia", "vyce"].map((id) => ({
         id,
         model: DEFAULT_MODELS[id],
         connected: isProviderConnected(id)
@@ -2699,21 +4731,41 @@ async function startServer() {
   if (!isProd) {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      // HMR's websocket uses port 24678 by default, which another local copy can hold; the
+      // page then connects to the wrong server and logs errors. DISABLE_HMR turns it off, and
+      // HMR_PORT moves it.
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === "true" ? false : process.env.HMR_PORT ? { port: Number(process.env.HMR_PORT) } : void 0
+      },
       appType: "spa"
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.resolve(__dirname, "dist")));
+    app.use(express.static(path3.resolve(__dirname, "dist")));
     app.get("*", (req, res) => {
-      res.sendFile(path.resolve(__dirname, "dist", "index.html"));
+      res.sendFile(path3.resolve(__dirname, "dist", "index.html"));
     });
   }
-  const httpServer = app.listen(PORT, "127.0.0.1", () => {
-    console.log(`[Pulse Med Server] Running on http://127.0.0.1:${PORT}`);
+  const HOST = process.env.HOST ?? "::";
+  const httpServer = app.listen(PORT, HOST, () => {
+    console.log(`[Pulse Med Server] Running on http://localhost:${PORT} (host: ${HOST})`);
+  });
+  httpServer.on("error", (err) => {
+    if (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL") {
+      console.warn(`[Pulse Med Server] Could not bind ${HOST}, retrying on 127.0.0.1`);
+      app.listen(PORT, "127.0.0.1", () => {
+        console.log(`[Pulse Med Server] Running on http://127.0.0.1:${PORT}`);
+      });
+    } else {
+      throw err;
+    }
   });
   httpServer.requestTimeout = 0;
   httpServer.headersTimeout = 0;
   httpServer.keepAliveTimeout = 12e4;
 }
 startServer();
+export {
+  nemotronWords
+};

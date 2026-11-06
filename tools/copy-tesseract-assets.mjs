@@ -1,5 +1,6 @@
 // Copies the tesseract engine, wasm core and English language data into public/tesseract/ so
-// OCR works with NO network. Runs automatically before `dev` and `build`.
+// OCR works with NO network, and the pdf.js image decoders into public/pdfjs-wasm/.
+// Runs automatically before `dev` and `build`.
 //
 // Why this exists: tesseract.js defaults fetch the worker script, the wasm core and
 // eng.traineddata.gz from jsdelivr. In a packaged app with no internet that hangs at
@@ -36,6 +37,17 @@ if (existsSync(coreDir)) {
 //    only worth it if recognition quality on a specific book demands it.
 const langSrc = path.join(nm, '@tesseract.js-data', 'eng', '4.0.0_best_int', 'eng.traineddata.gz');
 jobs.push([langSrc, path.join(out, 'lang', 'eng.traineddata.gz')]);
+
+// 4. pdf.js decoders. Scanned books often store pages as JPEG 2000 (openjpeg) or JBIG2 images.
+//    Without these wasm files pdf.js skips the image and the page renders white.
+const pdfjsWasm = path.join(nm, 'pdfjs-dist', 'wasm');
+if (existsSync(pdfjsWasm)) {
+  for (const f of await readdir(pdfjsWasm)) {
+    if (/\.(wasm|js)$/.test(f)) {
+      jobs.push([path.join(pdfjsWasm, f), path.join(root, 'public', 'pdfjs-wasm', f)]);
+    }
+  }
+}
 
 let copied = 0;
 let bytes = 0;

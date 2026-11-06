@@ -205,7 +205,9 @@ export function validateAndParseBankJSON(jsonString: string, bankId: BankId): Pa
     // still rejecting anything that is not a usable image reference.
     let validImage: string | undefined = undefined;
     if (typeof item.image === 'string' && item.image.trim()) {
-      const img = item.image.trim();
+      // eMedici stores figures as "./assets/<bank>/<file>" next to its source files. The app
+      // serves that folder from /api/bank-figures/ (see BANK_FIGURES_DIR on the server).
+      const img = item.image.trim().replace(/^\.\/assets\//, '/api/bank-figures/');
       const isProxyOrLocal = /^\/api\/images\/(proxy|bank)\?/i.test(img) || /^\/[^<>"]+\.(jpe?g|png|webp|gif)(\?|$)/i.test(img);
       const isRemote = /^https?:\/\/[^<>"]+\.(jpe?g|png|webp|gif)(\?|$)/i.test(img);
       const isInline = /^data:image\/(jpeg|png|webp|gif);base64,/i.test(img);

@@ -1,6 +1,7 @@
-// Web research for the "Use web sources" option: DuckDuckGo results + PubMed abstracts, fetched here (not in the page).
-// Every source is returned with its URL so the answer can cite it. Only public http(s) pages are fetched.
-// Ported from C:\ad\amc-app\server\web.mjs (the old app's working implementation).
+// Web research for the "Use web sources" option and for question evidence: DuckDuckGo results and Europe PMC
+// abstracts, fetched here (not in the page). Every source is returned with its URL so the answer can cite it.
+// Only public http(s) pages are fetched. PubMed is not used.
+import { bookPassages } from './books.mjs';
 const UA = 'Mozilla/5.0 (X11; Linux x86_64) PulseMed/0.2 (study tool)';
 const TRUSTED = /(nih\.gov|ncbi\.nlm|who\.int|cdc\.gov|nice\.org\.uk|medlineplus|mayoclinic|msdmanuals|statpearls|radiopaedia|cochrane|bmj\.com|thelancet|nejm|jamanetwork|icmr|mohfw|aiims)/i;
 
@@ -47,41 +48,185 @@ async function ddg(q) {
   return out;
 }
 
-async function pubmed(q) {
-  const base = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/';
-  const ids = (await (await get(`${base}esearch.fcgi?db=pubmed&retmode=json&retmax=3&sort=relevance&term=${encodeURIComponent(q)}`)).json()).esearchresult?.idlist ?? [];
-  if (!ids.length) return [];
-  const xml = await (await get(`${base}efetch.fcgi?db=pubmed&retmode=xml&id=${ids.join(',')}`)).text();
-  return [...xml.matchAll(/<PubmedArticle>([\s\S]*?)<\/PubmedArticle>/g)].map((m) => {
-    const a = m[1];
-    const pick = (re) => strip((a.match(re) || [])[1] || '');
-    const abs = [...a.matchAll(/<AbstractText([^>]*)>([\s\S]*?)<\/AbstractText>/g)].map((x) => {
-      const label = (x[1].match(/Label="([^"]+)"/) || [])[1];
-      return (label ? label + ': ' : '') + strip(x[2]);
-    }).join(' ');
-    const id = pick(/<PMID[^>]*>(\d+)<\/PMID>/);
-    return { title: pick(/<ArticleTitle>([\s\S]*?)<\/ArticleTitle>/), url: `https://pubmed.ncbi.nlm.nih.gov/${id}/`, text: `${pick(/<Journal>[\s\S]*?<Title>([\s\S]*?)<\/Title>/)} ${pick(/<PubDate>[\s\S]*?<Year>(\d+)<\/Year>/)}. ${abs}`.slice(0, 2500) };
-  }).filter((s) => s.text.length > 40);
+/** Europe PMC abstracts, optionally limited to some journals. Each result: title, url and abstract text. */
+const EUROPE_PMC = 'https://www.ebi.ac.uk/europepmc/webservices/rest/search';
+async function europePmc(query, journals = []) {
+  const terms = String(query || '').replace(/["\\]/g, ' ').trim().slice(0, 300);
+  if (!terms) return [];
+  const journalPart = journals.length ? `(${journals.map((j) => `JOURNAL:"${j}"`).join(' OR ')}) AND ` : '';
+  const url = `${EUROPE_PMC}?query=${encodeURIComponent(`${journalPart}(${terms}) AND HAS_ABSTRACT:y`)}&format=json&pageSize=3&resultType=core`;
+  const res = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(15000) });
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => ({}));
+  return (data?.resultList?.result || [])
+    .filter((r) => r.abstractText)
+    .map((r) => ({
+      title: strip(r.title || '').slice(0, 300),
+      url: r.doi ? `https://doi.org/${r.doi}` : `https://europepmc.org/article/${r.source || 'MED'}/${r.id}`,
+      text: `${r.journalTitle || ''} ${r.pubYear || ''}. ${strip(r.abstractText)}`.slice(0, 1500),
+    }));
 }
 
-async function pageText(url) {
+async function pageText(url, chars = 2500) {
   const r = await get(url);
   const type = r.headers.get('content-type') || '';
   if (!/text\/html|text\/plain|xml/.test(type)) throw new Error('not a web page');
-  return strip((await r.text()).slice(0, 1_500_000)).slice(0, 2500);
+  return strip((await r.text()).slice(0, 1_500_000)).slice(0, chars);
 }
 
-export async function research(query) {
+// pageChars: how much of each page to keep. The start of a page is often menus, so a fact check asks for more.
+export async function research(query, pageChars = 2500) {
   const q = String(query || '').trim().slice(0, 300);
   if (!q) throw new Error('Nothing to search for.');
-  const [w, p] = await Promise.allSettled([ddg(q), pubmed(q)]);
+  const [w, p, label] = await Promise.allSettled([ddg(q), europePmc(q), openFdaByDrug(q)]);
   const web = (w.status === 'fulfilled' ? w.value : []).sort((a, b) => Number(TRUSTED.test(b.url)) - Number(TRUSTED.test(a.url))).slice(0, 3);
-  const pm = p.status === 'fulfilled' ? p.value : [];
-  const pages = await Promise.allSettled(web.map((x) => pageText(x.url)));
+  const papers = p.status === 'fulfilled' ? p.value : [];
+  const pages = await Promise.allSettled(web.map((x) => pageText(x.url, pageChars)));
+  // Textbook passages from the user's own library come first: they are the book the student studies from.
+  const books = bookPassages(q, 6).map((b) => ({ ...b, kind: 'book' }));
+  // The drug label is first when the query names a drug: full label text beats abstracts for adverse-effect facts.
+  const labels = label.status === 'fulfilled' ? label.value.map((x) => ({ ...x, kind: 'label' })) : [];
   const sources = [
+    ...labels,
+    ...books,
     ...web.map((x, i) => ({ title: x.title, url: x.url, text: (pages[i].status === 'fulfilled' && pages[i].value.length > 200 ? pages[i].value : x.snippet) || x.snippet, kind: 'web' })),
-    ...pm.map((x) => ({ ...x, kind: 'pubmed' })),
+    ...papers.map((x) => ({ ...x, kind: 'europepmc' })),
   ].filter((s) => s.text).map((s, i) => ({ n: i + 1, ...s }));
   if (!sources.length) throw new Error('No sources found (check your internet connection, or try different wording).');
   return { sources, retrievedAt: new Date().toISOString().slice(0, 10) };
+}
+
+/**
+ * Indian journals that Europe PMC indexes, per subject. A subject searches only its own journals, so a
+ * pharmacology question never pulls surgery papers. Anatomy has no indexed Indian journal and searches all of Europe PMC.
+ */
+const SUBJECT_JOURNALS = [
+  [/physiolog/i, ['Indian J Physiol Pharmacol']],
+  [/biochem/i, ['Indian J Biochem Biophys']],
+  [/patholog/i, ['Indian J Pathol Microbiol']],
+  [/pharmacolog/i, ['Indian J Pharmacol']],
+  [/microbiolog/i, ['Indian J Med Microbiol']],
+  [/forensic/i, ['Indian J Forensic Med Toxicol']],
+  [/community|preventive|\bpsm\b/i, ['Indian J Community Med']],
+  [/general medicine|internal medicine/i, ['J Assoc Physicians India', 'Indian J Med Res']],
+  [/surg/i, ['Indian J Surg']],
+  [/obstet|gynae/i, ['J Obstet Gynaecol India']],
+  [/pediatric|paediatric/i, ['Indian Pediatr']],
+  [/orthop/i, ['Indian J Orthop']],
+  [/\bENT\b|oto-?rhino|otolaryng/i, ['Indian J Otolaryngol Head Neck Surg']],
+  [/ophthalm/i, ['Indian J Ophthalmol']],
+  [/dermatolog/i, ['Indian J Dermatol Venereol Leprol']],
+  [/psychiatr/i, ['Indian J Psychiatry']],
+  [/anesth|anaesth/i, ['Indian J Anaesth']],
+  [/radio/i, ['Indian J Radiol Imaging']],
+];
+
+export function journalsFor(subject) {
+  const s = String(subject || '');
+  const hit = SUBJECT_JOURNALS.find(([re]) => re.test(s));
+  return hit ? hit[1] : [];
+}
+
+/** Drug-label text from openFDA for a query, when a label's indications mention it. Used for drug and medicine questions. */
+async function openFdaLabel(query) {
+  const phrase = String(query || '').replace(/["\\]/g, ' ').trim();
+  if (!phrase) return [];
+  const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(`indications_and_usage:"${phrase}"`)}&limit=1`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => ({}));
+  const hit = data?.results?.[0];
+  if (!hit) return [];
+  const name = hit.openfda?.generic_name?.[0] || hit.openfda?.brand_name?.[0] || 'Drug label';
+  const text = [hit.indications_and_usage?.[0], hit.warnings?.[0] || hit.boxed_warning?.[0]]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ');
+  if (!text) return [];
+  return [{ title: `${name} (FDA drug label)`, url: 'https://open.fda.gov/apis/drug/label/', text: text.slice(0, 1200) }];
+}
+
+const NOT_A_DRUG = new Set(['adverse', 'effects', 'effect', 'side', 'drug', 'drugs', 'toxicity', 'treatment', 'features', 'feature',
+  'criteria', 'causes', 'cause', 'diagnosis', 'diagnostic', 'management', 'clinical', 'disease', 'syndrome', 'investigation',
+  'investigations', 'the', 'and', 'with', 'from', 'for', 'about', 'overview', 'complications', 'anatomy', 'physiology']);
+
+/**
+ * The FDA label of a named drug in the query (for example "adverse effects of isoniazid"). Its adverse-reactions and
+ * warnings sections are full, label-grade text, which is what an adverse-effect question needs.
+ */
+async function openFdaByDrug(query) {
+  const words = [...new Set(String(query || '').toLowerCase().match(/[a-z][a-z-]{4,}/g) || [])].filter((w) => !NOT_A_DRUG.has(w));
+  for (const word of words.slice(0, 6)) {
+    const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(`openfda.generic_name:"${word}"`)}&limit=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) }).catch(() => null);
+    if (!res || !res.ok) continue;
+    const hit = (await res.json().catch(() => ({})))?.results?.[0];
+    if (!hit) continue;
+    const name = hit.openfda?.generic_name?.[0] || word;
+    const text = [hit.adverse_reactions?.[0], hit.warnings_and_cautions?.[0] || hit.warnings?.[0]]
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ');
+    if (text) return [{ title: `${name} (FDA label: adverse reactions)`, url: 'https://open.fda.gov/apis/drug/label/', text: text.slice(0, 2500) }];
+  }
+  // A drug class ("proton pump inhibitors") is not a generic name, so it is searched as an established pharmacologic class.
+  // Every non-generic word counts here, including short ones such as "pump".
+  const classWords = String(query || '').toLowerCase().match(/[a-z][a-z-]{2,}/g) || [];
+  const phrase = classWords.filter((w) => !NOT_A_DRUG.has(w)).map((w) => w.replace(/s$/, '')).join(' ').trim();
+  if (phrase) {
+    const url = `https://api.fda.gov/drug/label.json?search=${encodeURIComponent(`openfda.pharm_class_epc:"${phrase}"`)}&limit=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) }).catch(() => null);
+    const hit = res && res.ok ? (await res.json().catch(() => ({})))?.results?.[0] : null;
+    if (hit) {
+      const name = hit.openfda?.generic_name?.[0] || phrase;
+      const text = [hit.adverse_reactions?.[0], hit.warnings_and_cautions?.[0] || hit.warnings?.[0]].filter(Boolean).join(' ').replace(/\s+/g, ' ');
+      if (text) return [{ title: `${name} (FDA label, ${phrase} class: adverse reactions)`, url: 'https://open.fda.gov/apis/drug/label/', text: text.slice(0, 2500) }];
+    }
+  }
+  return [];
+}
+
+/** Drug and medicine subjects, plus unknown subjects (the tutor), also read openFDA labels. */
+function usesDrugLabels(subject) {
+  return !subject || /pharmacolog|medicine|therap|drug|anesth|anaesth|toxicolog/i.test(String(subject));
+}
+
+/**
+ * Evidence for a question on a subject: the subject's Indian journals on Europe PMC, plus an openFDA
+ * drug label where the subject uses drugs. Capped at four items. Each source fails on its own.
+ */
+export async function literatureSources(query, subject) {
+  const drugSubject = usesDrugLabels(subject);
+  // Every subject first reads passages from the owned textbook library, then the drug label, then papers.
+  const book = bookPassages(query, 2, subject);
+  const [label, subjectPapers] = await Promise.all([
+    drugSubject ? openFdaLabel(query).catch(() => []) : Promise.resolve([]),
+    europePmc(query, journalsFor(subject)).catch(() => []),
+  ]);
+  // The subject's journals often hold nothing on a specific claim. If they give fewer than two abstracts,
+  // widen the search to all of Europe PMC, so the judge has something that addresses the claim.
+  let papers = subjectPapers;
+  if (subjectPapers.length < 2) {
+    const wider = await europePmc(query, []).catch(() => []);
+    const seen = new Set(subjectPapers.map((p) => p.title));
+    papers = [...subjectPapers, ...wider.filter((p) => !seen.has(p.title))];
+  }
+  return [...book, ...label, ...papers].slice(0, 4);
+}
+
+/**
+ * The sources the question writer and checker may read, with the licence and status of each.
+ * "live" sources are searched when a question is written or checked; "reference" pages are not searchable yet.
+ */
+export const SOURCE_REGISTRY = [
+  { id: 'europepmc', name: 'Europe PMC abstracts (subject Indian journals)', licence: 'Abstracts free; full text varies by article', fetch: 'Europe PMC REST API', status: 'live' },
+  { id: 'openfda', name: 'openFDA drug labels', licence: 'US government data (openFDA terms)', fetch: 'api.fda.gov', status: 'live' },
+  { id: 'library', name: 'Your textbook library (pulse-library.db, 37 books)', licence: 'Books the user owns; excerpts only', fetch: 'local SQLite full-text index', status: 'live' },
+  { id: 'bookshelf', name: 'NCBI Bookshelf (StatPearls and open textbooks)', licence: 'Varies per book; StatPearls is free to read', fetch: 'NCBI web pages', status: 'blocked: NCBI shows a bot check instead of chapter text' },
+  { id: 'reference-pages', name: 'Reference websites (TeachMeAnatomy, CV Physiology, LibreTexts, WebPath, DermNet, EyeWiki, NHSRC treatment guidelines and others)', licence: 'Varies per site; check before quoting', fetch: 'page text only; no search yet', status: 'reference: readable pages, not searched per question' },
+];
+
+/** Question-writing and checking evidence (kept for the older route name). */
+export async function topicSources(query, subject) {
+  return literatureSources(query, subject);
 }

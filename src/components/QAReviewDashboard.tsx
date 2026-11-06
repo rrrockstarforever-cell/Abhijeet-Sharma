@@ -5,6 +5,7 @@ import React, { useEffect, useState } from 'react';
 import { ShieldCheck, AlertTriangle, CheckCircle2, XCircle, RefreshCw, FileQuestion, Search, ExternalLink } from 'lucide-react';
 import { loadBank, reviewQuestion, recordReviewBatch, updateReviewStatus, type BankEntry } from '../lib/qaClient.ts';
 import { runIntegrityScan, listQuestions, listBatches, type IntegrityIssue } from '../utils/questionBankStorage.ts';
+import { BenchmarkPanel } from './BenchmarkPanel.tsx';
 
 const statusColor: Record<string, string> = {
   APPROVED: 'bg-emerald-50 text-emerald-700 border-emerald-200',
@@ -106,6 +107,8 @@ export const QAReviewDashboard: React.FC = () => {
           </div>
         </div>
       )}
+
+      <BenchmarkPanel />
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm">
         <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">

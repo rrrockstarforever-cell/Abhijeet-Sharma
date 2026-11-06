@@ -72,6 +72,12 @@ export function detectRefinementSignals(q: RefineQuestionInput): RefineSignal {
     if (longOnes === 1) reasons.push('Exactly one option is much longer than the rest.');
     const shortOnes = lens.filter((l) => l < avg * 0.55).length;
     if (shortOnes === 1) reasons.push('Exactly one option is much shorter than the rest.');
+    // The keyed answer being the longest option is the most common test-wise giveaway.
+    const correctLen = correct ? String(correct.text ?? '').trim().length : 0;
+    const sortedDesc = [...lens].sort((a, b) => b - a);
+    if (correctLen > 0 && correctLen === sortedDesc[0] && sortedDesc[0] > (sortedDesc[1] ?? 0) * 1.15) {
+      reasons.push('The correct option is the longest and stands out, a test-wise giveaway.');
+    }
   }
 
   // 4. Meta options that telegraph the key.

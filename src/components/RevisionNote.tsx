@@ -13,7 +13,7 @@ interface RevisionNoteProps {
   className?: string;
 }
 
-/** Render **bold** and `code` inline markers without injecting HTML. */
+/** Render **bold** inline markers and page citations without injecting HTML. */
 function renderInline(text: string, keyPrefix: string, onOpenPage?: (page: number) => void): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
   // split on bold markers and page citations
@@ -35,13 +35,15 @@ function renderInline(text: string, keyPrefix: string, onOpenPage?: (page: numbe
           <button
             key={`${keyPrefix}-p${i}-${match.index}`}
             onClick={() => onOpenPage(pageNum)}
-            className="inline-flex items-center gap-1 mx-0.5 px-1.5 py-0.5 rounded bg-teal-50 border border-[#0f8b8d]/30 text-[#00696b] font-semibold hover:bg-teal-100"
+            className="mx-0.5 inline-flex items-center gap-1 rounded-full border border-[#0f8b8d]/30 bg-teal-50 px-2 py-0.5 text-[11px] font-semibold text-[#00696b] transition hover:bg-teal-100"
             title={`Open page ${pageNum} in the reader`}
           >
-            <FileText className="w-3 h-3" /> {match[0]}
+            <FileText className="h-3 w-3" /> {match[0]}
           </button>
         ) : (
-          <span key={`${keyPrefix}-p${i}-${match.index}`} className="text-slate-500">{match[0]}</span>
+          <span key={`${keyPrefix}-p${i}-${match.index}`} className="mx-0.5 inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">
+            {match[0]}
+          </span>
         ),
       );
       last = match.index + match[0].length;
@@ -57,85 +59,95 @@ export const RevisionNote: React.FC<RevisionNoteProps> = ({ text, topic, onOpenP
   const blocks: React.ReactNode[] = [];
 
   let buffer: string[] = [];
-  const flush = (key: string) => {
+  let items: React.ReactNode[] = [];
+  const flushParagraph = (key: string) => {
     if (!buffer.length) return;
-    const body = buffer.join(' ');
     blocks.push(
-      <p key={key} className="text-[11px] leading-relaxed text-slate-700">
-        {renderInline(body, key, onOpenPage)}
+      <p key={key} className="text-[13px] leading-7 text-slate-700">
+        {renderInline(buffer.join(' '), key, onOpenPage)}
       </p>,
     );
     buffer = [];
   };
+  const flushList = (key: string) => {
+    if (!items.length) return;
+    blocks.push(<ul key={key} className="space-y-2">{items}</ul>);
+    items = [];
+  };
+  const flushAll = (key: string) => { flushParagraph(`${key}-p`); flushList(`${key}-l`); };
 
   lines.forEach((rawLine, index) => {
-    const line = rawLine.trimEnd();
-    const trimmed = line.trim();
-    if (!trimmed) { flush(`p${index}`); return; }
+    const trimmed = rawLine.trim();
+    if (!trimmed) { flushAll(`g${index}`); return; }
 
     const isHighYield = /^(high[- ]yield|pearl|exam pearl)\b/i.test(trimmed) || /^(#+\s*)?high[- ]yield/i.test(trimmed);
     const isMnemonic = /^mnemonic\b/i.test(trimmed) || /^memory hook\b/i.test(trimmed);
 
     if (isHighYield || isMnemonic) {
-      flush(`p${index}`);
+      flushAll(`c${index}`);
       const clean = trimmed.replace(/^(high[- ]yield(\s+pearl)?|pearl|exam pearl|mnemonic|memory hook)\s*[:\-—]\s*/i, '');
       blocks.push(
         <div
           key={`callout${index}`}
-          className={isMnemonic
-            ? 'p-2 rounded-lg bg-amber-50 border border-amber-200'
-            : 'p-2 rounded-lg bg-teal-50 border border-[#0f8b8d]/25'}
+          className={`relative overflow-hidden rounded-xl border p-3.5 shadow-sm ${isMnemonic
+            ? 'border-amber-200 bg-gradient-to-br from-amber-50 to-white'
+            : 'border-teal-200 bg-gradient-to-br from-teal-50 to-white'}`}
         >
-          <div className={`text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 mb-0.5 ${isMnemonic ? 'text-amber-800' : 'text-[#00696b]'}`}>
-            {isMnemonic ? <Brain className="w-3 h-3" /> : <Sparkles className="w-3 h-3" />}
+          <span className={`absolute inset-y-0 left-0 w-1 ${isMnemonic ? 'bg-amber-400' : 'bg-[#0f8b8d]'}`} />
+          <div className={`mb-1.5 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider ${isMnemonic ? 'text-amber-800' : 'text-[#00696b]'}`}>
+            <span className={`flex h-5 w-5 items-center justify-center rounded-full ${isMnemonic ? 'bg-amber-200/70' : 'bg-teal-100'}`}>
+              {isMnemonic ? <Brain className="h-3 w-3" /> : <Sparkles className="h-3 w-3" />}
+            </span>
             {isMnemonic ? 'Mnemonic' : 'High-yield'}
           </div>
-          <div className="text-[11px] leading-relaxed text-slate-800">{renderInline(clean, `c${index}`, onOpenPage)}</div>
+          <div className="text-[13px] leading-6 text-slate-800">{renderInline(clean, `c${index}`, onOpenPage)}</div>
         </div>,
       );
       return;
     }
 
     if (/^#{1,4}\s+/.test(trimmed)) {
-      flush(`p${index}`);
+      flushAll(`h${index}`);
       const heading = trimmed.replace(/^#{1,4}\s+/, '');
       blocks.push(
-        <div key={`h${index}`} className="text-[11px] font-bold text-slate-900 pt-1">
+        <h3 key={`h${index}`} className="flex items-center gap-2 pt-2 text-[14px] font-bold text-slate-900 first:pt-0">
+          <span className="h-4 w-1 shrink-0 rounded-full bg-[#0f8b8d]" />
           {renderInline(heading, `h${index}`, onOpenPage)}
-        </div>,
+        </h3>,
       );
       return;
     }
 
     if (/^[-*•]\s+/.test(trimmed)) {
-      flush(`p${index}`);
-      blocks.push(
-        <div key={`li${index}`} className="flex items-start gap-1.5 text-[11px] leading-relaxed text-slate-700">
-          <span className="text-[#0f8b8d] mt-0.5">•</span>
+      flushParagraph(`li${index}-p`);
+      items.push(
+        <li key={`li${index}`} className="flex items-start gap-2.5 text-[13px] leading-6 text-slate-700">
+          <span className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-[#0f8b8d]" />
           <span>{renderInline(trimmed.replace(/^[-*•]\s+/, ''), `li${index}`, onOpenPage)}</span>
-        </div>,
+        </li>,
       );
       return;
     }
 
+    flushList(`t${index}-l`);
     buffer.push(trimmed);
   });
-  flush('pend');
+  flushAll('end');
 
   const searchTopic = (topic || text.split('\n')[0] || '').replace(/[*#]/g, '').slice(0, 80).trim();
 
   return (
-    <div className={`space-y-1.5 ${className ?? ''}`}>
+    <div className={`space-y-3 ${className ?? ''}`}>
       {blocks}
       {searchTopic && (
         <a
           href={`https://www.youtube.com/results?search_query=${encodeURIComponent(`${searchTopic} medical lecture`)}`}
           target="_blank"
           rel="noreferrer"
-          className="inline-flex items-center gap-1 text-[10px] font-semibold text-rose-700 hover:underline pt-1"
+          className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[11px] font-semibold text-rose-700 transition hover:bg-rose-100"
         >
-          <Youtube className="w-3.5 h-3.5" /> Search YouTube for this topic
-          <ExternalLink className="w-2.5 h-2.5" />
+          <Youtube className="h-3.5 w-3.5" /> Search YouTube for this topic
+          <ExternalLink className="h-2.5 w-2.5" />
         </a>
       )}
     </div>

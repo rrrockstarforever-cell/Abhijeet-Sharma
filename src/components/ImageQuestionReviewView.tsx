@@ -210,7 +210,9 @@ export const ImageQuestionReviewView: React.FC<ImageQuestionReviewViewProps> = (
             </h1>
             <p className={`mt-1 text-xs ${dim}`}>
               Every image question with its vision-verification result. Anything unverified is shown amber — check it by eye.
-              {counts.ranAt ? ` · Last run ${new Date(counts.ranAt).toLocaleString()} (${counts.attempted} attempted).` : ''}
+              {counts.ranAt
+                ? ` · Last run ${new Date(counts.ranAt).toLocaleString()}: ${counts.attempted} image items attempted, ${counts.total} kept with an image; ${counts.textOnly} fell back to text-only (counted separately, not in the total).`
+                : ''}
             </p>
           </div>
           <button

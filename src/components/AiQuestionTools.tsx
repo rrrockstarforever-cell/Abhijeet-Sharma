@@ -2,7 +2,11 @@
 // question", "Notes for the whole topic", with Brief / Standard / Detailed length chips.
 // All calls go to the ACTIVE provider via aiComplete(); errors surface, never faked.
 // Notes are saved to the real user-highlights store.
-import React, { useEffect, useRef, useState } from 'react';
+//
+// A request keeps running when the learner moves to another question. Its state lives in a
+// per-question store outside the component, so the result is waiting when they come back, and
+// the output is also kept in localStorage (pulse.aiTools.<questionId>).
+import React, { useEffect, useReducer, useState } from 'react';
 import { Sparkles, Brain, NotebookPen, Loader2, AlertCircle, CheckCircle2, X, Download } from 'lucide-react';
 import type { ClinicalQuestion } from '../types.ts';
 import { aiComplete, getActiveProvider, getEffectiveModel, NOT_CONNECTED_MESSAGE } from '../lib/ai.ts';
@@ -19,6 +23,7 @@ import {
 import { ExplanationFigure } from './ExplanationFigure.tsx';
 
 export type AiToolLength = 'Brief' | 'Standard' | 'Detailed';
+type ToolKind = 'explain' | 'note' | 'topic';
 
 interface AiQuestionToolsProps {
   question: ClinicalQuestion;
@@ -27,6 +32,44 @@ interface AiQuestionToolsProps {
   className?: string;
   /** renders the cockpit (night) skin used inside the Test Runner */
   dark?: boolean;
+}
+
+interface ToolState {
+  busy: ToolKind | null;
+  output: { kind: ToolKind; text: string } | null;
+  error: string | null;
+  savedFlags: Partial<Record<'note' | 'topic', boolean>>;
+  figure: ExplanationImage | null;
+  figureLoading: boolean;
+}
+
+const EMPTY_STATE: ToolState = { busy: null, output: null, error: null, savedFlags: {}, figure: null, figureLoading: false };
+const storageKey = (questionId: string) => `pulse.aiTools.${questionId}`;
+
+// Per-question state, shared by every mounted widget and kept while requests run.
+const toolStates = new Map<string, ToolState>();
+const toolListeners = new Map<string, Set<() => void>>();
+
+function readToolState(questionId: string): ToolState {
+  let state = toolStates.get(questionId);
+  if (!state) {
+    state = { ...EMPTY_STATE };
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey(questionId)) || 'null');
+      if (saved) state = { ...state, output: saved.output ?? null, savedFlags: saved.savedFlags ?? {}, figure: saved.figure ?? null };
+    } catch { /* unreadable storage: start empty */ }
+    toolStates.set(questionId, state);
+  }
+  return state;
+}
+
+function patchToolState(questionId: string, patch: Partial<ToolState>): void {
+  const next = { ...readToolState(questionId), ...patch };
+  toolStates.set(questionId, next);
+  try {
+    localStorage.setItem(storageKey(questionId), JSON.stringify({ output: next.output, savedFlags: next.savedFlags, figure: next.figure }));
+  } catch { /* quota or private mode: the in-memory copy still works */ }
+  toolListeners.get(questionId)?.forEach((notify) => notify());
 }
 
 const buildExplanationPrompt = (q: ClinicalQuestion, userChoice: string | undefined, length: AiToolLength): string => {
@@ -47,96 +90,96 @@ const buildExplanationPrompt = (q: ClinicalQuestion, userChoice: string | undefi
   ].filter(Boolean).join('\n');
 };
 
-// Fresh generation: AI-tool output is NOT cached and is NOT generated while the
-// questions are being written. Every click on Explain / Note / Topic produces a brand
-// new response from the active provider. Saved "Note / Topic" highlights still land in
-// the user-highlights store, but the widget itself always starts empty for each question.
+/**
+ * Runs one AI tool for a question. It is not tied to the widget being on screen: the result is
+ * written to the question's state, so it is there when the learner returns to the question.
+ */
+async function runTool(question: ClinicalQuestion, kind: ToolKind, length: AiToolLength, userChoice: string | undefined): Promise<void> {
+  const id = question.id;
+  const provider = getActiveProvider();
+  if (!provider) return;
+  patchToolState(id, { busy: kind, error: null, savedFlags: {}, figure: null, figureLoading: false });
+  const wantImage = kind === 'explain' && isExplanationImagesEnabled();
+  try {
+    let prompt: string;
+    let system: string;
+    if (kind === 'explain') {
+      system = 'You are a rigorous clinical exam tutor. Explain exactly what is asked; be accurate, cite standard textbooks/guidelines. Plain readable text (may use **bold** and short lists). No JSON.';
+      prompt = buildExplanationPrompt(question, userChoice, length);
+      if (wantImage) prompt += imageCueInstruction();
+    } else if (kind === 'note') {
+      system = 'Write a compact revision note card for a postgraduate medical exam student. Start with a one-line bold title, then 3-6 high-yield bullet points (fact + mechanism/discriminator), then one "High-yield:" line, then a "Mnemonic:" line if natural, then a citation. Keep it dense, no JSON.';
+      prompt = buildExplanationPrompt(question, undefined, 'Brief') + '\n\nDistill this into a revision NOTE CARD (not an explanation).';
+    } else {
+      system = 'You are a high-yield medical educator. Write a revision summary of the given exam topic. Plain readable text, bold headers, short bullets, mark the key takeaway with a line beginning "High-yield:" and any memory device with "Mnemonic:", end with 2-3 exam pearls and a citation. No JSON.';
+      prompt = `Topic: ${question.subject} — ${question.subtopic}\n\nWrite a revision summary of this topic oriented to postgraduate medical exams (NEET-PG / INI-CET / AMC CAT): core concepts, must-know facts, classic traps, 2-3 pearls, one citation.`;
+    }
+
+    const text = await aiComplete({
+      system,
+      messages: [{ role: 'user', content: prompt }],
+      provider,
+      model: getEffectiveModel(provider),
+    });
+
+    // The model may end with an `IMAGE_CUE:` line describing a figure that would help.
+    // Strip it: it is a machine directive, never learner-facing content.
+    const cue = extractImageCue(text);
+    const shownText = stripImageCue(text);
+
+    // question notes save immediately to the highlights store
+    if (kind === 'note') {
+      addUserHighlight(highlightFromAiReply({
+        quote: shownText,
+        subject: question.subject,
+        subtopic: question.subtopic,
+        citation: `AI note · ${question.subtopic}`,
+        tags: ['ai-note'],
+      }));
+    }
+
+    patchToolState(id, {
+      output: { kind, text: shownText },
+      savedFlags: kind === 'note' ? { ...readToolState(id).savedFlags, note: true } : readToolState(id).savedFlags,
+    });
+
+    // Resolve the illustration AFTER the explanation is already on screen.
+    if (kind === 'explain' && cue && wantImage) {
+      patchToolState(id, { figureLoading: true });
+      const image = await resolveExplanationImage(cue, question.subject);
+      patchToolState(id, { figure: image, figureLoading: false });
+    }
+  } catch (err: any) {
+    patchToolState(id, { error: err?.message || 'AI request failed.' });
+  } finally {
+    patchToolState(id, { busy: null });
+  }
+}
 
 export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, userChoice, className, dark = false }) => {
   const [length, setLength] = useState<AiToolLength>('Standard');
-  const [busy, setBusy] = useState<null | 'explain' | 'note' | 'topic'>(null);
-  const [output, setOutput] = useState<{ kind: string; text: string } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [savedFlags, setSavedFlags] = useState<Partial<Record<'note' | 'topic', boolean>>>({});
-  // The explanation may carry one VERIFIED illustration. It is resolved separately from
-  // the text so a slow vision check never delays the explanation itself.
-  const [figure, setFigure] = useState<ExplanationImage | null>(null);
-  const [figureLoading, setFigureLoading] = useState(false);
-  const mountedRef = useRef(true);
+  const [, rerender] = useReducer((n: number) => n + 1, 0);
+
+  // Re-render when this question's state changes, including while the widget is off screen.
   useEffect(() => {
-    mountedRef.current = true;
-    return () => { mountedRef.current = false; };
-  }, []);
+    const id = question.id;
+    const notify = () => rerender();
+    const listeners = toolListeners.get(id) ?? new Set<() => void>();
+    listeners.add(notify);
+    toolListeners.set(id, listeners);
+    return () => { listeners.delete(notify); };
+  }, [question.id]);
+
+  const state = readToolState(question.id);
+  const { busy, output, error, savedFlags, figure, figureLoading } = state;
+  const setError = (message: string | null) => patchToolState(question.id, { error: message });
 
   const provider = getActiveProvider();
   const providerLabel = provider ? `${provider} · ${getEffectiveModel(provider)}` : 'no active provider';
 
-  const run = async (kind: 'explain' | 'note' | 'topic') => {
+  const run = (kind: ToolKind) => {
     if (!provider || busy) return;
-    setBusy(kind);
-    setError(null);
-    setSavedFlags({} as Partial<Record<'note' | 'topic', boolean>>);
-    setFigure(null);
-    setFigureLoading(false);
-    const wantImage = kind === 'explain' && isExplanationImagesEnabled();
-    try {
-      let prompt: string;
-      let system: string;
-      if (kind === 'explain') {
-        system = 'You are a rigorous clinical exam tutor. Explain exactly what is asked; be accurate, cite standard textbooks/guidelines. Plain readable text (may use **bold** and short lists). No JSON.';
-        prompt = buildExplanationPrompt(question, userChoice, length);
-        if (wantImage) prompt += imageCueInstruction();
-      } else if (kind === 'note') {
-        system = 'Write a compact revision note card for a postgraduate medical exam student. Start with a one-line bold title, then 3-6 high-yield bullet points (fact + mechanism/discriminator), then one "High-yield:" line, then a "Mnemonic:" line if natural, then a citation. Keep it dense, no JSON.';
-        prompt = buildExplanationPrompt(question, undefined, 'Brief') + '\n\nDistill this into a revision NOTE CARD (not an explanation).';
-      } else {
-        system = 'You are a high-yield medical educator. Write a revision summary of the given exam topic. Plain readable text, bold headers, short bullets, mark the key takeaway with a line beginning "High-yield:" and any memory device with "Mnemonic:", end with 2-3 exam pearls and a citation. No JSON.';
-        prompt = `Topic: ${question.subject} — ${question.subtopic}\n\nWrite a revision summary of this topic oriented to postgraduate medical exams (NEET-PG / INI-CET / AMC CAT): core concepts, must-know facts, classic traps, 2-3 pearls, one citation.`;
-      }
-
-      const text = await aiComplete({
-        system,
-        messages: [{ role: 'user', content: prompt }],
-        provider,
-        model: getEffectiveModel(provider),
-      });
-
-      // The model may end with an `IMAGE_CUE:` line describing a figure that would help.
-      // Strip it: it is a machine directive, never learner-facing content.
-      const cue = extractImageCue(text);
-      const shownText = stripImageCue(text);
-
-      // question notes save immediately to the highlights store
-      if (kind === 'note') {
-        addUserHighlight(highlightFromAiReply({
-          quote: shownText,
-          subject: question.subject,
-          subtopic: question.subtopic,
-          citation: `AI note · ${question.subtopic}`,
-          tags: ['ai-note'],
-        }));
-      }
-
-      if (mountedRef.current) {
-        setOutput({ kind, text: shownText });
-        if (kind === 'note') setSavedFlags((prev) => ({ ...prev, note: true }));
-      }
-
-      // Resolve the illustration AFTER the explanation is already on screen.
-      if (kind === 'explain' && cue && wantImage) {
-        if (mountedRef.current) setFigureLoading(true);
-        const image = await resolveExplanationImage(cue, question.subject);
-        if (mountedRef.current) {
-          setFigure(image);
-          setFigureLoading(false);
-        }
-      }
-    } catch (err: any) {
-      const message = err?.message || 'AI request failed.';
-      if (mountedRef.current) setError(message);
-    } finally {
-      if (mountedRef.current) setBusy(null);
-    }
+    void runTool(question, kind, length, userChoice);
   };
 
   const saveTopicNote = () => {
@@ -148,8 +191,7 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
       citation: `AI topic summary · ${question.subtopic}`,
       tags: ['ai-note'],
     }));
-    const nextFlags = { ...savedFlags, topic: true };
-    setSavedFlags(nextFlags);
+    patchToolState(question.id, { savedFlags: { ...savedFlags, topic: true } });
   };
 
   const lengthChip = (val: AiToolLength) =>
@@ -220,6 +262,12 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
           </button>
         )}
       </div>
+
+      {busy && (
+        <p className={`text-[10px] ${dark ? 'text-teal-300' : 'text-[#00696b]'}`}>
+          Generating… you can move to another question; the result will be here when you come back.
+        </p>
+      )}
 
       {!provider && (
         <p className={`text-[10px] ${dark ? 'text-rose-300' : 'text-rose-700'}`}>{NOT_CONNECTED_MESSAGE}</p>

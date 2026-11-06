@@ -150,6 +150,21 @@ const REAL_PROVIDERS: AIProvider[] = [
       { id: 'nvidia/nemotron-4-340b-instruct', name: 'Nemotron 4 340B Instruct', description: 'NVIDIA NIM', latencyEstimate: '—', contextWindow: '—' },
     ]
   },
+  {
+    id: 'vyce',
+    name: 'VyceAI',
+    brand: 'deepseek',
+    model: DEFAULT_MODELS.vyce,
+    status: 'ready',
+    type: 'API Key (VyceAI)',
+    features: ['API Key in Settings', 'DeepSeek models', 'OpenAI-compatible /chat/completions'],
+    isDefault: false,
+    isSignedIn: false,
+    hasTokenConfigured: false,
+    availableModels: [
+      { id: DEFAULT_MODELS.vyce, name: 'DeepSeek V4.1', description: 'VyceAI default model', latencyEstimate: '—', contextWindow: '—' },
+    ]
+  },
 ];
 
 function getClientSessionId(): string {
@@ -394,7 +409,7 @@ export const SettingsAIView: React.FC = () => {
     setDeviceCodeData(null);
     setPkceData(null);
 
-    if (provider.id === 'gemini' || provider.id === 'opencode' || provider.id === 'nvidia') {
+    if (provider.id === 'gemini' || provider.id === 'opencode' || provider.id === 'nvidia' || provider.id === 'vyce') {
       // Key-based providers: the pasted key is handled inside the modal.
       setIsLoadingFlow(false);
       return;
@@ -563,15 +578,17 @@ export const SettingsAIView: React.FC = () => {
     }
   };
 
-  // Save the pasted key (Gemini or OpenCode); the server stores it in the user's data dir.
+  // Save the pasted key (Gemini, OpenCode, NVIDIA or VyceAI); the server stores it in the user's data dir.
   const handleSaveKey = async () => {
     const key = keyInput.trim();
     if (!key || !selectedProvider) return;
     const endpoint = selectedProvider.id === 'opencode' ? '/api/settings/opencode-key'
       : selectedProvider.id === 'nvidia' ? '/api/settings/nvidia-key'
+      : selectedProvider.id === 'vyce' ? '/api/settings/vyce-key'
       : '/api/settings/gemini-key';
     const label = selectedProvider.id === 'opencode' ? 'OpenCode'
       : selectedProvider.id === 'nvidia' ? 'NVIDIA'
+      : selectedProvider.id === 'vyce' ? 'VyceAI'
       : 'Gemini';
     setIsSavingKey(true);
     setAuthError(null);
@@ -590,6 +607,9 @@ export const SettingsAIView: React.FC = () => {
       setKeyInput('');
       if (selectedProvider.id === 'nvidia') {
         persistModel('nvidia', nvidiaModel);
+      }
+      if (selectedProvider.id === 'vyce') {
+        persistModel('vyce', DEFAULT_MODELS.vyce);
       }
       await fetchOAuthStatus();
       await loadAccountModels(true, selectedProvider.id);
@@ -1363,7 +1383,7 @@ export const SettingsAIView: React.FC = () => {
 
                     {/* Controls: Sign In Button or Connected State + Set Active */}
                     <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
-                      {(p.id === 'gemini' || p.id === 'opencode') ? (
+                      {(p.id === 'gemini' || p.id === 'opencode' || p.id === 'nvidia' || p.id === 'vyce') ? (
                         <div className="flex items-center gap-2">
                           <span className={`text-xs font-bold px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
                             isConnected
@@ -1523,6 +1543,8 @@ export const SettingsAIView: React.FC = () => {
                         ? 'OpenCode API Key'
                         : selectedProvider.id === 'nvidia'
                           ? 'NVIDIA API Key'
+                          : selectedProvider.id === 'vyce'
+                            ? 'VyceAI API Key'
                           : selectedProvider.id === 'custom' && editingEndpoint
                             ? 'Edit Endpoint'
                             : selectedProvider.id === 'custom'
@@ -1536,7 +1558,7 @@ export const SettingsAIView: React.FC = () => {
                         ? 'Key saved locally — never shown again'
                         : selectedProvider.id === 'opencode'
                           ? 'Console / Go key saved locally — never shown again'
-                          : selectedProvider.id === 'nvidia'
+                          : selectedProvider.id === 'nvidia' || selectedProvider.id === 'vyce'
                             ? 'Key saved locally — never shown again'
                             : selectedProvider.id === 'custom' && editingEndpoint
                               ? 'Configure your custom endpoint below.'
@@ -1556,7 +1578,7 @@ export const SettingsAIView: React.FC = () => {
 
             {/* This is the real local flow, not a web demo: the code comes from the
                 provider right now and the token is stored on this computer only. */}
-            {selectedProvider.id !== 'gemini' && selectedProvider.id !== 'opencode' && selectedProvider.id !== 'custom' && (
+            {selectedProvider.id !== 'gemini' && selectedProvider.id !== 'opencode' && selectedProvider.id !== 'nvidia' && selectedProvider.id !== 'vyce' && selectedProvider.id !== 'custom' && (
               <p className="text-[11px] leading-relaxed text-slate-600 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
                 {selectedProvider.id === 'claude'
                   ? 'Open the Claude approval page, sign in, then paste the code Claude shows you. The token stays on this computer.'
@@ -1879,7 +1901,7 @@ export const SettingsAIView: React.FC = () => {
             )}
 
             {/* Key-based providers: Gemini, OpenCode, NVIDIA */}
-            {(selectedProvider.id === 'gemini' || selectedProvider.id === 'opencode' || selectedProvider.id === 'nvidia') && (
+            {(selectedProvider.id === 'gemini' || selectedProvider.id === 'opencode' || selectedProvider.id === 'nvidia' || selectedProvider.id === 'vyce') && (
               <div className="space-y-4 py-2">
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
                   <div className="flex items-center gap-2 font-bold text-slate-800">
@@ -1891,6 +1913,8 @@ export const SettingsAIView: React.FC = () => {
                       ? 'Create an API key in the OpenCode Console (console.opencode.ai) and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser. If you already use the OpenCode CLI on this machine, its stored key is used automatically.'
                       : selectedProvider.id === 'nvidia'
                         ? 'Create an API key in the NVIDIA build portal (build.nvidia.com) and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser.'
+                        : selectedProvider.id === 'vyce'
+                          ? 'Paste your VyceAI API key here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser. Requests go to https://vyceai.com/v1 with the DeepSeek model deepseek-v4.1.'
                         : 'Create the key in Google AI Studio and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser.'}
                   </p>
                 </div>
@@ -1901,7 +1925,9 @@ export const SettingsAIView: React.FC = () => {
                       ? 'OpenCode API Key'
                       : selectedProvider.id === 'nvidia'
                         ? 'NVIDIA API Key'
-                        : 'Gemini API Key'}
+                        : selectedProvider.id === 'vyce'
+                          ? 'VyceAI API Key'
+                          : 'Gemini API Key'}
                   </label>
                   <input
                     type="password"
@@ -1910,7 +1936,9 @@ export const SettingsAIView: React.FC = () => {
                     placeholder={selectedProvider.id === 'opencode' ? 'sk-… / your OpenCode Console API key'
                       : selectedProvider.id === 'nvidia'
                         ? 'nvapi-… / your NVIDIA API key'
-                        : 'AIza… / your Gemini API key'}
+                        : selectedProvider.id === 'vyce'
+                          ? 'your VyceAI API key'
+                          : 'AIza… / your Gemini API key'}
                     className="w-full text-xs font-mono p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
                   />
                 </div>

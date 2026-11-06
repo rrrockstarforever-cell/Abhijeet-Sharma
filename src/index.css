@@ -251,6 +251,29 @@
   background: #3c5474;
 }
 
+/* OCR text layer: a selection shows only the highlight. The recognised words stay transparent,
+   so they never draw as dark letters on top of the scanned page. */
+.ocrTextLayer ::selection {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background: rgba(15, 139, 141, 0.3);
+}
+
+/* Both PDF text layers: the characters are invisible in every state (selected, forced colours,
+   dark mode). Only the selection highlight may show, so the page's own letters are never covered. */
+.ocrTextLayer,
+.ocrTextLayer span,
+.textLayer span {
+  -webkit-text-fill-color: transparent;
+  -webkit-text-stroke: 0;
+  text-shadow: none;
+  forced-color-adjust: none;
+}
+.textLayer ::selection {
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
 /* ---------- PDF reader: the page itself keeps its true colours ---------- */
 .dark .pdf-page-canvas,
 .dark .pdf-text-layer,

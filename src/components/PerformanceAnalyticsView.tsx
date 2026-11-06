@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { AppView, ExamType } from '../types.ts';
 import { summarizeAttempts, listAttempts, AttemptRecord } from '../utils/attemptStore.ts';
+import { loadActiveTest } from '../utils/sessionStore.ts';
 
 interface PerformanceAnalyticsViewProps {
   onNavigate: (view: AppView) => void;
@@ -67,7 +68,12 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
   onNavigate,
   onLaunchRemediation,
 }) => {
-  const [activeCohort, setActiveCohort] = useState<'NEET_PG' | 'INI_CET' | 'AMC_CAT'>('NEET_PG');
+  // Open on the exam the user practised last (the active test), not always NEET-PG, which is
+  // often empty and makes the page look blank.
+  const [activeCohort, setActiveCohort] = useState<'NEET_PG' | 'INI_CET' | 'AMC_CAT'>(() => {
+    const last = loadActiveTest()?.exam;
+    return last === 'INI_CET' || last === 'AMC_CAT' || last === 'NEET_PG' ? last : 'NEET_PG';
+  });
   const [sortBy, setSortBy] = useState<'lowest' | 'highest' | 'solved'>('lowest');
   const [downloadSuccess, setDownloadSuccess] = useState(false);
   const [summary, setSummary] = useState<ReturnType<typeof summarizeAttempts>>({
