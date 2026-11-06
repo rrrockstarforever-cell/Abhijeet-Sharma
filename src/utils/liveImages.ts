@@ -25,7 +25,7 @@ export interface LiveImage {
 const LIVE_KEY = 'pulse.images.live';
 
 /** Words that name no particular condition, so a caption containing them says nothing about a match. */
-const GENERIC_TOPIC_WORDS = new Set(['disease', 'diseases', 'syndrome', 'change', 'changes', 'injury', 'injuries', 'lesion', 'lesions', 'finding', 'findings', 'with', 'from', 'case', 'sign', 'signs', 'acute', 'chronic', 'severe', 'image', 'picture', 'common', 'typical']);
+const GENERIC_TOPIC_WORDS = new Set(['disease', 'diseases', 'syndrome', 'change', 'changes', 'injury', 'injuries', 'lesion', 'lesions', 'finding', 'findings', 'with', 'from', 'case', 'sign', 'signs', 'acute', 'chronic', 'severe', 'image', 'picture', 'common', 'typical', 'photo', 'photograph', 'clinical', 'skin', 'facial', 'plaques', 'plaque', 'patch', 'patches', 'appearance', 'showing', 'stain', 'stained', 'microscopy']);
 
 // Session cache: image search is slow (Commons + Open-i), so the same query is only
 // ever fetched once per page load.
@@ -193,15 +193,11 @@ export async function findLiveImage(
         const distinctive = topicTokens.filter((t) => !GENERIC_TOPIC_WORDS.has(t));
         const needed = distinctive.length <= 1 ? distinctive.length : Math.ceil(distinctive.length * 0.6);
         const topicOk = topicTokens.length === 0 || (distinctive.length ? distinctive.filter(matches).length >= needed : topicTokens.some(matches));
-        if (modalityTokens.length > 0) {
-          // Both the modality AND at least one topic word must appear in the figure's
-          // own title/caption — a histology slide of an adrenal tumour is not a
-          // verified picture for a hypertension question.
-          return topicOk && modalityTokens.some(matches);
-        }
-        // No modality: require ALL topic tokens to match (stricter verification).
-        const topicMatches = expandedTokens.filter(matches).length;
-        return topicMatches === expandedTokens.length && expandedTokens.length > 0;
+        // Most of the condition words must be in the figure's own text. The modality ("histology", "x-ray") is often
+        // missing from a Commons title ("Leprosy - Lepromatous (LL) 4x.jpg"), and a condition rarely has every query
+        // word ("skin plaques"), so neither is required here: the vision check that follows looks at the picture
+        // itself and rejects the wrong modality or the wrong finding.
+        return topicOk && (topicTokens.length > 0 || modalityTokens.some(matches));
       };
       const unused = rows.filter((row) =>
         typeof row?.proxyUrl === 'string' &&
