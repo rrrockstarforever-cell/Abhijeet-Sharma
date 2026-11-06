@@ -1,8 +1,8 @@
 // server.ts
 import express from "express";
-import path2 from "path";
-import os2 from "os";
-import fs2 from "fs";
+import path3 from "path";
+import os3 from "os";
+import fs3 from "fs";
 import { execFileSync } from "child_process";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
@@ -765,6 +765,122 @@ var SOURCE_REGISTRY = [
   { id: "reference-pages", name: "Reference websites (TeachMeAnatomy, CV Physiology, LibreTexts, WebPath, DermNet, EyeWiki, NHSRC treatment guidelines and others)", licence: "Varies per site; check before quoting", fetch: "page text only; no search yet", status: "reference: readable pages, not searched per question" }
 ];
 
+// server/pyqFrequency.mjs
+import fs2 from "fs";
+import os2 from "os";
+import path2 from "path";
+var DATASET_DIRS = [
+  process.env.PYQ_DATASET_DIR,
+  path2.join(os2.homedir(), "OneDrive", "Desktop", "pyq-dataset"),
+  path2.join(os2.homedir(), "Desktop", "pyq-dataset")
+].filter(Boolean);
+var EXAM_LABEL = { INI_CET: "INI-CET", NEET_PG: "NEET" };
+var STOP2 = /* @__PURE__ */ new Set([
+  "drugs",
+  "drug",
+  "classes",
+  "class",
+  "effects",
+  "effect",
+  "adverse",
+  "monitoring",
+  "mechanism",
+  "mechanisms",
+  "therapy",
+  "treatment",
+  "management",
+  "clinical",
+  "features",
+  "diagnosis",
+  "investigation",
+  "investigations",
+  "complications",
+  "pharmacology",
+  "pharmacokinetics",
+  "resistance",
+  "general",
+  "introduction",
+  "overview",
+  "other",
+  "others",
+  "agents",
+  "agent",
+  "with",
+  "from",
+  "their",
+  "uses",
+  "use",
+  "spectrum",
+  "activity",
+  "prophylaxis",
+  "stewardship",
+  "empirical",
+  "first",
+  "second",
+  "third",
+  "fourth",
+  "fifth",
+  "generation",
+  "generations",
+  "types",
+  "type",
+  "group",
+  "groups"
+]);
+var cache = null;
+function loadBundle() {
+  if (cache) return cache;
+  cache = { exams: {} };
+  for (const dir of DATASET_DIRS) {
+    const file = path2.join(dir, "pyq_dataset.json");
+    if (!fs2.existsSync(file)) continue;
+    try {
+      const data = JSON.parse(fs2.readFileSync(file, "utf8"));
+      for (const q of data.questions || []) {
+        const label = String(q.exam || "");
+        const text = `${q.question || ""} ${q.explanation || ""}`.toLowerCase();
+        (cache.exams[label] ||= []).push(text);
+      }
+      cache.source = file;
+      break;
+    } catch {
+    }
+  }
+  return cache;
+}
+function namesOf(subtopic) {
+  const text = String(subtopic || "").toLowerCase().replace(/[()\[\]\/&]/g, ",").replace(/\band\b/g, ",");
+  const words = text.split(/[,:;]+/).flatMap((part) => part.split(/\s+/));
+  const names = /* @__PURE__ */ new Set();
+  for (const raw of words) {
+    const w = raw.replace(/[^a-z-]/g, "").replace(/^-+|-+$/g, "");
+    if (w.length >= 5 && !STOP2.has(w)) names.add(w);
+  }
+  return [...names];
+}
+function pyqCount(subtopic, exam) {
+  const label = EXAM_LABEL[exam];
+  if (!label) return null;
+  const texts = loadBundle().exams[label];
+  if (!texts) return null;
+  const names = namesOf(subtopic);
+  if (!names.length) return null;
+  let n = 0;
+  for (const t of texts) if (names.some((name) => t.includes(name))) n += 1;
+  return n;
+}
+function pyqWeights(subtopics, exam) {
+  const out = {};
+  for (const s of subtopics) {
+    const n = pyqCount(s, exam);
+    out[s] = n == null ? 1 : Math.max(1, n);
+  }
+  return out;
+}
+function pyqSource() {
+  return loadBundle().source || null;
+}
+
 // server/images.mjs
 import { createHash } from "node:crypto";
 import { mkdirSync as mkdirSync2, existsSync as existsSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
@@ -773,9 +889,32 @@ import { homedir as homedir2 } from "node:os";
 var DATA_ROOT2 = process.env.PULSE_DATA_DIR || join2(homedir2(), ".pulse-med");
 var CACHE_DIR = join2(DATA_ROOT2, "image-cache");
 var OPENI = "https://openi.nlm.nih.gov";
-var UA2 = "PulseMed-Education/1.0 (offline exam study app)";
+var UA2 = "PulseMed-Education/1.0 (exam study app; https://github.com/rrrockstarforever-cell/Abhijeet-Sharma)";
 var SEARCH_TTL_MS = 30 * 60 * 1e3;
 var searchCache = /* @__PURE__ */ new Map();
+var DISK_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
+var EMPTY_TTL_MS = 10 * 60 * 1e3;
+var DISK_FILE = join2(CACHE_DIR, "search-results.json");
+var diskCache = null;
+function diskGet(key) {
+  try {
+    if (!diskCache) diskCache = existsSync2(DISK_FILE) ? JSON.parse(readFileSync2(DISK_FILE, "utf8")) : {};
+    const hit = diskCache[key];
+    return hit && Date.now() - hit.at < DISK_TTL_MS ? hit.results : null;
+  } catch {
+    diskCache = {};
+    return null;
+  }
+}
+function diskSet(key, results) {
+  try {
+    if (!diskCache) diskCache = {};
+    diskCache[key] = { at: Date.now(), results };
+    mkdirSync2(CACHE_DIR, { recursive: true });
+    writeFileSync2(DISK_FILE, JSON.stringify(diskCache));
+  } catch {
+  }
+}
 var stripHtml = (value) => String(value ?? "").replace(/<[^>]*>/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\s+/g, " ").trim();
 function licenceOf(entry) {
   const cc = String(entry.ccLicense || "").toLowerCase();
@@ -816,22 +955,82 @@ function normalise(entry) {
     thumbUrl: entry.imgGrid150 ? `${OPENI}${entry.imgGrid150}` : `${OPENI}${large}`
   };
 }
-async function searchImages(query, { limit = 6 } = {}) {
+var WIKI_CONCURRENCY = 2;
+var WIKI_GAP_MS = 250;
+var wikiActive = 0;
+var wikiLastStart = 0;
+var wikiWaiting = [];
+async function wikiFetch(url, init = {}) {
+  if (wikiActive >= WIKI_CONCURRENCY) await new Promise((resolve) => wikiWaiting.push(resolve));
+  wikiActive += 1;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const wait = wikiLastStart + WIKI_GAP_MS - Date.now();
+      wikiLastStart = Math.max(Date.now(), wikiLastStart) + (wait > 0 ? wait : 0);
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      const res = await fetch(url, init);
+      if ((res.status === 429 || res.status === 503) && attempt < 3) {
+        const retryAfter = Number(res.headers.get("retry-after"));
+        await new Promise((resolve) => setTimeout(resolve, Math.min(8e3, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1e3 : 1200 * (attempt + 1))));
+        continue;
+      }
+      return res;
+    }
+  } finally {
+    wikiActive -= 1;
+    wikiWaiting.shift()?.();
+  }
+}
+var MODALITY_WORDS = {
+  ecg: ["ecg", "ekg", "electrocardiogram", "electrocardiograph"],
+  "x-ray": ["x-ray", "xray", "radiograph"],
+  xray: ["x-ray", "xray", "radiograph"],
+  histology: ["histolog", "biopsy", "micrograph", "histopatholog"],
+  fundus: ["fundus", "fundal", "retina"]
+};
+var FILLER_WORDS = /* @__PURE__ */ new Set(["photo", "photograph", "clinical", "image", "picture", "showing", "with", "from", "patient", "typical", "findings", "finding", "changes", "change", "disease", "lesion", "lesions"]);
+function relevanceOf(item, query) {
+  const hay = `${item?.title ?? ""} ${item?.caption ?? ""}`.toLowerCase();
+  const words = String(query || "").toLowerCase().split(/[^a-z0-9-]+/).filter((w) => (w.length > 3 || ["ecg", "ekg", "ct", "mri"].includes(w)) && !FILLER_WORDS.has(w));
+  if (!words.length) return 1;
+  let hits = 0;
+  for (const w of words) {
+    const forms = MODALITY_WORDS[w] ?? [w.length > 5 ? w.slice(0, w.length - 2) : w];
+    if (forms.some((f) => f.length <= 3 ? new RegExp(`\\b${f}\\b`).test(hay) : hay.includes(f))) hits += 1;
+  }
+  return hits / words.length;
+}
+async function searchImages(query, { limit = 10, noExtra = false } = {}) {
   const q = String(query || "").replace(/\s+/g, " ").trim();
   if (!q) return { results: [], errors: [] };
-  const cacheKey = `${q.toLowerCase()}::${limit}`;
+  const cacheKey = `r3::${q.toLowerCase()}::${limit}`;
   const hit = searchCache.get(cacheKey);
-  if (hit && Date.now() - hit.at < SEARCH_TTL_MS) {
+  if (hit && Date.now() - hit.at < (hit.results.length ? SEARCH_TTL_MS : EMPTY_TTL_MS)) {
     return { results: hit.results, errors: [], cached: true };
+  }
+  const onDisk = noExtra ? null : diskGet(cacheKey);
+  if (onDisk?.length) {
+    searchCache.set(cacheKey, { at: Date.now(), results: onDisk });
+    return { results: onDisk, errors: [], cached: true };
   }
   const errors = [];
   let commons = [];
   let openi = [];
-  const commonsP = searchCommons(q, { limit: Math.ceil(limit / 2) }).then((rows) => {
-    commons = rows;
+  let article = [];
+  let category = [];
+  const core = q.split(/\s+/).filter((w) => !/^(histology|histological|histopathology|biopsy|micrograph|ecg|ekg|x-ray|xray|radiograph|ct|mri|ultrasound|smear|fundus|photo|photograph|clinical|image|picture)$/i.test(w)).join(" ") || q;
+  const articleP = (noExtra ? Promise.resolve([]) : searchWikipediaArticle(core, { limit })).then((rows) => {
+    article = rows;
     return rows;
   }).catch((err) => {
-    errors.push(`Wikimedia Commons: ${err?.message || err}`);
+    errors.push(`Wikipedia: ${err?.message || err}`);
+    return [];
+  });
+  const categoryP = (noExtra ? Promise.resolve([]) : searchCommonsCategory(core, { limit })).then((rows) => {
+    category = rows;
+    return rows;
+  }).catch((err) => {
+    errors.push(`Commons category: ${err?.message || err}`);
     return [];
   });
   const openiP = searchOpenI(q, { limit }).then((rows) => {
@@ -841,15 +1040,39 @@ async function searchImages(query, { limit = 6 } = {}) {
     errors.push(`Open-i: ${err?.message || err}`);
     return [];
   });
-  await Promise.race([
-    Promise.all([commonsP, openiP]),
-    new Promise((resolve) => setTimeout(resolve, 1e4))
-  ]);
+  const within = (p, ms) => Promise.race([p, new Promise((resolve) => setTimeout(resolve, ms))]);
+  await within(Promise.all([articleP, categoryP]), 6e3);
+  const relevantStage1 = [...category, ...article].filter((item) => relevanceOf(item, q) >= 0.6).length;
+  if (relevantStage1 < 3) {
+    const describing = /^(microscopy|microscopic|findings?|appearance|features?|showing|typical|changes?|picture|image|photo|photograph|clinical|lesions?|of|in|the|and|with|a|an)$/i;
+    const plain = q.split(/\s+/).filter((w) => !describing.test(w));
+    const phrasings = [...new Set([q, core, plain.join(" "), plain.slice(0, 3).join(" "), plain.slice(0, 2).join(" ")].filter((p) => p && p.split(/\s+/).length >= 1))];
+    const commonsP = (async () => {
+      for (const p of phrasings) {
+        const rows = await searchCommons(p, { limit: Math.ceil(limit / 2) });
+        if (rows.length) return rows;
+      }
+      return [];
+    })().then((rows) => {
+      commons = rows;
+      return rows;
+    }).catch((err) => {
+      errors.push(`Wikimedia Commons: ${err?.message || err}`);
+      return [];
+    });
+    await within(commonsP, 9e3);
+  }
+  await within(openiP, 1500);
   const seen = /* @__PURE__ */ new Set();
   const merged = [];
-  for (const item of [...commons, ...openi]) {
+  const pool = [];
+  for (const item of [...category, ...article, ...commons, ...openi]) {
     if (seen.has(item.imageUrl)) continue;
     seen.add(item.imageUrl);
+    pool.push({ item, score: relevanceOf(item, q), at: pool.length });
+  }
+  pool.sort((a, b) => Math.round(b.score * 10) - Math.round(a.score * 10) || a.at - b.at);
+  for (const { item } of pool) {
     merged.push(item);
     if (merged.length >= limit) break;
   }
@@ -861,7 +1084,8 @@ async function searchImages(query, { limit = 6 } = {}) {
     top: merged[0] ? `${merged[0].provider}: ${merged[0].title}`.slice(0, 160) : null,
     errors
   });
-  if (merged.length) searchCache.set(cacheKey, { at: Date.now(), results: merged });
+  searchCache.set(cacheKey, { at: Date.now(), results: merged });
+  if (merged.length && !noExtra) diskSet(cacheKey, merged);
   return { results: merged, errors };
 }
 async function searchCommons(q, { limit = 3 } = {}) {
@@ -876,13 +1100,15 @@ async function searchCommons(q, { limit = 3 } = {}) {
     iiprop: "url|extmetadata|size|mime",
     iiurlwidth: "1000"
   });
-  const res = await fetch(`https://commons.wikimedia.org/w/api.php?${params}`, {
+  const res = await wikiFetch(`https://commons.wikimedia.org/w/api.php?${params}`, {
     headers: { "User-Agent": UA2, Accept: "application/json" },
     signal: AbortSignal.timeout(15e3)
   });
   if (!res.ok) throw new Error(`Commons returned HTTP ${res.status}`);
   const body = await res.json().catch(() => ({}));
-  const pages = body?.query?.pages ? Object.values(body.query.pages) : [];
+  return mapCommonsPages(body?.query?.pages ? Object.values(body.query.pages) : [], limit, "Wikimedia Commons");
+}
+function mapCommonsPages(pages, limit, provider) {
   const out = [];
   for (const page of pages) {
     const info = page?.imageinfo?.[0];
@@ -896,7 +1122,7 @@ async function searchCommons(q, { limit = 3 } = {}) {
     if (!imageUrl) continue;
     out.push({
       id: createHash("sha1").update(imageUrl).digest("hex").slice(0, 16),
-      provider: "Wikimedia Commons",
+      provider,
       title: stripHtml(page.title.replace(/^File:/, "")).slice(0, 160),
       caption: stripHtml(meta.ImageDescription?.value).slice(0, 400),
       credit: stripHtml(meta.Artist?.value).slice(0, 160) || "Wikimedia Commons contributor",
@@ -911,6 +1137,28 @@ async function searchCommons(q, { limit = 3 } = {}) {
     if (out.length >= limit) break;
   }
   return out;
+}
+var IMAGEINFO = { prop: "imageinfo", iiprop: "url|extmetadata|size|mime", iiurlwidth: "1000" };
+async function searchWikipediaArticle(q, { limit = 6 } = {}) {
+  const find = new URLSearchParams({ action: "query", format: "json", list: "search", srsearch: q, srlimit: "1", srnamespace: "0" });
+  const hit = await wikiFetch(`https://en.wikipedia.org/w/api.php?${find}`, { headers: { "User-Agent": UA2, Accept: "application/json" }, signal: AbortSignal.timeout(12e3) });
+  if (!hit.ok) throw new Error(`Wikipedia returned HTTP ${hit.status}`);
+  const title = (await hit.json().catch(() => ({})))?.query?.search?.[0]?.title;
+  if (!title) return [];
+  const params = new URLSearchParams({ action: "query", format: "json", generator: "images", titles: title, gimlimit: "40", redirects: "1", ...IMAGEINFO });
+  const res = await wikiFetch(`https://en.wikipedia.org/w/api.php?${params}`, { headers: { "User-Agent": UA2, Accept: "application/json" }, signal: AbortSignal.timeout(15e3) });
+  if (!res.ok) throw new Error(`Wikipedia returned HTTP ${res.status}`);
+  const body = await res.json().catch(() => ({}));
+  return mapCommonsPages(body?.query?.pages ? Object.values(body.query.pages) : [], limit, "Wikipedia article");
+}
+async function searchCommonsCategory(q, { limit = 6 } = {}) {
+  const name = q.trim().replace(/\s+/g, " ");
+  const title = `Category:${name.charAt(0).toUpperCase()}${name.slice(1)}`;
+  const params = new URLSearchParams({ action: "query", format: "json", generator: "categorymembers", gcmtitle: title, gcmtype: "file", gcmlimit: "30", ...IMAGEINFO });
+  const res = await wikiFetch(`https://commons.wikimedia.org/w/api.php?${params}`, { headers: { "User-Agent": UA2, Accept: "application/json" }, signal: AbortSignal.timeout(12e3) });
+  if (!res.ok) throw new Error(`Commons category returned HTTP ${res.status}`);
+  const body = await res.json().catch(() => ({}));
+  return mapCommonsPages(body?.query?.pages ? Object.values(body.query.pages) : [], limit, "Wikimedia Commons");
 }
 async function searchOpenI(q, { limit = 6 } = {}) {
   const params = new URLSearchParams({ query: q, m: "1", n: String(Math.max(12, limit * 4)) });
@@ -1287,7 +1535,7 @@ function bankStats() {
 // server/visionQuestion.mjs
 var DEFAULT_VISION_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b";
 var NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
-var EXAM_LABEL = {
+var EXAM_LABEL2 = {
   NEET_PG: "NEET-PG (NBEMS, India)",
   INI_CET: "INI-CET (AIIMS, India)",
   AMC_CAT: "AMC CAT (Australia)"
@@ -1397,7 +1645,7 @@ async function generateQuestionFromImage(opts) {
     groundTruth: String(groundTruth).slice(0, 300),
     modality: String(modality || "").slice(0, 40),
     subject: String(subject || "").slice(0, 60),
-    examLabel: EXAM_LABEL[exam] || exam,
+    examLabel: EXAM_LABEL2[exam] || exam,
     optionCount: count
   });
   const messages = [
@@ -2110,11 +2358,11 @@ function extractJson(raw) {
 // server.ts
 dotenv.config();
 var __filename = fileURLToPath(import.meta.url);
-var __dirname = path2.dirname(__filename);
+var __dirname = path3.dirname(__filename);
 var app = express();
 var PORT = parseInt(process.env.PORT || "3000", 10);
-var DATA_DIR2 = process.env.PULSE_DATA_DIR || path2.join(os2.homedir(), ".pulse-med");
-var ENV_FILE = path2.join(DATA_DIR2, ".env");
+var DATA_DIR2 = process.env.PULSE_DATA_DIR || path3.join(os3.homedir(), ".pulse-med");
+var ENV_FILE = path3.join(DATA_DIR2, ".env");
 try {
   dotenv.config({ path: ENV_FILE });
 } catch {
@@ -2181,22 +2429,22 @@ function getGemini() {
   return geminiClient.client;
 }
 function writeEnvValue(name, value) {
-  fs2.mkdirSync(DATA_DIR2, { recursive: true });
+  fs3.mkdirSync(DATA_DIR2, { recursive: true });
   let lines = [];
-  if (fs2.existsSync(ENV_FILE)) {
-    const existing = fs2.readFileSync(ENV_FILE, "utf8").split(/\r?\n/);
+  if (fs3.existsSync(ENV_FILE)) {
+    const existing = fs3.readFileSync(ENV_FILE, "utf8").split(/\r?\n/);
     const matcher = new RegExp(`^${name}\\s*=`);
     lines = existing.filter((l) => l.trim() !== "" && !matcher.test(l));
   }
   lines.push(`${name}=${value}`, "");
-  fs2.writeFileSync(ENV_FILE, lines.join("\n"), "utf8");
+  fs3.writeFileSync(ENV_FILE, lines.join("\n"), "utf8");
   process.env[name] = value;
 }
 function clearEnvValue(name) {
-  if (fs2.existsSync(ENV_FILE)) {
+  if (fs3.existsSync(ENV_FILE)) {
     const matcher = new RegExp(`^${name}\\s*=`);
-    const lines = fs2.readFileSync(ENV_FILE, "utf8").split(/\r?\n/).filter((l) => l.trim() !== "" && !matcher.test(l));
-    fs2.writeFileSync(ENV_FILE, lines.length ? lines.join("\n") + "\n" : "", "utf8");
+    const lines = fs3.readFileSync(ENV_FILE, "utf8").split(/\r?\n/).filter((l) => l.trim() !== "" && !matcher.test(l));
+    fs3.writeFileSync(ENV_FILE, lines.length ? lines.join("\n") + "\n" : "", "utf8");
   }
   delete process.env[name];
 }
@@ -2209,11 +2457,11 @@ var OPENCODE_SESSION = `pulsemed-${Math.random().toString(36).slice(2)}`;
 var OPENCODE_MODELS_URL = "https://opencode.ai/inference/v1/models";
 var OPENCODE_GO_MODELS_URL = "https://opencode.ai/inference/go/v1/models";
 function opencodeAuthFile() {
-  return process.env.OPENCODE_AUTH_FILE || path2.join(os2.homedir(), ".local", "share", "opencode", "auth.json");
+  return process.env.OPENCODE_AUTH_FILE || path3.join(os3.homedir(), ".local", "share", "opencode", "auth.json");
 }
 function opencodeKeyFromCli() {
   try {
-    const raw = JSON.parse(fs2.readFileSync(opencodeAuthFile(), "utf8"));
+    const raw = JSON.parse(fs3.readFileSync(opencodeAuthFile(), "utf8"));
     const entry = raw?.opencode ?? raw?.["opencode-go"] ?? raw?.["opencode-zen"];
     const key = entry?.key ?? entry?.apiKey ?? entry?.access;
     return typeof key === "string" ? key.trim() : "";
@@ -2224,7 +2472,7 @@ function opencodeKeyFromCli() {
 var signInCache = null;
 function opencodeKeyFromSignIn() {
   if (signInCache && Date.now() - signInCache.at < 5 * 6e4) return signInCache.key;
-  const cli = process.env.OPENCODE_CLI_PATH || path2.join(process.env.LOCALAPPDATA || "", "Programs", "ai.opencode.desktop", "resources", "opencode-cli.exe");
+  const cli = process.env.OPENCODE_CLI_PATH || path3.join(process.env.LOCALAPPDATA || "", "Programs", "ai.opencode.desktop", "resources", "opencode-cli.exe");
   let key = "";
   try {
     const list = JSON.parse(execFileSync(cli, ["auth", "export"], { encoding: "utf8", timeout: 15e3, windowsHide: true }));
@@ -2296,6 +2544,8 @@ var nvidiaStats = {
   // Questions the app kept, and those it dropped by reason (after the model replied).
   accepted: 0,
   dropped: {},
+  // Repair outcomes for rejected drafts: attempted (sent), accepted (kept after its checks), failed (no repair returned).
+  repairs: {},
   byModel: {},
   events: []
 };
@@ -2670,6 +2920,11 @@ app.get("/api/oauth/status", (req, res) => {
     defaults: DEFAULT_MODELS
   });
 });
+app.post("/api/pyq/weights", (req, res) => {
+  const subtopics = Array.isArray(req.body?.subtopics) ? req.body.subtopics.map((s) => String(s)).slice(0, 200) : [];
+  const exam = String(req.body?.exam || "");
+  return res.json({ weights: pyqWeights(subtopics, exam), source: pyqSource() });
+});
 var splitCache = /* @__PURE__ */ new Map();
 app.post("/api/ai/split-topic", async (req, res) => {
   const topic = String(req.body?.topic || "").trim().slice(0, 120);
@@ -2690,10 +2945,10 @@ ${s.text}`).join("\n").slice(0, 6e3);
   }
   const prompt = [
     `You are an expert medical exam item writer for ${exam}.`,
-    evidence ? `Evidence from the textbook library and the web on this topic (list only subtopics this evidence supports):
+    evidence ? `Evidence from the textbook library and the web on this topic (a guide: list every subtopic the evidence supports, and every other subtopic an examiner tests on this topic):
 ${evidence}` : "No evidence was found, so list the subtopics an exam would test.",
     `Split the topic "${topic}" into its distinct subtopics, sorted as an examiner would sort them:`,
-    "for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. Give 8 to 12 subtopics.",
+    "for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. List every distinct subtopic an examiner tests on this topic: a narrow topic may have only two or three, a broad one thirty or more. Do not stop at a fixed number.",
     "Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.",
     "Give each subtopic a priority from 1 to 10 for how often it is tested.",
     'Give each subtopic "facts": the number of high-yield, exam-testable facts in it (1 to 6). Count only facts an examiner would ask, not background detail.',
@@ -2701,14 +2956,13 @@ ${evidence}` : "No evidence was found, so list the subtopics an exam would test.
     `Return only a JSON object: {"subtopics": [{"subject": "${topic}", "subtopic": "<name: items>", "priority": <1-10>, "facts": <1-6>}, ...]}.`,
     "Do not repeat any entry."
   ].join("\n");
-  const splitWith = async (useModel, text = prompt) => {
-    const raw = await runCompletion({ provider, model: useModel, messages: [{ role: "user", content: text }], json: true, effort: "min" });
+  const splitWith = async (useModel, text = prompt, via = provider) => {
+    const raw = await runCompletion({ provider: via, model: useModel, messages: [{ role: "user", content: text }], json: true, effort: "min" });
     const parsed = extractJson(raw);
     const asList = Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" ? Object.values(parsed).find(Array.isArray) ?? [parsed] : [];
     console.log("[split-topic] model", useModel, "raw", String(raw).slice(0, 120), "items:", asList.length);
     const rated = asList.map((e) => typeof e === "string" ? { subtopic: e, priority: 10, facts: 1 } : { subtopic: e?.subtopic, priority: Number(e?.priority) || 0, facts: Math.min(6, Math.max(1, Math.round(Number(e?.facts) || 1))) }).filter((r) => typeof r.subtopic === "string" && r.subtopic.trim());
-    const important = rated.filter((r) => r.priority >= 5);
-    const chosen = (important.length ? important : rated).sort((a, b) => b.priority - a.priority);
+    const chosen = rated.sort((a, b) => b.priority - a.priority);
     const seen = /* @__PURE__ */ new Set();
     const unique = [];
     for (const r of chosen) {
@@ -2717,7 +2971,7 @@ ${evidence}` : "No evidence was found, so list the subtopics an exam would test.
       seen.add(name);
       unique.push({ subtopic: name, priority: r.priority, facts: r.facts });
     }
-    return unique.slice(0, 12);
+    return unique;
   };
   try {
     let subtopics = await splitWith(model || void 0).catch(() => []);
@@ -2725,7 +2979,7 @@ ${evidence}` : "No evidence was found, so list the subtopics an exam would test.
     if (subtopics.length < 4) {
       const strict = [
         prompt,
-        "Your last reply gave too few subtopics. Return at least 8, each a different category.",
+        "Your last reply gave too few subtopics. Return every distinct subtopic an examiner tests on this topic, each a different category.",
         "For a drug or drug class, cover every organ system and effect type it is known for (for example renal, neurological, sensory, haematological, hepatic, cardiac, metabolic, skin, endocrine, pregnancy), plus its key interactions and monitoring.",
         "For a disease, cover its causes, clinical features, investigations, treatment, complications and prognosis.",
         "A single subtopic is not acceptable."
@@ -2733,9 +2987,16 @@ ${evidence}` : "No evidence was found, so list the subtopics an exam would test.
       const more = await splitWith(model || void 0, strict).catch(() => []);
       if (more.length > subtopics.length) subtopics = more;
     }
+    if (subtopics.length < 4 && provider === "vyce") {
+      const alt = await splitWith(DEFAULT_MODELS.nvidia, prompt, "nvidia").catch(() => []);
+      if (alt.length > subtopics.length) subtopics = alt;
+    }
+    const thin = subtopics.length < 4;
     if (!subtopics.length) subtopics = [{ subtopic: topic, priority: 10, facts: 1 }];
-    if (splitCache.size >= 50) splitCache.delete(splitCache.keys().next().value);
-    splitCache.set(key, subtopics);
+    if (!thin) {
+      if (splitCache.size >= 50) splitCache.delete(splitCache.keys().next().value);
+      splitCache.set(key, subtopics);
+    }
     return res.json({ subtopics: subtopics.map((s) => s.subtopic), priorities: subtopics.map((s) => s.priority), facts: subtopics.map((s) => s.facts) });
   } catch (err) {
     console.log("[split-topic] failed:", err?.message || err);
@@ -2745,14 +3006,14 @@ ${evidence}` : "No evidence was found, so list the subtopics an exam would test.
 app.get("/api/ai/source-registry", (_req, res) => {
   return res.json({ sources: SOURCE_REGISTRY });
 });
-var BANK_FIGURES_DIR = process.env.BANK_FIGURES_DIR || path2.join(os2.homedir(), ".pulse-med", "bank-figures");
+var BANK_FIGURES_DIR = process.env.BANK_FIGURES_DIR || path3.join(os3.homedir(), ".pulse-med", "bank-figures");
 app.get(/^\/api\/bank-figures\/(.+)$/, (req, res) => {
   const rel = String(req.params[0] ?? "");
   if (!/^[A-Za-z0-9_\-/]+\.(png|jpe?g|webp|gif)$/i.test(rel) || rel.split("/").includes("..")) {
     return res.status(400).end();
   }
-  const full = path2.join(BANK_FIGURES_DIR, rel);
-  if (!fs2.existsSync(full)) return res.status(404).end();
+  const full = path3.join(BANK_FIGURES_DIR, rel);
+  if (!fs3.existsSync(full)) return res.status(404).end();
   res.sendFile(full);
 });
 var rankCache = /* @__PURE__ */ new Map();
@@ -3065,11 +3326,11 @@ app.post("/api/settings/vyce-key", (req, res) => {
     return res.status(500).json({ error: err?.message || "Could not save the VyceAI API key." });
   }
 });
-var CUSTOM_ENDPOINTS_FILE = path2.join(DATA_DIR2, "custom-endpoints.json");
+var CUSTOM_ENDPOINTS_FILE = path3.join(DATA_DIR2, "custom-endpoints.json");
 function readCustomEndpoints() {
   try {
-    if (!fs2.existsSync(CUSTOM_ENDPOINTS_FILE)) return [];
-    const raw = fs2.readFileSync(CUSTOM_ENDPOINTS_FILE, "utf8");
+    if (!fs3.existsSync(CUSTOM_ENDPOINTS_FILE)) return [];
+    const raw = fs3.readFileSync(CUSTOM_ENDPOINTS_FILE, "utf8");
     const data = JSON.parse(raw);
     return Array.isArray(data) ? data : [];
   } catch {
@@ -3077,8 +3338,8 @@ function readCustomEndpoints() {
   }
 }
 function writeCustomEndpoints(endpoints) {
-  fs2.mkdirSync(DATA_DIR2, { recursive: true });
-  fs2.writeFileSync(CUSTOM_ENDPOINTS_FILE, JSON.stringify(endpoints, null, 2), "utf8");
+  fs3.mkdirSync(DATA_DIR2, { recursive: true });
+  fs3.writeFileSync(CUSTOM_ENDPOINTS_FILE, JSON.stringify(endpoints, null, 2), "utf8");
 }
 function findCustomEndpoint(id) {
   return readCustomEndpoints().find((e) => e.id === id);
@@ -3570,7 +3831,7 @@ Internet sources found for this topic. Read them, then check the keyed option ag
   ];
 }
 app.get("/nvidia-progress", (_req, res) => {
-  res.type("html").send(fs2.readFileSync(path2.join(process.cwd(), "server", "nvidia-progress.html"), "utf8"));
+  res.type("html").send(fs3.readFileSync(path3.join(process.cwd(), "server", "nvidia-progress.html"), "utf8"));
 });
 app.post("/api/ai/verify-item", async (req, res) => {
   const { provider, model, question, groundOn } = req.body || {};
@@ -3621,11 +3882,11 @@ Answer with one JSON object: {"keyCorrect": true or false, "premiseSupported": t
   }
 });
 app.post("/api/export/questions", (req, res) => {
-  const dir = path2.join(process.cwd(), "exports");
-  fs2.mkdirSync(dir, { recursive: true });
+  const dir = path3.join(process.cwd(), "exports");
+  fs3.mkdirSync(dir, { recursive: true });
   const name = `questions-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`;
-  fs2.writeFileSync(path2.join(dir, name), JSON.stringify(req.body, null, 2), "utf8");
-  res.json({ ok: true, file: path2.join("exports", name) });
+  fs3.writeFileSync(path3.join(dir, name), JSON.stringify(req.body, null, 2), "utf8");
+  res.json({ ok: true, file: path3.join("exports", name) });
 });
 app.post("/api/ai/nvidia-stats/reset", (_req, res) => {
   nvidiaStats.started = 0;
@@ -3635,14 +3896,30 @@ app.post("/api/ai/nvidia-stats/reset", (_req, res) => {
   nvidiaStats.events = [];
   nvidiaStats.accepted = 0;
   nvidiaStats.dropped = {};
+  nvidiaStats.repairs = {};
   res.json({ ok: true });
 });
 app.post("/api/ai/nvidia-stats/question", (req, res) => {
-  const { outcome, reason } = req.body || {};
+  const { outcome, reason, draft } = req.body || {};
   if (outcome === "accepted") nvidiaStats.accepted += 1;
   else if (outcome === "dropped") {
     const key = String(reason || "other");
     nvidiaStats.dropped[key] = (nvidiaStats.dropped[key] ?? 0) + 1;
+    if (draft && typeof draft === "object") {
+      try {
+        const dir = path3.join(process.cwd(), "tools", "quality", "out");
+        fs3.mkdirSync(dir, { recursive: true });
+        fs3.appendFileSync(path3.join(dir, "dropped-questions.jsonl"), JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), reason: key, draft }) + "\n");
+      } catch {
+      }
+    }
+  }
+  res.json({ ok: true });
+});
+app.post("/api/ai/nvidia-stats/repair", (req, res) => {
+  const { outcome } = req.body || {};
+  if (outcome === "attempted" || outcome === "accepted" || outcome === "failed") {
+    nvidiaStats.repairs[outcome] = (nvidiaStats.repairs[outcome] ?? 0) + 1;
   }
   res.json({ ok: true });
 });
@@ -3660,6 +3937,7 @@ app.get("/api/ai/nvidia-stats", (_req, res) => {
     questionsFailed: f.failed,
     questionsStopped: f.stopped,
     accepted: nvidiaStats.accepted,
+    repairs: nvidiaStats.repairs,
     dropped: nvidiaStats.dropped,
     attempts: totals,
     byModel: Object.fromEntries(Object.entries(nvidiaStats.byModel).map(([k, v]) => [k.replace("nvidia/", ""), v])),
@@ -4114,9 +4392,9 @@ app.post("/api/images/bank/build", async (req, res) => {
 });
 app.get("/api/images/qa-results", (_req, res) => {
   try {
-    const file = path2.join(DATA_DIR2, "image-first-results.json");
-    if (!fs2.existsSync(file)) return res.json({ success: true, available: false, run: null });
-    const run = JSON.parse(fs2.readFileSync(file, "utf8"));
+    const file = path3.join(DATA_DIR2, "image-first-results.json");
+    if (!fs3.existsSync(file)) return res.json({ success: true, available: false, run: null });
+    const run = JSON.parse(fs3.readFileSync(file, "utf8"));
     return res.json({ success: true, available: true, run });
   } catch (err) {
     return res.status(500).json({ error: err?.message || "Could not read the last image-first run." });
@@ -4464,9 +4742,9 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path2.resolve(__dirname, "dist")));
+    app.use(express.static(path3.resolve(__dirname, "dist")));
     app.get("*", (req, res) => {
-      res.sendFile(path2.resolve(__dirname, "dist", "index.html"));
+      res.sendFile(path3.resolve(__dirname, "dist", "index.html"));
     });
   }
   const HOST = process.env.HOST ?? "::";
