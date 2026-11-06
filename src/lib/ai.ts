@@ -665,13 +665,13 @@ export function logStage(stage: string, ms: number, lane?: string, detail?: Reco
 }
 
 /** Records a dropped question: the reason, and the question itself when it was written, so it can be examined later. */
-function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string } | undefined, reason: string): void {
+function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string; planned?: boolean } | undefined, reason: string): void {
   logStage(`drop:${reason}`, 0);
   if (ctx) ctx.dropKey = reason;
   const d = ctx?.draft;
   // The planned fact the attempt was written for, so each rejected question can be traced to its fact.
   const fact = ctx?.fact;
-  reportQuestion('dropped', reason, d ? { fact, stem: d.stem, questionText: (d as { questionText?: string }).questionText, options: d.options, correctOption: d.correctOption, explanation: d.explanation, subtopic: (d as { subtopic?: string }).subtopic } : (fact ? { fact } : undefined));
+  reportQuestion('dropped', reason, d ? { planned: ctx?.planned ?? null, fact, stem: d.stem, questionText: (d as { questionText?: string }).questionText, options: d.options, correctOption: d.correctOption, explanation: d.explanation, subtopic: (d as { subtopic?: string }).subtopic } : (fact ? { fact } : undefined));
 }
 
 /** Counts a repair on the progress page: attempted (sent), accepted (kept after its checks) or failed (no repair returned). */
@@ -1341,6 +1341,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const acceptedStems: string[] = [];
   // Key facts of accepted questions: the same fact asked in other words is still a repeat.
   const acceptedKeyFacts: string[] = [];
+  // Planned facts already accepted: a planned fact is tested once in a set.
+  const acceptedPlannedFacts = new Set<string>();
   // Correct answers kept so far in this set (checked so one answer is not asked twice).
   const acceptedAnswers: string[] = [];
   const stemKey = (stem: string) =>
@@ -1434,7 +1436,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }));
 
   // ---------- Step 3: Single-question generation ----------
-  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string, ctx?: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string }, slotOverride?: Slot, repaired?: BatchQuestionSpec): Promise<ClinicalQuestion | null> => {
+  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string, ctx?: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string; planned?: boolean }, slotOverride?: Slot, repaired?: BatchQuestionSpec): Promise<ClinicalQuestion | null> => {
     if (ctx) ctx.fact = focus ?? topic.subtopic;
     if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
@@ -1445,6 +1447,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     // The slot (style, lead-in, difficulty) this question was planned for; a slot given by the worker replaces it on a fallback.
     const slot = slotOverride ?? (topic as { slot?: Slot }).slot;
     const factStepOn = !assigned && Boolean(requestedTopic && activeProvider) && (factHits > 0 || factTries < 6);
+    if (ctx) ctx.planned = Boolean(assigned);
     const sourced = assigned ?? (factStepOn
       ? await pickSourcedFact(requestedTopic!, focus, activeProvider!, signal ?? undefined, acceptedKeyFacts)
       : null);
@@ -1585,6 +1588,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // Without a written key fact, the correct option's text stands in, so repeats are still caught.
         // A planned slot keeps its planned fact as the key fact. The planner already kept those facts distinct.
         const keyFact = sourced ? sourced.fact : ((q.keyFact || '').trim() || (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim());
+        if (assigned && acceptedPlannedFacts.has(assigned.fact)) { dropQ(ctx, 'repeat-planned-fact'); return null; }
         if (!sourced && keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { dropQ(ctx, 'repeat-fact'); return null; }
         // The same correct answer asked again in other words (for example the same imaging test) is also a repeat.
         // Abbreviations and generic words are normalised first, so "CT" and "computed tomography", or "serum lipase level"
@@ -1652,6 +1656,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         seenStems.add(key);
         acceptedStems.push(fullStem);
         if (keyFact) acceptedKeyFacts.push(keyFact);
+        if (assigned) acceptedPlannedFacts.add(assigned.fact);
 
         used.add(`${topic.subtopic}|${focus ?? ''}`);
         return q;
@@ -1765,7 +1770,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       const focus = topic.focus ?? (parts.length > 1 ? parts[idx % parts.length] : undefined);
       questionsInProgress += 1;
       // A rewrite is told why the last attempt was rejected.
-      const ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string } = {};
+      const ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string; planned?: boolean } = {};
       const shapeText = slot
         ? `${STYLES[slot.style].instruction(slot, pattern.opts)}${hint ? ` Your previous attempt was rejected because: ${hint}. Fix exactly that.` : ''}`
         : requestedTopic ? typedShape(idx) : itemShape(idx, exam);
