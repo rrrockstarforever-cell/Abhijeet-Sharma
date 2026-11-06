@@ -151,7 +151,7 @@ export const STYLES: Record<StyleId, StyleSpec> = {
     id: 'image', chips: ['ECG / X-ray interpretation', 'Identify the structure'], needsRelated: false, codedOptions: false,
     judge: 'an image-based item: the stem names the picture type and states its findings in words, so it can be answered without seeing the picture',
     instruction: () => 'Style: image-based. The stem names the picture type and states what it shows in plain words, as if the picture were attached ("A chest X-ray shows ...", "An ECG shows ...", "A biopsy section shows ..."). Then ask for the condition, finding or structure. The stem must be answerable from the words alone. Set "figureModality" and "figureQuery" (3-6 words: the diagnosis plus the picture type).',
-    validate: (q) => (/\b(x-?ray|radiograph|ecg|ekg|ct|mri|ultrasound|sonograph|histolog\w*|biopsy|smear|fundus|fundoscop\w*|micrograph|photograph|section|slide|tracing|film|scan|angiogra\w*|endoscop\w*|specimen|picture|image)\b[^.?]{0,70}\b(shows?|reveals?|demonstrates?|depicts?|displays?|is seen|are seen|seen|noted|visible|reading)\b/i.test(q.stem ?? '') ? null : 'no-picture-description: start the stem with the picture type and say what it shows ("A chest X-ray shows ...")'),
+    validate: (q) => (/\b(x-?ray|radiograph|ecg|ekg|ct|mri|ultrasound|sonograph|histolog\w*|biopsy|smear|fundus|fundoscop\w*|micrograph|photograph|section|slide|tracing|film|scan|angiogra\w*|endoscop\w*|specimen|picture|image)\b[^.?]{0,200}\b(shows?|reveals?|demonstrates?|depicts?|displays?|is seen|are seen|seen|noted|visible|reading)\b/i.test(q.stem ?? '') ? null : 'no-picture-description: start the stem with the picture type and say what it shows ("A chest X-ray shows ...")'),
   },
 };
 
