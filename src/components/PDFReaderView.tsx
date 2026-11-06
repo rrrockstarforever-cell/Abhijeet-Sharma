@@ -392,6 +392,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   const [rightTab, setRightTab] = useState<'copilot' | 'highlights' | 'notes' | 'index'>('copilot');
   // The library shelf is the opening page; a book opens the reader, and "Library" returns here.
   const [showShelf, setShowShelf] = useState<boolean>(true);
+  const [libQuery, setLibQuery] = useState<string>('');
+  const [libResults, setLibResults] = useState<{ docId: string; title: string; page: number; snippet: string }[] | null>(null);
+  const [libSearchNote, setLibSearchNote] = useState<string | null>(null);
 
   // ----- Book contents: units, chapters and sections with their start pages -----
   const [bookContents, setBookContents] = useState<ContentEntry[]>([]);
@@ -471,6 +474,23 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
     refreshLibrary();
   }, [refreshLibrary]);
 
+  // The open book and page are remembered, so leaving the PDF reader tab and coming back returns to the same page.
+  const LAST_VIEW_KEY = 'pulse.pdfReader.last';
+  const restoredView = useRef<{ docId: string; page: number } | null>(null);
+  if (restoredView.current === null) {
+    try {
+      const raw = localStorage.getItem(LAST_VIEW_KEY);
+      restoredView.current = raw ? JSON.parse(raw) : { docId: '', page: 1 };
+    } catch {
+      restoredView.current = { docId: '', page: 1 };
+    }
+  }
+  const pendingScrollPage = useRef<number | null>(null);
+  useEffect(() => {
+    if (!activeDocId) return;
+    try { localStorage.setItem(LAST_VIEW_KEY, JSON.stringify({ docId: activeDocId, page: currentPage })); } catch { /* storage full or blocked */ }
+  }, [activeDocId, currentPage]);
+
   const clearRenderedPages = useCallback(() => {
     renderedRef.current.clear();
     renderingRef.current.clear();
@@ -486,7 +506,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
     visibleRatiosRef.current.clear();
   }, []);
 
-  const openDoc = useCallback(async (id: string) => {
+  const openDoc = useCallback(async (id: string, startPage: number = 1) => {
     if (pdfRef.current) {
       try { await pdfRef.current.destroy(); } catch { /* ignore */ }
       pdfRef.current = null;
@@ -506,7 +526,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
     nativeTextPagesRef.current = new Set();
     setWordsVersion((v) => v + 1);
     setNumPages(0);
-    setCurrentPage(1);
+    setCurrentPage(startPage);
     setLoadingDoc(true);
     try {
       const rec = await getLibraryDocument(id);
@@ -1879,6 +1899,46 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   const currentNativeText = nativeTextPagesRef.current.has(currentPage);
   const panelOpen = showNotes;
 
+  // Reopen the remembered book and page when the reader mounts.
+  useEffect(() => {
+    const last = restoredView.current;
+    if (!last?.docId || activeDocId) return;
+    restoredView.current = null;
+    pendingScrollPage.current = last.page > 1 ? last.page : null;
+    setShowShelf(false);
+    void openDoc(last.docId, last.page || 1);
+  }, [openDoc]);
+
+  // After a remembered book has loaded, scroll to the remembered page.
+  useEffect(() => {
+    if (!numPages || pendingScrollPage.current == null) return;
+    const page = pendingScrollPage.current;
+    pendingScrollPage.current = null;
+    setTimeout(() => jumpToPage(page), 300);
+  }, [numPages, jumpToPage]);
+
+  // Library search: the pages already indexed (read once when a book is searched or opened) are searched across all books.
+  const runLibrarySearch = async () => {
+    const q = libQuery.trim().toLowerCase();
+    if (!q) { setLibResults(null); setLibSearchNote(null); return; }
+    const found: { docId: string; title: string; page: number; snippet: string }[] = [];
+    let indexedPages = 0;
+    for (const d of docs) {
+      const rows = await listPageTexts(d.id).catch(() => []);
+      indexedPages += rows.length;
+      for (const row of rows) {
+        const text = String(row.text || '');
+        const at = text.toLowerCase().indexOf(q);
+        if (at >= 0) {
+          found.push({ docId: d.id, title: d.title, page: row.pageNumber, snippet: text.slice(Math.max(0, at - 80), at + q.length + 80) });
+        }
+      }
+    }
+    found.sort((a, b) => a.title.localeCompare(b.title) || a.page - b.page);
+    setLibResults(found.slice(0, 200));
+    setLibSearchNote(`Searched ${indexedPages} indexed page${indexedPages === 1 ? '' : 's'} in ${docs.length} book${docs.length === 1 ? '' : 's'}. Search inside a book to index its other pages.`);
+  };
+
   // Books grouped by subject, for the library shelf. Uncategorised comes last.
   const shelfGroups = Object.entries(
     docs.reduce<Record<string, PDFLibraryMeta[]>>((acc, d) => {
@@ -1919,6 +1979,41 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
         <div className="flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
           <AlertCircle className="h-4 w-4 shrink-0" />
           <span className="flex-1">{libraryError}</span>
+        </div>
+      )}
+
+      {docs.length > 0 && (
+        <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="flex gap-2">
+            <input
+              value={libQuery}
+              onChange={(e) => setLibQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') void runLibrarySearch(); }}
+              placeholder="Search all your books"
+              className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-[12px]"
+            />
+            <button onClick={() => void runLibrarySearch()} className={`rounded-lg px-3 py-2 text-[11px] font-bold transition active:scale-95 ${T.cta}`}>
+              Search
+            </button>
+          </div>
+          {libSearchNote && <p className="mt-2 text-[10px] text-slate-500">{libSearchNote}</p>}
+          {libResults && (
+            <ul className="mt-2 max-h-72 space-y-1 overflow-y-auto text-[11px]">
+              {libResults.length === 0 && <li className="text-slate-500">No match in the indexed pages.</li>}
+              {libResults.map((r, i) => (
+                <li key={`${r.docId}-${r.page}-${i}`}>
+                  <button
+                    onClick={() => { setShowShelf(false); void openDoc(r.docId, r.page); }}
+                    className="w-full rounded-lg px-2 py-1.5 text-left hover:bg-slate-100"
+                  >
+                    <span className="font-bold text-slate-800">{r.title}</span>
+                    <span className="text-slate-500"> · page {r.page}</span>
+                    <span className="block text-slate-600">…{r.snippet}…</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 
