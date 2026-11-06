@@ -1506,6 +1506,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         ? `The learner asked for exactly: "${requestedTopic}". The item must test that content itself (the named effect, feature, drug or fact) in the style given below. The stem must give real context (a subject, a setting or a finding), never a topic label, and must not name or hint at the answer. Never refer to a picture, list or table that the stem does not contain ("this biopsy", "shown here") unless the style is image-based and the stem says what the picture shows. The options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis.`
         : requestedTopic ? `The learner asked for exactly: "${requestedTopic}". Each item must test that content itself (the named effect, feature, drug or fact). Test mechanism only if the request asks for it, and do not test a workup, diagnosis or management step that follows from it. Keep the stem short and direct; a brief case is fine only when the answer is that fact. The stem must give real context (a patient, a setting or a finding), never a topic label, and must not name or hint at the answer. Stay inside the request: do not write treatment, management or investigation items unless the request names them. Use a patient case in at most one item in three; the other items are one-line questions about the fact. Never use a generic lead-in such as "the most likely diagnosis" or "the most appropriate investigation" without naming the condition or the finding it is about. The four options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis; otherwise ask for a supporting or most likely finding.` : '',
       requestedTopic && acceptedStems.length ? `Already in this set, so do not reuse these patients, scenarios or drugs: ${acceptedStems.slice(-25).map((s) => s.slice(0, 110)).join(' | ')}` : '',
+      requestedTopic ? 'Put the question only in questionText. The stem ends with the last finding, never with a question.' : '',
+      requestedTopic && slot && !/treat|manag|therap|drug|dose|regimen|rescue|prevent/i.test(requestedTopic) && !(slot.leadIn && ['next-step', 'drug-of-choice', 'treatment-of-choice', 'advice'].includes(slot.leadIn))
+        ? 'The request does not ask about treatment, so the question line must not ask for a treatment, regimen, drug of choice or management step; ask for the diagnosis, finding, organism, stain, test or feature instead.'
+        : '',
       requestedTopic && acceptedKeyFacts.length ? `Key facts already tested in this set. Do not test any of them again, not even in other words: ${acceptedKeyFacts.slice(-20).map((f) => f.slice(0, 120)).join(' | ')}` : '',
       shape ?? '',
       slot && STYLES[slot.style].codedOptions ? '' : `Make the ${pattern.opts} options similar in length and detail. The correct option must not be the longest or the most detailed.`,
@@ -1559,6 +1563,16 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const q = buildQuestion(parsed, exam, [{ subject: topic.subject, subtopic: topic.subtopic }], topic.difficultyTier, difficultySubLevel, pattern.opts);
         if (!q) { if (ctx) ctx.reason = `the item had the wrong shape: give exactly ${pattern.opts} non-empty options with ids ${'ABCDE'.slice(0, pattern.opts).split('').join(', ')}, and a correctOption that is one of them`; dropQ(ctx, 'invalid'); return null; }
         if (ctx) ctx.draft = q;
+        // The writer often repeats the question at the end of the stem as well as in the question line. That is a
+        // formatting slip, not a bad item: the trailing question is cut from the stem when a question line exists.
+        {
+          const line = ((q as { questionText?: string }).questionText ?? '').trim();
+          const stemText = (q.stem ?? '').trim();
+          if (line && /\?\s*$/.test(stemText)) {
+            const cut = stemText.replace(/(^|[.!]\s+)[^.!?]*\?\s*$/, '$1').trim();
+            if (cut.split(/\s+/).length >= 6) q.stem = cut;
+          }
+        }
         // For a typed topic a stem under six words is usually just a label, not context for the question.
         const thinStem = requestedTopic && (q.stem ?? '').trim().split(/\s+/).filter(Boolean).length < 6;
         // Two options that say nearly the same thing make the item ambiguous, so the item is dropped.
@@ -1582,12 +1596,15 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // A typed topic that does not name treatment gets no treatment or management items (hard filter, not a prompt hint).
         const topicNamesTreatment = /treat|manag|therap|drug|dose|regimen|rescue|prevent/i.test(requestedTopic ?? '');
         // Only clear treatment phrases count; words like "therapy" or "dose" also appear in side-effect questions.
-        const treatmentItem = /\b(management|treatment of|treatment is|first-line|next step|initial therapy|rescue therapy|drug of choice|prophylaxis|antibiotics?|antimicrobials?|regimen|appropriate (now|next|initial)|resuscitation)\b/i.test(`${q.stem ?? ''} ${(q as { questionText?: string }).questionText ?? ''}`);
+        // Only what the question asks counts: case history ("no response to antibiotics", "on first-line therapy") and
+        // laboratory questions ("antibiotic sensitivity testing") are not treatment items.
+        const askLine = ((q as { questionText?: string }).questionText ?? '').trim() || (q.stem ?? '').split(/(?<=[.!])\s+/).pop() || '';
+        const treatmentItem = /\b(management|manage|treat(?:ed|ment)?\b(?! response)|first-line (?:drug|treatment|therapy|agent)|next step|initial therapy|rescue therapy|drug of choice|prophylaxis|regimen|which (?:antibiotic|antimicrobial|drug|agent)s? (?:should|would|is (?:most )?(?:appropriate|indicated|preferred))|should be (?:started|given|prescribed)|appropriate (?:now|next|initial)|resuscitation)\b/i.test(askLine.replace(/\b(?:antibiotic|antimicrobial|drug) (?:sensitivity|susceptibility|resistance)\b/gi, ''));
         const driftsIntoTreatment = Boolean(requestedTopic) && !topicNamesTreatment && treatmentItem;
         // A generic lead-in ("Choose the single best answer") or a very short question line does not name the fact it tests.
         const qLine = ((q as { questionText?: string }).questionText ?? '').trim();
         // A question must stand on its own stem: it cannot point to a list or item the stem does not give.
-        const dependsOnOutside = /\b(that|those|this|these) (list|group|set|pattern|eruption|finding|statement)s?\b|\blisted\b|\bon that\b|\bthat list\b|\bthat statement\b/i.test(`${q.stem ?? ''} ${qLine}`) && !/\b(list|statement|pattern)\b/i.test(q.stem ?? '');
+        const dependsOnOutside = /\b(that|those|this|these) (list|group|set|pattern|eruption|statement)s?\b|\blisted\b|\bon that\b|\bthat list\b|\bthat statement\b/i.test(`${q.stem ?? ''} ${qLine}`) && !/\b(list|statement|pattern)\b/i.test(q.stem ?? '');
         // A stem that is itself a question (ends with "?") is not a stem: it gives no case or context.
         const stemIsQuestion = Boolean(requestedTopic) && /\?\s*$/.test((q.stem ?? '').trim());
         // Styles with a fixed question line ("Choose the correct combination.", "Which statements are correct?") are short by design.
@@ -1595,7 +1612,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const codedOptions = Boolean(slot) && STYLES[slot!.style].codedOptions;
         // A management lead-in (next step, drug of choice, advice) is the style asked for, not drift.
         const managesByDesign = Boolean(slot?.leadIn) && ['next-step', 'drug-of-choice', 'treatment-of-choice', 'advice'].includes(slot!.leadIn!);
-        const genericLeadIn = Boolean(requestedTopic) && (stemIsQuestion || (!shortLineOk && qLine.length < 40) || /^(choose|select) the (single )?best answer/i.test(qLine) && !shortLineOk || (/^which of the following is the most likely diagnosis\??$/i.test(qLine) && slot?.leadIn !== 'diagnosis') || dependsOnOutside);
+        const genericLeadIn = Boolean(requestedTopic) && (stemIsQuestion || (!shortLineOk && qLine.length < 40) || /^(choose|select) the (single )?best answer/i.test(qLine) && !shortLineOk || (/^which of the following is the most likely diagnosis\??$/i.test(qLine) && slot?.leadIn !== 'diagnosis' && slot?.style !== 'image') || dependsOnOutside);
         // With a planned style mix the slots decide how many cases there are, so the case cap is off.
         const shape = structureReason(q) ?? (combinationListMissing(q) ? 'combination-list-missing' : null) ?? (inventedSource(q) ? 'invented-source' : null) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions && !codedOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases && !slot ? 'too-many-cases' : null) ?? (driftsIntoTreatment && !managesByDesign ? 'treatment-drift' : null);
         const SHAPE_HINTS: Record<string, string> = {
