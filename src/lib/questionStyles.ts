@@ -26,7 +26,7 @@ const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace
 /** What a lead-in asks, and how to recognise it in the question line. */
 const LEAD_INS: Record<LeadIn, { ask: string; test: RegExp }> = {
   'next-step': { ask: 'The question line asks for the next best step in management ("What is the most appropriate next step in management?").', test: /next (best |appropriate )?step|next step|most appropriate (next )?(step|management|action|initial)|best next|initial management/i },
-  'drug-of-choice': { ask: 'The question line asks for the drug of choice or the most appropriate drug ("Which drug is the drug of choice?").', test: /drug of choice|most appropriate (drug|medication|treatment|therapy|agent|antibiotic|regimen|prophylaxis|dose)|first[- ]line|best (drug|treatment|agent|regimen)|treatment of choice|regimen of choice/i },
+  'drug-of-choice': { ask: 'The question line asks for the drug of choice or the most appropriate drug ("Which drug is the drug of choice?").', test: /drug of choice|most appropriate (?:\w+ )?(drug|medication|treatment|therapy|agent|antibiotic|antimicrobial|regimen|prophylaxis|dose|choice)|first[- ]line|best (drug|treatment|agent|regimen|choice)|treatment of choice|regimen of choice|which (?:\w+ ){0,2}(?:drug|agent|antibiotic|antimicrobial|medication|regimen|cephalosporin|penicillin|macrolide|aminoglycoside|fluoroquinolone|carbapenem|tetracycline)s?\b[^?]{0,40}\b(?:most appropriate|preferred|best|indicated|of choice)/i },
   'investigation-of-choice': { ask: 'The question line asks for the investigation of choice or the most appropriate test ("Which investigation is most appropriate?").', test: /investigation|test|imaging|scan|biopsy|gold standard|most (appropriate|useful|sensitive|specific)|best (initial )?(test|investigation)/i },
   'treatment-of-choice': { ask: 'The question line asks for the treatment of choice ("What is the treatment of choice?").', test: /treatment|management|therapy|drug|manage|intervention|procedure/i },
   diagnosis: { ask: 'The question line asks for the most likely diagnosis ("What is the most likely diagnosis?"). The stem must carry enough findings to settle it.', test: /diagnosis|condition|disorder|disease|most likely/i },
@@ -151,7 +151,7 @@ export const STYLES: Record<StyleId, StyleSpec> = {
     id: 'image', chips: ['ECG / X-ray interpretation', 'Identify the structure'], needsRelated: false, codedOptions: false,
     judge: 'an image-based item: the stem names the picture type and states its findings in words, so it can be answered without seeing the picture',
     instruction: () => 'Style: image-based. The stem names the picture type and states what it shows in plain words, as if the picture were attached ("A chest X-ray shows ...", "An ECG shows ...", "A biopsy section shows ..."). Then ask for the condition, finding or structure. The stem must be answerable from the words alone. Set "figureModality" and "figureQuery" (3-6 words: the diagnosis plus the picture type).',
-    validate: (q) => (/\b(x-?ray|radiograph|ecg|ekg|ct|mri|ultrasound|sonograph|echocardiogra\w*|echo|histolog\w*|biopsy|smear|stain\w*|aspirate|pus|wet mount|culture|fundus|fundoscop\w*|micrograph|photo\w*|section|slide|tracing|film|scan|angiogra\w*|endoscop\w*|specimen|picture|image|plate|petri dish|dish|agar|field|microscop\w*|oil[- ]immersion)\b[^.?]{0,200}\b(shows?|showing|reveals?|revealing|demonstrates?|demonstrating|depicts?|displays?|contains?|has|with|is seen|are seen|seen|noted|visible|reading)\b/i.test(q.stem ?? '') ? null : 'no-picture-description: start the stem with the picture type and say what it shows ("A chest X-ray shows ...")'),
+    validate: (q) => (describesPicture(q) ? null : 'no-picture-description: start the stem with the picture type and say what it shows ("A chest X-ray shows ...")'),
   },
 };
 
@@ -177,8 +177,31 @@ export function combinationListMissing(q: ClinicalQuestion): boolean {
  */
 export function inventedSource(q: ClinicalQuestion): boolean {
   const text = `${q.stem ?? ''} ${String((q as { questionText?: string }).questionText ?? '')}`;
-  const invented = /\b(?:this|the|a|an|our|their|national|local) (?:guideline|survey|questionnaire|shortage|supply interruption\w*|trial|audit|formulary review)\b|\b20\d\d (?:survey|questionnaire|shortage|guideline)\b|\bsurvey of (?:physicians|prescribers|doctors)\b|\b(?:German|Austrian)\b.*\b(?:survey|shortage|questionnaire|supply interruption\w*)\b/i;
+  const invented = /\b(?:this|the|a|an|our|their|national|local) (?:guideline|survey|questionnaire|shortage|supply interruption\w*|trial|audit|formulary review)\b|\b20\d\d (?:survey|questionnaire|shortage|guideline)\b|\bsurvey of (?:physicians|prescribers|doctors)\b|\b(?:German|Austrian)\b.*\b(?:survey|shortage|questionnaire|supply interruption\w*)\b|\b(?:stock list|supply list|known supply|supply shortages?|listed among known)\b/i;
   return invented.test(text);
+}
+
+/** The stem names a picture and says what it shows ("A PAS-stained section shows ..."), so it can be answered from the words. */
+const PICTURE_DESCRIPTION = /\b(x-?ray|radiograph|ecg|ekg|ct|mri|ultrasound|sonograph|echocardiogra\w*|echo|histolog\w*|biopsy|smear|stain\w*|aspirate|pus|wet mount|culture|fundus|fundoscop\w*|micrograph|photo\w*|section|slide|tracing|film|scan|angiogra\w*|endoscop\w*|specimen|picture|image|plate|petri dish|dish|agar|field|microscop\w*|oil[- ]immersion|mount|container)\b[^.?]{0,200}\b(shows?|showing|reveals?|revealing|demonstrates?|demonstrating|depicts?|displays?|contains?|holds?|has|with|is seen|are seen|seen|noted|visible|reading)\b/i;
+export function describesPicture(q: ClinicalQuestion): boolean {
+  return PICTURE_DESCRIPTION.test(q.stem ?? '');
+}
+
+/**
+ * A stem that already describes its picture in words does not need the picture: "this section" is turned into "the
+ * section" so it no longer suggests a picture on screen. Returns true when the item was changed.
+ */
+export function unpointDescribedPicture(q: ClinicalQuestion): boolean {
+  if (q.image || !describesPicture(q)) return false;
+  const swap = (text: string) => text
+    .replace(/\b(this|the above|the below)\s+(image|picture|photograph|photo|figure|slide|micrograph|radiograph|x-?ray|ecg|ekg|tracing|scan|film|biopsy|specimen|smear|section)\b/gi, (_m, _w, noun) => `the ${noun}`)
+    .replace(/\s*\b(shown|seen|depicted|illustrated|pictured)\s+(here|above|below)\b/gi, '')
+    .replace(/\b(in|on) the (image|picture|figure|photograph|photo)\b/gi, '$1 the described $2');
+  const before = `${q.stem}\n${(q as { questionText?: string }).questionText ?? ''}`;
+  q.stem = swap(q.stem ?? '');
+  const line = (q as { questionText?: string }).questionText;
+  if (typeof line === 'string') (q as { questionText?: string }).questionText = swap(line);
+  return before !== `${q.stem}\n${(q as { questionText?: string }).questionText ?? ''}` && !pointsAtMissingPicture(q);
 }
 
 export function pointsAtMissingPicture(q: ClinicalQuestion): boolean {

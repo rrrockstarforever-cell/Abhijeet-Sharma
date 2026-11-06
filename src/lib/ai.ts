@@ -6,7 +6,7 @@ import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } f
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
-import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, combinationListMissing, inventedSource, explainsDistractors, explanationLeaks, leadInsFromChips, planSlots, spread, pointsAtMissingPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
+import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, combinationListMissing, inventedSource, explainsDistractors, explanationLeaks, leadInsFromChips, planSlots, spread, pointsAtMissingPicture, unpointDescribedPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
 
 /**
  * Two key facts this similar are the same fact (word overlap on the key-fact sentences). Set low because
@@ -1576,6 +1576,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
             if (cut.split(/\s+/).length >= 6) q.stem = cut;
           }
         }
+        // A non-picture slot whose stem already describes its picture in words keeps the item ("this section" becomes
+        // "the section"); a picture slot keeps its pointer until the picture search has run.
+        if (!(slot?.style === 'image' && q.figureQuery)) unpointDescribedPicture(q);
         // For a typed topic a stem under six words is usually just a label, not context for the question.
         const thinStem = requestedTopic && (q.stem ?? '').trim().split(/\s+/).filter(Boolean).length < 6;
         // Two options that say nearly the same thing make the item ambiguous, so the item is dropped.
@@ -1715,7 +1718,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           }
         }
         // A stem that points at a picture ("this biopsy") must have one; otherwise the item cannot be answered.
-        if (pointsAtMissingPicture(q)) {
+        // When no picture was found but the stem describes it in words, the item is kept as a picture-description item.
+        if (pointsAtMissingPicture(q) && !unpointDescribedPicture(q)) {
           if (attachedHere) usedImages.delete(attachedHere);
           if (ctx) ctx.reason = 'the stem points at a picture that is not there; describe the finding in words instead';
           dropQ(ctx, 'refers-to-missing-picture');

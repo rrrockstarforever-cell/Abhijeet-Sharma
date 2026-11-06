@@ -1,6 +1,6 @@
 // Offline checks of the style rules with hand-written good and bad questions. No model, no network.
 //   node --import tsx tools/quality/styles.test.mjs
-import { styleProblem, pointsAtMissingPicture, explainsDistractors, planSlots, stylesFromChips, leadInsFromChips } from '../../src/lib/questionStyles.ts';
+import { styleProblem, pointsAtMissingPicture, unpointDescribedPicture, inventedSource, explainsDistractors, planSlots, stylesFromChips, leadInsFromChips } from '../../src/lib/questionStyles.ts';
 
 const mk = (o) => ({ stem: '', questionText: '', options: [], correctOption: 'A', explanation: '', ...o });
 const opts = (...t) => t.map((text, i) => ({ id: 'ABCDE'[i], text }));
@@ -76,5 +76,16 @@ expect('picked match', String(count(picked, 'style').match), '20');
 expect('picked related', String(picked[0].related.length > 0), 'true');
 const lead = planSlots(facts, 'NEET_PG', ['vignette'], ['next-step', 'drug-of-choice'], 'MEDIUM');
 expect('lead-ins split', JSON.stringify(count(lead, 'leadIn')), '{"next-step":10,"drug-of-choice":10}');
+// drug-of-choice lead-ins written in other words, picture stems described in words, invented settings
+const sau = "A 34-year-old hospital nurse has recurrent impetigo on the forearm after two courses of oral antibiotics. The crusted lesions are 3 cm across, with no fever or lymphadenopathy. Culture grows Staphylococcus aureus resistant to fusidic acid and erythromycin.";
+expect("drug choice: most appropriate choice", styleProblem(mk({ stem: sau, questionText: "Which topical agent is the most appropriate choice for this lesion?", options: opts("a", "b", "c", "d") }), slot("vignette", { leadIn: "drug-of-choice" }), 4), null);
+expect("drug choice: agent is most appropriate", styleProblem(mk({ stem: sau, questionText: "Which topical agent is most appropriate for the local lesion?", options: opts("a", "b", "c", "d") }), slot("vignette", { leadIn: "drug-of-choice" }), 4), null);
+expect("drug choice: not a drug question", styleProblem(mk({ stem: sau, questionText: "Which enzyme does the organism produce that explains the resistance?", options: opts("a", "b", "c", "d") }), slot("vignette", { leadIn: "drug-of-choice" }), 4), "wrong-lead-in");
+const described = mk({ stem: "A PAS-stained section of nail clippings from a 56-year-old woman shows pink septate hyphae and arthrospores in the nail keratin.", questionText: "Which fungus is seen in this section?" });
+expect("described picture kept", String(unpointDescribedPicture(described) && !pointsAtMissingPicture(described)), "true");
+const bare = mk({ stem: "A 56-year-old woman has a thick yellow toenail. A biopsy was taken.", questionText: "Which fungus is seen in this section?" });
+expect("undescribed picture still dropped", String(unpointDescribedPicture(bare) || !pointsAtMissingPicture(bare)), "false");
+expect("stock list is invented", String(inventedSource(mk({ stem: "A community pharmacist in Munich compares the cephalosporins on the practice stock list." }))), "true");
+expect("hospital in Delhi is fine", String(inventedSource(mk({ stem: "A 30-year-old woman attends a hospital in Delhi with fever and dysuria." }))), "false");
 console.log(fails ? `${fails} FAILED` : 'all style checks passed');
 process.exit(fails ? 1 : 0);
