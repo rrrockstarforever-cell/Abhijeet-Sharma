@@ -1387,6 +1387,18 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // hedged or too obscure in the source itself, so it is retired instead of being rewritten again and again.
   const examinerFactFails = new Map<string, number>();
   const MAX_EXAMINER_FAILS_PER_FACT = 2;
+  // Any planned fact rejected three times (a toxin fact given a treatment lead-in, a trivia fact whose options come out
+  // alike) is retired too: its later rewrites almost never pass, and each one costs a writer call.
+  const factDrops = new Map<string, number>();
+  const MAX_DROPS_PER_FACT = 3;
+  const factRetired = (topic: unknown, dropKey?: string): boolean => {
+    const fact = (topic as { assigned?: AssignedFact }).assigned?.fact;
+    // Network, verify and over-target drops say nothing about the fact.
+    if (!fact || !dropKey || ['verify-error', 'over-target', 'unparsed'].includes(dropKey)) return false;
+    const drops = (factDrops.get(fact) ?? 0) + 1;
+    factDrops.set(fact, drops);
+    return drops >= MAX_DROPS_PER_FACT || (dropKey === 'examiner' && (examinerFactFails.get(fact) ?? 0) >= MAX_EXAMINER_FAILS_PER_FACT);
+  };
   // Correct answers kept so far in this set (checked so one answer is not asked twice).
   const acceptedAnswers: string[] = [];
   // The same answers as written, for telling a rewrite which answers are taken (the normalised keys are unreadable).
@@ -1830,6 +1842,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   };
   // Fact-first counters for this run: how many picks worked and how many were tried.
   const styleExplicit = stylesFromChips(questionTypes, explicitStyles).length > 0;
+  const leadInExplicit = leadInsFromChips(stemPatterns, explicitLeadIns).length > 0;
   let factHits = 0;
   let factTries = 0;
   // Consecutive provider errors (not rejected questions): when the provider is down, the run stops with a message.
@@ -1889,16 +1902,19 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // The source checker failed for network or provider reasons, not because of the question. The same draft is
         // checked again without using up a rewrite; the provider-error breaker above still ends a run whose provider is down.
         pending = { topic, idx, retries, hint, slot: slotOverride, repaired: ctx.draft as unknown as BatchQuestionSpec, verifyErrors: verifyErrors + 1 };
-      } else if (ctx.dropKey === 'examiner' && (examinerFactFails.get((topic as { assigned?: AssignedFact }).assigned?.fact ?? '') ?? 0) >= MAX_EXAMINER_FAILS_PER_FACT) {
-        // The examiner rejected this planned fact twice: the slot is given up (the drop is already counted), and the
-        // lane moves on to the next fact.
+      } else if (factRetired(topic, ctx.dropKey)) {
+        // The planned fact keeps failing (the examiner rejected it twice, or any check rejected it three times): the
+        // slot is given up (the drop is already counted), and the lane moves on to the next fact.
       } else if (retries < MAX_TOPIC_RETRIES && !stopped && !signal?.aborted) {
         // The call failed or the question was dropped: the same topic goes back in the queue, so it is written again.
         // The last rewrite of a demanding style (match, statements, calculation, picture) falls back to a plain style, so the slot is not lost.
         const plain: StyleId[] = ['one-liner', 'short-case', 'vignette'];
         const fallbackStyle: StyleId = exam === 'AMC_CAT' ? 'vignette' : exam === 'NEET_PG' ? 'one-liner' : 'short-case';
         // A style the learner picked is never swapped for another: a calculation item that cannot be written is left out.
-        const nextSlot = slot && !styleExplicit && retries + 1 >= MAX_TOPIC_RETRIES && !plain.includes(slot.style) ? { ...slot, style: fallbackStyle } : slotOverride;
+        const styleFallback = slot && !styleExplicit && retries + 1 >= MAX_TOPIC_RETRIES && !plain.includes(slot.style) ? { ...slot, style: fallbackStyle } : slotOverride;
+        // A planned lead-in the fact does not fit ("treatment of choice" for a toxin fact) is dropped on the rewrite, unless
+        // the learner chose that lead-in.
+        const nextSlot = ctx.dropKey === 'style-wrong-lead-in' && slot?.leadIn && !leadInExplicit ? { ...(styleFallback ?? slot), leadIn: undefined } : styleFallback;
         // A rejected question goes to the front of the queue: the next free lane regenerates it before any fresh question.
         // The repair starts at the moment the defect is found, in this lane: it is not put behind the queue.
         // Up to two repairs per topic: a second repair, told the new problem, still keeps the fact and is cheaper than a rewrite.
