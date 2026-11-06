@@ -1401,7 +1401,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     ? await fetchPyqWeights([...new Set(factPlan.map((f) => f.subtopic))], exam)
     : {};
   const plannedFacts = requestedTopic && factPlan?.length
-    ? mixByOrigin(weightedOrder(factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`)), pyqWeightsForPlan))
+    ? weightedOrder(factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`)), pyqWeightsForPlan)
     : [];
   // Every planned fact gets a slot: its style (vignette, one-liner, NOT, match, statements, ...), lead-in and difficulty,
   // from the styles the learner picked or, when none, the exam's own mix.
