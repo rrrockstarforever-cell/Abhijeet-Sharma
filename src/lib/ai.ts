@@ -1530,7 +1530,13 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // The same age and sex as a patient already in the set makes the items look alike, so the item is dropped.
         const patientOf = (s: string) => (s.match(/\b\d{1,3}[- ](?:year|month)s?[- ]old\s+(?:man|woman|boy|girl|infant|child|male|female)\b/i)?.[0] ?? '').toLowerCase();
         const myPatient = patientOf(q.stem ?? '');
-        const repeatedPatient = requestedTopic && myPatient !== '' && acceptedStems.some((s) => patientOf(s) === myPatient);
+        // Same age and sex is only a repeat when the cases also share the condition or setting: two different diseases in
+        // two 58-year-old men are different cases.
+        const GENERIC_CASE_WORDS = new Set(['presents', 'presented', 'patient', 'history', 'years', 'after', 'develops', 'developed', 'complains', 'examination', 'shows', 'culture', 'grows', 'infection', 'treatment', 'therapy', 'antibiotic', 'antibiotics', 'following', 'symptoms', 'fever', 'pained', 'chronic', 'acute', 'known', 'receives', 'received', 'admitted', 'brought', 'department', 'emergency', 'hospital', 'intensive', 'current', 'several', 'weeks', 'months', 'before', 'during', 'there', 'which', 'their', 'being', 'having', 'started', 'despite']);
+        const caseWords = (text: string): Set<string> => new Set(text.toLowerCase().replace(/[^a-z\s-]/g, ' ').split(/\s+/).filter((w) => w.length >= 6 && !GENERIC_CASE_WORDS.has(w)));
+        const myWords = caseWords(q.stem ?? '');
+        const sharesCondition = (other: string): boolean => { let n = 0; for (const w of caseWords(other)) if (myWords.has(w)) n += 1; return n >= 2; };
+        const repeatedPatient = requestedTopic && myPatient !== '' && acceptedStems.some((s) => patientOf(s) === myPatient && sharesCondition(s));
         // Patient stems are capped at half the set, so the set is not mostly vignettes. A stricter cap made most attempts fail.
         const isCase = requestedTopic && /\b\d{1,3}[- ](?:year|month)s?[- ]old\b/i.test(q.stem ?? '');
         const casesSoFar = acceptedStems.filter((s) => /\b\d{1,3}[- ](?:year|month)s?[- ]old\b/i.test(s)).length;
