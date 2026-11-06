@@ -596,14 +596,30 @@ async function fetchPyqWeights(subtopics: string[], exam: string): Promise<Recor
 }
 
 /** Drops that a small fix can repair: the draft is kept and only the named part is rewritten. */
-const REPAIRABLE_DROPS = new Set(['generic-lead-in', 'repeat-answer', 'style-one-liner-too-long', 'examiner']);
+// A drop that only needs wording fixed keeps its draft (and its fact) and is repaired, which passes far more often than
+// a fresh rewrite. 'repeat-answer' is not here: the repair keeps the same answer, so it could never pass that check.
+const REPAIRABLE_DROPS = new Set([
+  'generic-lead-in', 'style-one-liner-too-long', 'examiner',
+  'hint-stem-words', 'hint-absolute', 'hint-length', 'similar-options',
+  'stem-incomplete', 'stem-thin', 'stem-repeats-question', 'missing-statements', 'combination-list-missing',
+  'refers-to-missing-picture', 'treatment-drift',
+]);
+
+/** What the writer is told when a question was dropped by the hint check, so the rewrite does not repeat the clue. */
+const HINT_REASONS: Record<string, string> = {
+  'hint-stem-words': 'the correct option repeated the words of the stem, which gives the answer away; reword the key so it does not echo the stem',
+  'hint-absolute': 'only the correct option used an absolute word (always, never, only, all, none); remove it or use such words evenly',
+  'hint-length': 'the correct option was much longer than the others; make all options about the same length',
+};
 
 /** Repairs one drafted question for the problem a check named. Returns the fixed item, or null when the repair fails. */
 async function repairDraft(draft: ClinicalQuestion, problem: string, provider: AiProviderId): Promise<BatchQuestionSpec | null> {
   const answer = draft.options.find((o) => o.id === draft.correctOption)?.text ?? '';
   const line = (draft as { questionText?: string }).questionText ?? '';
+  // The shape keeps the draft's option count: a 4-option template made every AMC (5-option) repair fail as 'invalid'.
+  const optionShape = draft.options.map((o) => `{"id":"${o.id}","text":""}`).join(',');
   const raw = await aiComplete({
-    system: 'You repair one exam MCQ. Fix ONLY the problem named. Keep the same fact and the same correct answer. Reply with ONLY JSON: {"stem":"","questionText":"","options":[{"id":"A","text":""},{"id":"B","text":""},{"id":"C","text":""},{"id":"D","text":""}],"correctOption":"A","explanation":""}.',
+    system: `You repair one exam MCQ. Fix ONLY the problem named. Keep the same fact, the same correct answer and exactly ${draft.options.length} options. Reply with ONLY JSON: {"stem":"","questionText":"","options":[${optionShape}],"correctOption":"A","explanation":""}.`,
     messages: [{ role: 'user', content: ['Problem to fix: ' + problem, '', 'Stem: ' + draft.stem, 'Question line: ' + line, draft.options.map((o) => `${o.id}) ${o.text}`).join(String.fromCharCode(10)), 'Correct answer: ' + draft.correctOption + ') ' + answer, 'Explanation: ' + (draft.explanation ?? '')].join(String.fromCharCode(10)) }],
     json: true,
     effort: 'low',
@@ -995,6 +1011,10 @@ const GENERATION_RULES =
 
 // A topic whose question failed or was dropped is written again this many times before it is given up.
 const MAX_TOPIC_RETRIES = 6;
+// How often one draft is re-sent to the source checker after the checker itself failed (network, provider error).
+const MAX_VERIFY_ERRORS = 2;
+// Rewrites of one topic that may repair the previous draft instead of writing a new question.
+const MAX_REPAIRS = 2;
 
 // Copies of the same question request sent at once. The first copy that passes every check is kept.
 const QUESTION_COPIES = 2;
@@ -1345,6 +1365,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const acceptedPlannedFacts = new Set<string>();
   // Correct answers kept so far in this set (checked so one answer is not asked twice).
   const acceptedAnswers: string[] = [];
+  // The same answers as written, for telling a rewrite which answers are taken (the normalised keys are unreadable).
+  const acceptedAnswerTexts: string[] = [];
+  // The most recent entries of a list, short, for a rewrite prompt: enough to steer away, without a long prompt.
+  const usedList = (items: string[]) => items.slice(-12).map((t) => `"${t.slice(0, 70)}"`).join('; ') || 'none';
   const stemKey = (stem: string) =>
     stem.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 140);
   // Topic units already written: "subtopic|focus". Planning in a later round skips them.
@@ -1516,11 +1540,11 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           signal,
         });
         const parsed = extractJson<BatchQuestionSpec>(raw);
-        if (!parsed) { dropQ(ctx, 'unparsed'); return null; }
-        if (String(parsed.sourceCheck ?? '').trim().toLowerCase() === 'not supported') { dropQ(ctx, 'unsupported'); return null; }
+        if (!parsed) { if (ctx) ctx.reason = 'the reply was not one valid JSON object in the shape given; return only that object'; dropQ(ctx, 'unparsed'); return null; }
+        if (String(parsed.sourceCheck ?? '').trim().toLowerCase() === 'not supported') { if (ctx) ctx.reason = 'your own source check found the key not supported by the sources; test a fact the sources state plainly'; dropQ(ctx, 'unsupported'); return null; }
 
         const q = buildQuestion(parsed, exam, [{ subject: topic.subject, subtopic: topic.subtopic }], topic.difficultyTier, difficultySubLevel, pattern.opts);
-        if (!q) { dropQ(ctx, 'invalid'); return null; }
+        if (!q) { if (ctx) ctx.reason = `the item had the wrong shape: give exactly ${pattern.opts} non-empty options with ids ${'ABCDE'.slice(0, pattern.opts).split('').join(', ')}, and a correctOption that is one of them`; dropQ(ctx, 'invalid'); return null; }
         if (ctx) ctx.draft = q;
         // For a typed topic a stem under six words is usually just a label, not context for the question.
         const thinStem = requestedTopic && (q.stem ?? '').trim().split(/\s+/).filter(Boolean).length < 6;
@@ -1578,7 +1602,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const styleIssue = styleProblem(q, slot, pattern.opts, true);
         if (styleIssue) { if (ctx) ctx.reason = styleIssue; dropQ(ctx, `style-${styleIssue.split(':')[0]}`); return null; }
         const hint = hintReason(q);
-        if (hint) { dropQ(ctx, `${hint}`); return null; }
+        if (hint) { if (ctx) ctx.reason = HINT_REASONS[hint] ?? hint; dropQ(ctx, `${hint}`); return null; }
 
         // The first copy to pass the structure checks claims the question. The claim is then checked against the
         // sources once, so the checker runs once per question, not once per copy. A rejected claim releases the question.
@@ -1587,15 +1611,15 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // Dedup against already-accepted questions: exact stems, then near-identical scenarios
         // (same patient and regimen with the words reshuffled).
         const key = stemKey(q.stem);
-        if (seenStems.has(key)) { dropQ(ctx, 'repeat-stem'); return null; }
+        if (seenStems.has(key)) { claimed = false; if (ctx) ctx.reason = 'this exact stem is already in the set; write a different case or context'; dropQ(ctx, 'repeat-stem'); return null; }
         const fullStem = toBenchItem(q).stem;
-        if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) { dropQ(ctx, 'similar-stem'); return null; }
+        if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) { claimed = false; if (ctx) ctx.reason = 'the scenario is nearly the same as one already in the set; use a different patient, setting and wording'; dropQ(ctx, 'similar-stem'); return null; }
         // The same key fact asked in other words (same drug, same finding) is a repeat, even when the stem differs.
         // Without a written key fact, the correct option's text stands in, so repeats are still caught.
         // A planned slot keeps its planned fact as the key fact. The planner already kept those facts distinct.
         const keyFact = sourced ? sourced.fact : ((q.keyFact || '').trim() || (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim());
         if (assigned && acceptedPlannedFacts.has(assigned.fact)) { dropQ(ctx, 'repeat-planned-fact'); return null; }
-        if (!sourced && keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { dropQ(ctx, 'repeat-fact'); return null; }
+        if (!sourced && keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { claimed = false; if (ctx) ctx.reason = `the set already tests this fact. Test a different fact of the topic. Facts already used: ${usedList(acceptedKeyFacts)}`; dropQ(ctx, 'repeat-fact'); return null; }
         // The same correct answer asked again in other words (for example the same imaging test) is also a repeat.
         // Abbreviations and generic words are normalised first, so "CT" and "computed tomography", or "serum lipase level"
         // and "lipase assay", count as the same answer.
@@ -1605,12 +1629,20 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           .replace(/\s+/g, ' ').trim();
         const correctText = (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim();
         const correctKey = answerKey(correctText);
-        if (correctKey && requestedTopic && !codedOptions && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { dropQ(ctx, 'repeat-answer'); return null; }
+        if (correctKey && requestedTopic && !codedOptions && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { claimed = false; if (ctx) ctx.reason = `the correct answer "${correctText.slice(0, 80)}" is already the answer of another question in the set; pick a fact with a different answer. Answers already used: ${usedList(acceptedAnswerTexts)}`; dropQ(ctx, 'repeat-answer'); return null; }
         const verdict = await verifyItem(q, { query: groundQuery, subject: topic.subject }, signal);
         if (verdict !== 'supported') {
           claimed = false;
-          if (verdict === 'error') providerErrorStreak += 1;
-          logStage(verdict === 'error' ? 'drop:verify-error' : 'drop:unverified', 0);
+          if (verdict === 'error') {
+            // The checker could not be reached: the question was not judged, so it is checked again later
+            // (the worker re-sends this draft) instead of being thrown away and costing one of the topic's rewrites.
+            providerErrorStreak += 1;
+            logStage('drop:verify-error', 0);
+            if (ctx) ctx.dropKey = 'verify-error';
+            return null;
+          }
+          if (ctx) ctx.reason = 'the independent source check could not confirm the marked answer; test a fact the sources state plainly and make the key match it exactly';
+          dropQ(ctx, 'unverified');
           return null;
         }
         copies.forEach((c) => { if (c !== own) c.abort(); });
@@ -1658,7 +1690,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         }
         if (attachedHere) attachedImages += 1;
 
-        if (correctKey) acceptedAnswers.push(correctKey);
+        if (correctKey) { acceptedAnswers.push(correctKey); acceptedAnswerTexts.push(correctText); }
         seenStems.add(key);
         acceptedStems.push(fullStem);
         if (keyFact) acceptedKeyFacts.push(keyFact);
@@ -1719,7 +1751,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   });
   // A pool of workers takes planned topics from a queue. When the queue runs low, more topics are planned right
   // away, so a question starts as soon as a lane is free, while others are still in progress.
-  type QueueItem = { topic: PlannedTopic; idx: number; retries: number; hint?: string; slot?: Slot; repaired?: BatchQuestionSpec };
+  type QueueItem = { topic: PlannedTopic; idx: number; retries: number; hint?: string; slot?: Slot; repaired?: BatchQuestionSpec; verifyErrors?: number };
   const queue: QueueItem[] = topics.map((topic, idx) => ({ topic, idx, retries: 0 }));
   let slotCounter = topics.length;
   let refilling: Promise<boolean> | null = null;
@@ -1769,7 +1801,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       if (!pending && questions.length + questionsInProgress >= count) { await new Promise((r) => setTimeout(r, 300)); continue; }
       const next: QueueItem = pending ?? queue.shift()!;
       pending = null;
-      const { topic, idx, retries, hint, slot: slotOverride, repaired } = next;
+      const { topic, idx, retries, hint, slot: slotOverride, repaired, verifyErrors = 0 } = next;
       const slot = slotOverride ?? topic.slot;
       const parts = focusParts(topic.subtopic);
       // A planned topic carries its own focus (one drug class, one part of a subtopic); otherwise rotate the parts.
@@ -1798,6 +1830,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         reportQuestion('accepted');
         if (repaired) reportRepair('accepted');
         if (questions.length >= count) markTargetReached();
+      } else if (ctx.dropKey === 'verify-error' && ctx.draft && verifyErrors < MAX_VERIFY_ERRORS && !stopped && !signal?.aborted) {
+        // The source checker failed for network or provider reasons, not because of the question. The same draft is
+        // checked again without using up a rewrite; the provider-error breaker above still ends a run whose provider is down.
+        pending = { topic, idx, retries, hint, slot: slotOverride, repaired: ctx.draft as unknown as BatchQuestionSpec, verifyErrors: verifyErrors + 1 };
       } else if (retries < MAX_TOPIC_RETRIES && !stopped && !signal?.aborted) {
         // The call failed or the question was dropped: the same topic goes back in the queue, so it is written again.
         // The last rewrite of a demanding style (match, statements, calculation, picture) falls back to a plain style, so the slot is not lost.
@@ -1807,10 +1843,12 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const nextSlot = slot && !styleExplicit && retries + 1 >= MAX_TOPIC_RETRIES && !plain.includes(slot.style) ? { ...slot, style: fallbackStyle } : slotOverride;
         // A rejected question goes to the front of the queue: the next free lane regenerates it before any fresh question.
         // The repair starts at the moment the defect is found, in this lane: it is not put behind the queue.
-        const fixed = retries === 0 && ctx.draft && ctx.dropKey && REPAIRABLE_DROPS.has(ctx.dropKey)
-          ? await repairDraft(ctx.draft, ctx.reason ?? ctx.dropKey, getActiveProvider() ?? 'nvidia').catch(() => null)
+        // Up to two repairs per topic: a second repair, told the new problem, still keeps the fact and is cheaper than a rewrite.
+        const canRepair = retries < MAX_REPAIRS && Boolean(ctx.draft) && Boolean(ctx.dropKey) && REPAIRABLE_DROPS.has(ctx.dropKey!);
+        const fixed = canRepair
+          ? await repairDraft(ctx.draft!, ctx.reason ?? ctx.dropKey!, getActiveProvider() ?? 'nvidia').catch(() => null)
           : null;
-        if (fixed === null && retries === 0 && ctx.draft && ctx.dropKey && REPAIRABLE_DROPS.has(ctx.dropKey)) reportRepair('failed');
+        if (fixed === null && canRepair) reportRepair('failed');
         else if (fixed) reportRepair('attempted');
         pending = { topic, idx, retries: retries + 1, hint: ctx.reason, slot: nextSlot, repaired: fixed ?? undefined };
       }
