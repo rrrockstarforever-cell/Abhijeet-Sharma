@@ -1569,15 +1569,6 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // sources once, so the checker runs once per question, not once per copy. A rejected claim releases the question.
         if (claimed) { dropQ(ctx, 'late-copy'); return null; }
         claimed = true;
-        const verdict = await verifyItem(q, { query: groundQuery, subject: topic.subject }, signal);
-        if (verdict !== 'supported') {
-          claimed = false;
-          if (verdict === 'error') providerErrorStreak += 1;
-          logStage(verdict === 'error' ? 'drop:verify-error' : 'drop:unverified', 0);
-          return null;
-        }
-        copies.forEach((c) => { if (c !== own) c.abort(); });
-
         // Dedup against already-accepted questions: exact stems, then near-identical scenarios
         // (same patient and regimen with the words reshuffled).
         const key = stemKey(q.stem);
@@ -1599,6 +1590,15 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const correctText = (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim();
         const correctKey = answerKey(correctText);
         if (correctKey && requestedTopic && !codedOptions && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { dropQ(ctx, 'repeat-answer'); return null; }
+        const verdict = await verifyItem(q, { query: groundQuery, subject: topic.subject }, signal);
+        if (verdict !== 'supported') {
+          claimed = false;
+          if (verdict === 'error') providerErrorStreak += 1;
+          logStage(verdict === 'error' ? 'drop:verify-error' : 'drop:unverified', 0);
+          return null;
+        }
+        copies.forEach((c) => { if (c !== own) c.abort(); });
+
         // A last look by a second reader: a wrong key, two defensible answers, or a fact that only one study, place or
         // textbook layout makes true. Such a question is dropped and another is written in its place.
         if (requestedTopic && await examinerRejects(q, requestedTopic, signal)) { if (ctx) ctx.reason = 'the examiner found the key wrong, two options defensible, or the fact too narrow'; dropQ(ctx, 'examiner'); return null; }
@@ -1749,6 +1749,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       if (questionsInProgress >= GENERATION_CONCURRENCY) { await new Promise((r) => setTimeout(r, 300)); continue; }
       // A rewrite goes back into the queue only after its own attempt has finished, so one question is never written twice
       // at once; rewrites of different questions run in parallel with the other lanes.
+      if (!pending && questions.length + questionsInProgress >= count) { await new Promise((r) => setTimeout(r, 300)); continue; }
       const next: QueueItem = pending ?? queue.shift()!;
       pending = null;
       const { topic, idx, retries, hint, slot: slotOverride, repaired } = next;
