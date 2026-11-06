@@ -428,6 +428,9 @@ export async function planTopicFacts(
       if (/case report|case series|a case of|successful management|fatal|pediatric|paediatric|in children/i.test(src.title)) { skip('case-report'); continue; }
       // Research-paper detail (statistics, gene or protein expression, open questions) is not a high-yield exam fact.
       if (/\b(AUC|expression|interleukin|odds ratio|hazard ratio|cohort|95% ?CI|biomarker|incompletely characteri[sz]ed|not well characteri[sz]ed|further studies|remain unclear|protocol|this study|the study|trial|muscle density|sample size|banked|enrol(l)?ed|follow-up|mendelian|randomi[sz]ation|subjects|participants|were reported|studied|analysis|meta-analysis|observational|compared with|compared to|committee|hospitali[sz]ation|significantly (more|less|higher|lower)|no association|reporting rate|MedDRA|incidence of \d|uncertain|unclear|(has|have) been evaluated|raising the question|awareness|whether|potentially|were more commonly|retrospective|umbrella|meta-analyses|no significant|between groups|few and mostly)\b|\d+\.\d+ ?%/i.test(fact)) continue;
+      // Hedged or rarity statements ("is described as encouraging", "may be septate or nonseptate", "is very rare") have no
+      // clear exam answer, and the examiner rejects every question built on them.
+      if (/\b(described as|has been described|have been described|encouraging|promising|investigational|experimental|has been reported|have been reported|may be (?:either )?\w+ or (?:non|un)\w+|(?:is|are) very rare|anecdotal)\b/i.test(fact)) { skip('hedged'); continue; }
       // The same fact planned under two subtopics is one fact: compare with abbreviations and generic words normalised.
       if (usedFacts.some((u) => stemSimilarity(factKey(u), factKey(fact)) >= 0.5)) { skip('duplicate'); continue; }
       planned.push({ subtopic: subtopics[i], fact, quote, source: src.title, origin: kindOf(src) === 'book' ? 'book' : 'web' });
@@ -522,9 +525,10 @@ async function tagPicturable(plan: AssignedFact[], provider: AiProviderId): Prom
   return plan.map((f, i) => ({ ...f, picturable: picks.has(i) }));
 }
 
-async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: AbortSignal): Promise<boolean> {
+/** Null when the examiner accepts the item, otherwise its one-sentence reason for rejecting it. */
+async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: AbortSignal): Promise<string | null> {
   const provider = getActiveProvider();
-  if (!provider) return false;
+  if (!provider) return null;
   const raw = await aiComplete({
     system:
       'You are an examiner checking one MCQ before it is used. Mark ok=false only when you are sure of a problem: ' +
@@ -543,7 +547,9 @@ async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: Abor
     signal,
   }).catch(() => '');
   // A failed check never blocks a question: only a clear "ok": false drops it.
-  return extractJson<{ ok?: boolean }>(raw)?.ok === false;
+  const verdict = extractJson<{ ok?: boolean; problem?: string }>(raw);
+  if (verdict?.ok !== false) return null;
+  return String(verdict.problem ?? '').trim().slice(0, 240) || 'the examiner found a problem with the key or the options';
 }
 
 /**
@@ -687,7 +693,8 @@ function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: strin
   const d = ctx?.draft;
   // The planned fact the attempt was written for, so each rejected question can be traced to its fact.
   const fact = ctx?.fact;
-  reportQuestion('dropped', reason, d ? { planned: ctx?.planned ?? null, fact, stem: d.stem, questionText: (d as { questionText?: string }).questionText, options: d.options, correctOption: d.correctOption, explanation: d.explanation, subtopic: (d as { subtopic?: string }).subtopic } : (fact ? { fact } : undefined));
+  // `why` is the reason the rewrite is told (for the examiner, its own sentence), so a drop can be checked later.
+  reportQuestion('dropped', reason, d ? { why: ctx?.reason ?? null, planned: ctx?.planned ?? null, fact, stem: d.stem, questionText: (d as { questionText?: string }).questionText, options: d.options, correctOption: d.correctOption, explanation: d.explanation, subtopic: (d as { subtopic?: string }).subtopic } : (fact ? { fact } : undefined));
 }
 
 /** Counts a repair on the progress page: attempted (sent), accepted (kept after its checks) or failed (no repair returned). */
@@ -1376,6 +1383,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const acceptedKeyFacts: string[] = [];
   // Planned facts already accepted: a planned fact is tested once in a set.
   const acceptedPlannedFacts = new Set<string>();
+  // How often the examiner has rejected a question built on each planned fact. A fact rejected twice is usually wrong,
+  // hedged or too obscure in the source itself, so it is retired instead of being rewritten again and again.
+  const examinerFactFails = new Map<string, number>();
+  const MAX_EXAMINER_FAILS_PER_FACT = 2;
   // Correct answers kept so far in this set (checked so one answer is not asked twice).
   const acceptedAnswers: string[] = [];
   // The same answers as written, for telling a rewrite which answers are taken (the normalised keys are unreadable).
@@ -1685,7 +1696,14 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
 
         // A last look by a second reader: a wrong key, two defensible answers, or a fact that only one study, place or
         // textbook layout makes true. Such a question is dropped and another is written in its place.
-        if (requestedTopic && await examinerRejects(q, requestedTopic, signal)) { if (ctx) ctx.reason = 'the examiner found the key wrong, two options defensible, or the fact too narrow'; dropQ(ctx, 'examiner'); return null; }
+        const examinerProblem = requestedTopic ? await examinerRejects(q, requestedTopic, signal) : null;
+        if (examinerProblem) {
+          // The examiner's own words go to the rewrite and to the drop file, so a rewrite fixes that problem.
+          if (ctx) ctx.reason = `the examiner rejected it: ${examinerProblem}`;
+          if (assigned) examinerFactFails.set(assigned.fact, (examinerFactFails.get(assigned.fact) ?? 0) + 1);
+          dropQ(ctx, 'examiner');
+          return null;
+        }
         // The explanation must say why the key is right and why the others are wrong; if it does not, it is rewritten.
         if (requestedTopic && ((slot?.style !== 'calculation' && !explainsDistractors(q)) || explanationLeaks(q))) await repairExplanation(q, signal);
         // The correct letters rotate through A-D over the accepted questions, so no letter dominates the set.
@@ -1871,6 +1889,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // The source checker failed for network or provider reasons, not because of the question. The same draft is
         // checked again without using up a rewrite; the provider-error breaker above still ends a run whose provider is down.
         pending = { topic, idx, retries, hint, slot: slotOverride, repaired: ctx.draft as unknown as BatchQuestionSpec, verifyErrors: verifyErrors + 1 };
+      } else if (ctx.dropKey === 'examiner' && (examinerFactFails.get((topic as { assigned?: AssignedFact }).assigned?.fact ?? '') ?? 0) >= MAX_EXAMINER_FAILS_PER_FACT) {
+        // The examiner rejected this planned fact twice: the slot is given up (the drop is already counted), and the
+        // lane moves on to the next fact.
       } else if (retries < MAX_TOPIC_RETRIES && !stopped && !signal?.aborted) {
         // The call failed or the question was dropped: the same topic goes back in the queue, so it is written again.
         // The last rewrite of a demanding style (match, statements, calculation, picture) falls back to a plain style, so the slot is not lost.
