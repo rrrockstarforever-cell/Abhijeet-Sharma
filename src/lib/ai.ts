@@ -444,6 +444,11 @@ export async function planTopicFacts(
  * One pass over the whole plan: a fact that makes the same point as an earlier fact (in different words) is removed.
  * Word matching cannot see that two sentences say the same thing, so the model decides.
  */
+/** The model for simple steps (subject, picture planning, explanation repair, duplicate check): Haiku on Claude, the active model otherwise. */
+function cheapModel(provider: AiProviderId): string {
+  return provider === 'claude' ? 'claude-haiku-5-5' : getEffectiveModel(provider);
+}
+
 async function dedupePlan(plan: AssignedFact[], provider: AiProviderId): Promise<AssignedFact[]> {
   if (plan.length < 2) return plan;
   const list = plan.map((f, i) => `${i + 1}. ${f.fact}`).join('\n');
@@ -454,7 +459,7 @@ async function dedupePlan(plan: AssignedFact[], provider: AiProviderId): Promise
     json: true,
     effort: 'low',
     provider,
-    model: getEffectiveModel(provider),
+    model: cheapModel(provider),
   }).catch(() => '');
   const drop = new Set((extractJson<{ duplicates?: number[] }>(raw)?.duplicates ?? []).map((n) => Number(n) - 1));
   return plan.filter((_, i) => !drop.has(i));
@@ -476,7 +481,7 @@ async function guessSubject(topic: string): Promise<string | undefined> {
     if (provider) {
       const raw = await aiComplete({
         system: 'Name the MBBS subject of an exam topic. Choose exactly one of: Anatomy, Physiology, Biochemistry, Pathology, Pharmacology, Microbiology, Forensic, PSM, Medicine, Surgery, OBG, Paediatrics, Orthopedics, ENT, Ophthalmology, Dermatology, Psychiatry, Radiology, Anaesthesia. Reply with ONLY JSON: {"subject":"..."}.',
-        messages: [{ role: 'user', content: topic }], json: true, effort: 'low', provider, model: getEffectiveModel(provider),
+        messages: [{ role: 'user', content: topic }], json: true, effort: 'low', provider, model: cheapModel(provider),
       }).catch(() => '');
       subject = String(extractJson<{ subject?: string }>(raw)?.subject ?? '').trim() || undefined;
     }
@@ -495,7 +500,7 @@ async function repairExplanation(q: ClinicalQuestion, signal?: AbortSignal): Pro
     json: true,
     effort: 'low',
     provider,
-    model: getEffectiveModel(provider),
+    model: cheapModel(provider),
     signal,
   }).catch(() => '');
   const better = String(extractJson<{ explanation?: string }>(raw)?.explanation ?? '').trim();
@@ -623,7 +628,7 @@ async function planFigure(q: ClinicalQuestion, topic: string, signal?: AbortSign
     json: true,
     effort: 'low',
     provider,
-    model: getEffectiveModel(provider),
+    model: cheapModel(provider),
     signal,
   }).catch(() => '');
   const pick = extractJson<{ modality?: string; query?: string }>(raw);
