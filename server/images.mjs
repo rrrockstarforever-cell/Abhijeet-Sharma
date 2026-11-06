@@ -133,10 +133,34 @@ async function wikiFetch(url, init = {}) {
 }
 
 /** Search Open-i for reusable figures. Returns [] on no match; throws only on network errors. */
+const MODALITY_WORDS = {
+  ecg: ['ecg', 'ekg', 'electrocardiogram', 'electrocardiograph'],
+  'x-ray': ['x-ray', 'xray', 'radiograph'],
+  xray: ['x-ray', 'xray', 'radiograph'],
+  histology: ['histolog', 'biopsy', 'micrograph', 'histopatholog'],
+  fundus: ['fundus', 'fundal', 'retina'],
+};
+const FILLER_WORDS = new Set(['photo', 'photograph', 'clinical', 'image', 'picture', 'showing', 'with', 'from', 'patient', 'typical', 'findings', 'finding', 'changes', 'change', 'disease', 'lesion', 'lesions']);
+
+/** Share (0 to 1) of the query's content words found in a picture's own title and caption. */
+export function relevanceOf(item, query) {
+  const hay = `${item?.title ?? ''} ${item?.caption ?? ''}`.toLowerCase();
+  const words = String(query || '').toLowerCase().split(/[^a-z0-9-]+/)
+    .filter((w) => (w.length > 3 || ['ecg', 'ekg', 'ct', 'mri'].includes(w)) && !FILLER_WORDS.has(w));
+  if (!words.length) return 1;
+  let hits = 0;
+  for (const w of words) {
+    const forms = MODALITY_WORDS[w] ?? [w.length > 5 ? w.slice(0, w.length - 2) : w];
+    if (forms.some((f) => (f.length <= 3 ? new RegExp(`\\b${f}\\b`).test(hay) : hay.includes(f)))) hits += 1;
+  }
+  return hits / words.length;
+}
+
 export async function searchImages(query, { limit = 10, noExtra = false } = {}) {
   const q = String(query || '').replace(/\s+/g, ' ').trim();
   if (!q) return { results: [], errors: [] };
-  const cacheKey = `${q.toLowerCase()}::${limit}`;
+  // "r2": results ranked by title relevance; searches cached before that are not reused.
+  const cacheKey = `r3::${q.toLowerCase()}::${limit}`;
   const hit = searchCache.get(cacheKey);
   if (hit && Date.now() - hit.at < (hit.results.length ? SEARCH_TTL_MS : EMPTY_TTL_MS)) {
     return { results: hit.results, errors: [], cached: true };
@@ -172,22 +196,42 @@ export async function searchImages(query, { limit = 10, noExtra = false } = {}) 
   // three pictures: the Commons text search. Fewer requests also means fewer HTTP 429 answers from Wikimedia.
   const within = (p, ms) => Promise.race([p, new Promise((resolve) => setTimeout(resolve, ms))]);
   await within(Promise.all([articleP, categoryP]), 6000);
-  if (category.length + article.length < 3) {
-    // The full phrase must match every word in a Commons title or description; if it finds nothing, the diagnosis alone is tried.
-    const commonsP = searchCommons(q, { limit: Math.ceil(limit / 2) })
-      .then(async (rows) => (rows.length || core === q ? rows : searchCommons(core, { limit: Math.ceil(limit / 2) })))
+  // An article or category often holds pictures of other things (the tuberculosis article has a Mantoux test photo,
+  // not a sputum smear). Only pictures whose own title or caption carries most of the query words count here, which
+  // is close to the check the app applies before attaching a picture.
+  const relevantStage1 = [...category, ...article].filter((item) => relevanceOf(item, q) >= 0.6).length;
+  if (relevantStage1 < 3) {
+    // The Commons search needs every word in a title or description, so one extra word ("microscopy") can empty it.
+    // Shorter phrasings are tried in turn: the full phrase, the diagnosis words, then without describing words, then
+    // the first three content words.
+    const describing = /^(microscopy|microscopic|findings?|appearance|features?|showing|typical|changes?|picture|image|photo|photograph|clinical|lesions?|of|in|the|and|with|a|an)$/i;
+    const plain = q.split(/\s+/).filter((w) => !describing.test(w));
+    const phrasings = [...new Set([q, core, plain.join(' '), plain.slice(0, 3).join(' '), plain.slice(0, 2).join(' ')].filter((p) => p && p.split(/\s+/).length >= 1))];
+    const commonsP = (async () => {
+      for (const p of phrasings) {
+        const rows = await searchCommons(p, { limit: Math.ceil(limit / 2) });
+        if (rows.length) return rows;
+      }
+      return [];
+    })()
       .then((rows) => { commons = rows; return rows; })
       .catch((err) => { errors.push(`Wikimedia Commons: ${err?.message || err}`); return []; });
-    await within(commonsP, 6000);
+    await within(commonsP, 9000);
   }
   // Open-i has been running the whole time; it only gets a short extra wait.
   await within(openiP, 1500);
   const seen = new Set();
   const merged = [];
   // The condition's own category and article first, then Commons search, then journal figures (often multi-panel).
+  // Pictures that match the query words come first; within the same match level the source order above is kept.
+  const pool = [];
   for (const item of [...category, ...article, ...commons, ...openi]) {
     if (seen.has(item.imageUrl)) continue;
     seen.add(item.imageUrl);
+    pool.push({ item, score: relevanceOf(item, q), at: pool.length });
+  }
+  pool.sort((a, b) => (Math.round(b.score * 10) - Math.round(a.score * 10)) || a.at - b.at);
+  for (const { item } of pool) {
     merged.push(item);
     if (merged.length >= limit) break;
   }

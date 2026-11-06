@@ -1359,6 +1359,19 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   let failure: string | null = null;
   const seenStems = new Set<string>();
   const acceptedStems: string[] = [];
+  // Correct-letter counts, raised when a letter is placed (not when the question is accepted), so questions finishing
+  // at the same time get different letters. The least-used letter wins; ties go round A, B, C, D.
+  const placedLetters: Record<string, number> = { A: 0, B: 0, C: 0, D: 0 };
+  let placementTurn = 0;
+  const nextLetter = (): string => {
+    const min = Math.min(...Object.values(placedLetters));
+    const order = ['A', 'B', 'C', 'D'];
+    for (let i = 0; i < 4; i += 1) {
+      const letter = order[(placementTurn + i) % 4];
+      if (placedLetters[letter] === min) { placementTurn += 1; placedLetters[letter] += 1; return letter; }
+    }
+    return 'A';
+  };
   // Key facts of accepted questions: the same fact asked in other words is still a repeat.
   const acceptedKeyFacts: string[] = [];
   // Planned facts already accepted: a planned fact is tested once in a set.
@@ -1654,7 +1667,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (requestedTopic && ((slot?.style !== 'calculation' && !explainsDistractors(q)) || explanationLeaks(q))) await repairExplanation(q, signal);
         // The correct letters rotate through A-D over the accepted questions, so no letter dominates the set.
         // Coded options (combinations, numbers, assertion-reason) keep their order.
-        if (requestedTopic && !codedOptions) placeCorrectAt(q, 'ABCD'[(acceptedStems.length + Math.floor(acceptedStems.length / 4)) % 4]);
+        if (requestedTopic && !codedOptions) placeCorrectAt(q, nextLetter());
 
         // Pictures. An image-style slot always asks for one; other slots only when the fact has a typical picture, for at
         // most about one question in four. Without a slot (a plain subject run) the earlier rule applies.
