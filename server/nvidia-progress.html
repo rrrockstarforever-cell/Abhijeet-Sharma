@@ -52,6 +52,14 @@ h1 { font-size: 22px; font-weight: 500; margin: 0 0 4px; }
     <div class="card"><div class="label">Server errors</div><div class="num warn" id="a-err">0</div></div>
     <div class="card"><div class="label">Timeouts (60 s)</div><div class="num bad" id="a-to">0</div></div>
   </div>
+  <div class="grid">
+    <div class="card"><div class="label">Input tokens</div><div class="num" id="t-in">0</div></div>
+    <div class="card"><div class="label">Output tokens</div><div class="num" id="t-out">0</div></div>
+    <div class="card"><div class="label">Total tokens</div><div class="num" id="t-total">0</div></div>
+    <div class="card"><div class="label">Tokens per kept question</div><div class="num" id="t-each">0</div></div>
+  </div>
+  <div class="sec">Token breakdown</div>
+  <div id="tokens"></div>
   <div class="sec">By model</div>
   <div id="models"></div>
   <div class="sec">Latest events</div>
@@ -96,6 +104,14 @@ function render(d) {
   $('a-ref').textContent = n(d.attempts.refused);
   $('a-err').textContent = n(d.attempts.error);
   $('a-to').textContent = n(d.attempts.timeout);
+  const tokens = d.tokens || {};
+  $('t-in').textContent = n(tokens.input);
+  $('t-out').textContent = n(tokens.output);
+  $('t-total').textContent = n(tokens.total);
+  $('t-each').textContent = d.accepted ? n(Math.round(tokens.total / d.accepted)) : '0';
+  const stages = Object.entries(d.tokenStages || {}).sort((a, b) => b[1].total - a[1].total);
+  $('tokens').innerHTML = '<div class="row head"><span>Stage</span><span>Calls</span><span>Input</span><span>Output</span><span>Total</span></div>' +
+    stages.map(([name, s]) => '<div class="row"><span>' + esc(name) + '</span><span>' + n(s.calls) + '</span><span>' + n(s.input) + '</span><span>' + n(s.output) + '</span><span>' + n(s.total) + '</span></div>').join('') || '<div class="muted" style="font-size:14px">No token usage reported yet.</div>';
   const models = Object.entries(d.byModel);
   const total = models.reduce((s, [, m]) => s + m.ok + m.refused + m.error + m.timeout, 0) || 1;
   $('models').innerHTML = '<div class="row head"><span>Model</span><span>OK</span><span>Refused</span><span>Errors</span><span>Timeouts</span></div>' +

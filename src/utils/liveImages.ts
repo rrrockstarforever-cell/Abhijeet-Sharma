@@ -1,7 +1,7 @@
 import { debugLog } from './debugLog.ts';
 // Live clinical-image lookup for image-based questions.
-// The local server queries Open-i (NLM) and returns only reusable licences
-// (CC BY / CC BY-SA / CC0 / public domain), proxied through /api/images/proxy so the
+// The local server queries Open-i (NLM) and Wikimedia Commons and returns only
+// explicit CC0/Public Domain licences, proxied through /api/images/proxy so the
 // page never hotlinks NLM and the picture still works offline after the first fetch.
 
 export interface LiveImage {

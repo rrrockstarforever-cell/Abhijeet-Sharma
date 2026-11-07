@@ -53,6 +53,36 @@ export interface StyleSpec {
 const letters = (n: number) => 'ABCDE'.slice(0, n);
 const questionLine = (q: ClinicalQuestion) => String((q as { questionText?: string }).questionText ?? '');
 const optionTexts = (q: ClinicalQuestion) => (q.options || []).map((o) => String(o.text ?? ''));
+const OPTION_STOPWORDS = new Set(['a', 'an', 'and', 'as', 'at', 'be', 'by', 'for', 'from', 'in', 'is', 'of', 'on', 'or', 'the', 'this', 'that', 'to', 'was', 'were', 'with']);
+
+/** Keys used only to catch an option duplicated with changed punctuation or case. Keep short letters and numbers: they often carry the whole distinction. */
+export function optionDuplicateKey(text: string): string {
+  return String(text ?? '').toLowerCase()
+    .replace(/β/g, ' beta ')
+    .replace(/α/g, ' alpha ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter((word) => word && !OPTION_STOPWORDS.has(word))
+    .join(' ');
+}
+
+export function hasDuplicateOptions(q: ClinicalQuestion): boolean {
+  const keys = optionTexts(q).map(optionDuplicateKey);
+  return new Set(keys).size < keys.length;
+}
+
+/** Whether a default exam lead-in can be supported by the fact itself. Explicit learner choices are handled by planSlots. */
+export function leadInFitsFact(fact: string, leadIn: LeadIn): boolean {
+  const text = String(fact ?? '').toLowerCase();
+  if (leadIn === 'finding' || leadIn === 'diagnosis') return true;
+  const treatment = /\b(treat(?:ment|ed|ing)?|therapy|therapies|management|regimen|prophylaxis|dose|first[- ]line|drug of choice|treatment of choice|preferred|resistan(?:t|ce)|susceptib(?:le|ility))\b/i.test(text);
+  const investigation = /\b(test|stain|culture|biopsy|microscop(?:y|ic)|imaging|ecg|ekg|x[- ]?ray|radiograph|scan|mri|ct|ultrasound|diagnos(?:e|is|tic))\b/i.test(text);
+  if (leadIn === 'next-step' || leadIn === 'drug-of-choice' || leadIn === 'treatment-of-choice' || leadIn === 'advice') return treatment;
+  if (leadIn === 'investigation-of-choice') return investigation;
+  return true;
+}
+
 const relatedLine = (slot: Slot) => (slot.related.length ? ` Draw on these related facts (they are sourced and true): ${slot.related.slice(0, 6).map((f) => `"${f.slice(0, 140)}"`).join(' | ')}.` : '');
 
 export const STYLES: Record<StyleId, StyleSpec> = {
@@ -365,7 +395,11 @@ export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], 
   return slots.map((s, i) => {
     const slot = s as Slot;
     slot.tier = tiers[i];
-    if (slot.style === 'vignette' || slot.style === 'short-case') slot.leadIn = leadSeq[i];
+    if (slot.style === 'vignette' || slot.style === 'short-case') {
+      const plannedLeadIn = leadSeq[i];
+      // Preserve an explicit learner choice; the exam default must not ask a fact for treatment it does not state.
+      slot.leadIn = leadIns.length || leadInFitsFact(facts[i].fact, plannedLeadIn) ? plannedLeadIn : 'finding';
+    }
     if (STYLES[slot.style].needsRelated) {
       const same = (bySub.get(facts[i].subtopic) ?? []).filter((j) => j !== i).map((j) => facts[j].fact);
       const rest = facts.filter((_, j) => j !== i && !same.includes(facts[j].fact)).map((f) => f.fact);

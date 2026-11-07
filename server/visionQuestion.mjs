@@ -27,16 +27,18 @@ const SYSTEM = [
   'Always respond with ONLY a single valid JSON object (no markdown fences, no commentary).',
 ].join(' ');
 
-const INSTRUCTION_TEMPLATE = (o) => [
-  `You are shown a real clinical image (modality: ${o.modality || 'clinical image'}; subject: ${o.subject || 'medicine'}).`,
+export const buildImageQuestionInstruction = (o) => [
+  `You are shown a real clinical image (modality: ${o.modality || 'clinical image'}; subject: ${o.subject || 'medicine'}; trusted body-part metadata: ${o.bodyPart || 'unspecified'}).`,
   `The authoritative diagnosis/finding this image shows is: "${o.groundTruth}". You MUST keep this exact diagnosis — never change, soften or replace it.`,
-  `Exam: ${o.examLabel}. Write ONE exam-standard MCQ whose correct answer can be reached ONLY by correctly interpreting THIS image.`,
+  `Exam: ${o.examLabel}. Write ONE image-only exam-standard MCQ whose correct answer can be reached ONLY by interpreting THIS image and its trusted metadata. No patient chart or case history is supplied.`,
   'Rules:',
-  '- The stem must describe the relevant clinical context WITHOUT giving the answer away, and must NOT name the diagnosis directly.',
+  '- The stem may describe only findings visible in the image or explicitly listed in trusted image metadata. Do NOT invent patient age, sex, symptoms, history, timeline, physical examination findings, laboratory results, or mucosal status.',
+  '- Do NOT state a skin surface (palmar, dorsal, plantar), laterality (left, right, bilateral), scan plane (axial, sagittal, coronal), or contrast phase unless the trusted metadata above states it. Describe the finding instead ("the lesion", "the scan", "the image"). A detail you can only guess from the pixels must be left out; a wrong detail gets the question rejected.',
+  '- Do not name the diagnosis directly in the stem. Ask the learner to interpret the visual finding.',
   '- Exactly one option must be the correct diagnosis/finding; every other option must be a plausible close mimic of the SAME category (no obviously wrong fillers).',
-  '- The explanation MUST explicitly reference the visual features in THIS image that point to the answer (e.g. "the radiograph shows a dense right lower zone opacity with air bronchograms...").',
+  '- The explanation must reference features actually visible in THIS image. It may give general differential teaching, but must not claim absent or unshown features (for example mucosal sparing) as facts about this image.',
   `- Return exactly ${o.optionCount} options, keyed "A".."${'ABCDE'[o.optionCount - 1]}", with a single correct one.`,
-  '- If you cannot actually see the claimed finding in this image, DO NOT invent a question. Return exactly {"error":"image_mismatch"}.',
+  '- If the image does not clearly support the claimed finding or an image-only question cannot be written without inventing context, return exactly {"error":"image_mismatch"}.',
   'Return ONLY this JSON object:',
   `{"stem":"...","questionText":"...","options":{${Array.from({ length: o.optionCount }, (_, i) => `"${'ABCDE'[i]}":"..."`).join(',')}},"correctOption":"A","explanation":"...","boardPearl":"...","citations":["..."]}`,
 ].join('\n');
@@ -110,6 +112,7 @@ export async function generateQuestionFromImage(opts) {
     groundTruth,
     modality = '',
     subject = '',
+    bodyPart = '',
     exam = 'NEET_PG',
     difficultyTier = 'MEDIUM',
     optionCount = 4,
@@ -129,10 +132,11 @@ export async function generateQuestionFromImage(opts) {
   }
   const dataUrl = `data:${type};base64,${buffer.toString('base64')}`;
 
-  const instruction = INSTRUCTION_TEMPLATE({
+  const instruction = buildImageQuestionInstruction({
     groundTruth: String(groundTruth).slice(0, 300),
     modality: String(modality || '').slice(0, 40),
     subject: String(subject || '').slice(0, 60),
+    bodyPart: String(bodyPart || '').slice(0, 60),
     examLabel: EXAM_LABEL[exam] || exam,
     optionCount: count,
   });

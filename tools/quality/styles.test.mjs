@@ -1,6 +1,6 @@
 // Offline checks of the style rules with hand-written good and bad questions. No model, no network.
 //   node --import tsx tools/quality/styles.test.mjs
-import { styleProblem, pointsAtMissingPicture, unpointDescribedPicture, inventedSource, explainsDistractors, planSlots, stylesFromChips, leadInsFromChips } from '../../src/lib/questionStyles.ts';
+import { styleProblem, hasDuplicateOptions, leadInFitsFact, pointsAtMissingPicture, unpointDescribedPicture, inventedSource, explainsDistractors, planSlots, stylesFromChips, leadInsFromChips } from '../../src/lib/questionStyles.ts';
 
 const mk = (o) => ({ stem: '', questionText: '', options: [], correctOption: 'A', explanation: '', ...o });
 const opts = (...t) => t.map((text, i) => ({ id: 'ABCDE'[i], text }));
@@ -87,5 +87,20 @@ const bare = mk({ stem: "A 56-year-old woman has a thick yellow toenail. A biops
 expect("undescribed picture still dropped", String(unpointDescribedPicture(bare) || !pointsAtMissingPicture(bare)), "false");
 expect("stock list is invented", String(inventedSource(mk({ stem: "A community pharmacist in Munich compares the cephalosporins on the practice stock list." }))), "true");
 expect("hospital in Delhi is fine", String(inventedSource(mk({ stem: "A 30-year-old woman attends a hospital in Delhi with fever and dysuria." }))), "false");
+// option duplicates and planner lead-ins
+expect("exact option duplicate", String(hasDuplicateOptions(mk({ options: opts("Penicillin G", "penicillin-g", "Ceftriaxone", "Meropenem") }))), "true");
+expect("option letter variants kept", String(hasDuplicateOptions(mk({ options: opts("Penicillin G", "Penicillin V", "Ceftriaxone", "Meropenem") }))), "false");
+expect("option polarity grid kept", String(hasDuplicateOptions(mk({ options: opts("Gram-negative, acid-fast", "Gram-negative, non-acid-fast", "Gram-positive, acid-fast", "Gram-positive, non-acid-fast") }))), "false");
+expect("option dose variants kept", String(hasDuplicateOptions(mk({ options: opts("Doxycycline 100 mg for 7 days", "Doxycycline 100 mg for 14 days", "Doxycycline 100 mg for 28 days", "Ceftriaxone for 10 days") }))), "false");
+expect("treatment lead-in needs treatment fact", String(leadInFitsFact("Phospholipase C degrades the host cell membrane.", "treatment-of-choice")), "false");
+expect("treatment fact accepts treatment lead-in", String(leadInFitsFact("Penicillin is the first-line treatment for this infection.", "treatment-of-choice")), "true");
+const nonTreatmentFacts = [
+  { fact: "Phospholipase C degrades host cell membranes.", subtopic: "virulence", picturable: false },
+  { fact: "The MBC is not used to guide antibiotic selection.", subtopic: "testing", picturable: false },
+  { fact: "Cephalosporin P, N and C groups are derivatives.", subtopic: "cephalosporins", picturable: false },
+  { fact: "Ziehl-Neelsen stain is also called AFB stain.", subtopic: "stains", picturable: false },
+];
+const autoLeadSlots = planSlots(nonTreatmentFacts, 'NEET_PG', ['vignette'], [], 'MEDIUM');
+expect("default lead-ins fit non-treatment facts", String(autoLeadSlots.every((s) => s.leadIn === 'finding' || s.leadIn === 'diagnosis')), "true");
 console.log(fails ? `${fails} FAILED` : 'all style checks passed');
 process.exit(fails ? 1 : 0);

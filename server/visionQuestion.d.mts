@@ -14,6 +14,7 @@ export interface GenerateFromImageOptions {
   groundTruth: string;
   modality?: string;
   subject?: string;
+  bodyPart?: string;
   exam?: 'NEET_PG' | 'INI_CET' | 'AMC_CAT';
   difficultyTier?: 'LOW' | 'MEDIUM' | 'HIGH' | 'ALL';
   optionCount?: number;
@@ -21,6 +22,15 @@ export interface GenerateFromImageOptions {
   model?: string;
   timeoutMs?: number;
 }
+
+export declare function buildImageQuestionInstruction(input: {
+  groundTruth: string;
+  modality?: string;
+  subject?: string;
+  bodyPart?: string;
+  examLabel: string;
+  optionCount: 4 | 5;
+}): string;
 
 export declare function generateQuestionFromImage(opts: GenerateFromImageOptions): Promise<VisionQuestionSpec>;
 

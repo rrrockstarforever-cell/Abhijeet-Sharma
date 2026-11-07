@@ -24,7 +24,7 @@ import {
 } from '../data/mockClinicalData.ts';
 import { SUBTOPICS } from '../data/subtopics.ts';
 import { generateExamQuestions, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel, aiComplete, splitTopic, planTopicFacts, type AssignedFact, type GenerateQuestionsOptions } from '../lib/ai.ts';
-import { generateImageFirstQuestion, type BankImage } from '../lib/imageFirst.ts';
+import { generateImageFirstQuestion, imageBankSubjectsForLabels, selectImageBankCandidates, selectVerifiedImageQuestions, type BankImage, type ImageQuestionResult } from '../lib/imageFirst.ts';
 import { summarizeAttempts, attemptsToday, listAttempts } from '../utils/attemptStore.ts';
 import { listUserHighlights } from '../utils/userHighlightsStore.ts';
 import { debugLog } from '../utils/debugLog.ts';
@@ -303,8 +303,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
 
   const [questionTypes, setQuestionTypes] = useState<string[]>([]);
   const [stemPatterns, setStemPatterns] = useState<string[]>([]);
-  /** Attach verified library pictures to the ~1-in-5 image-based items. */
-  const [includeImages, setIncludeImages] = useState<boolean>(true);
+  const [imageMode, setImageMode] = useState<'text' | 'mixed' | 'only'>('mixed');
   const [evidenceSources, setEvidenceSources] = useState<string[]>([]);
   const [patientGroup, setPatientGroup] = useState<string>('');
   const [presentingProblems, setPresentingProblems] = useState<string[]>([]);
@@ -445,15 +444,20 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     }
     const labels = customTopic ? [customTopic] : labelsFor(keys);
     const chosenSubtopics = customTopic ? [customTopic] : topicsForKeys(keys);
+    const imageSubjects = imageMode === 'only' ? imageBankSubjectsForLabels(labels) : [];
+    if (imageMode === 'only' && !customTopic && imageSubjects.length === 0) {
+      setGenState({ busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0, error: 'No selected specialty has curated image-bank coverage. Choose Radiodiagnosis, Dermatology, Ophthalmology, or Pathology for an image-only set.' });
+      return;
+    }
 
-    if (!getActiveProvider()) {
+    if (!getActiveProvider() && imageMode !== 'only') {
       setGenState({ busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0, error: `No AI provider is active. ${NOT_CONNECTED_MESSAGE}` });
       return;
     }
 
     // "My notes" only works when real notes exist — never invent source material.
     let sourceMaterial: string | undefined;
-    if (sourceMode === 'MY_NOTES') {
+    if (sourceMode === 'MY_NOTES' && imageMode !== 'only') {
       const highlights = listUserHighlights();
       if (!highlights.length) {
         setGenState({
@@ -471,8 +475,9 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
 
     // A typed topic is split into its distinct subtopics first, so the module spreads over them instead of repeating one topic.
     // Busy is set before the split, so the button is disabled at once and a second click cannot start another run.
+    setPartial(null);
     setGenState({ busy: true, generated: 0, total: requestedCount, batch: 0, totalBatches: Math.ceil(requestedCount / 10), dropped: 0, error: null });
-    const split = customTopic ? await splitTopic(customTopic, selectedExam) : { subtopics: [], priorities: [], facts: [] };
+    const split = customTopic && imageMode !== 'only' ? await splitTopic(customTopic, selectedExam) : { subtopics: [], priorities: [], facts: [] };
     const typedSubtopics: string[] = split.subtopics;
     // Fact assignment: the important facts are planned from the sources before any question is written. Each planned
     // fact is one question slot, so the set is exactly as big as the facts the sources support.
@@ -497,7 +502,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     // The count follows what the sources support. A topic with few important facts gets a smaller set, and the note
     // says so, rather than forcing filler questions.
     let targetCount = requestedCount;
-    if (customTopic) {
+    if (customTopic && imageMode !== 'only') {
       // The target is the facts the sources support (not the spares kept for replacements).
       const factsTotal = split.facts.reduce((sum, f) => sum + f, 0);
       const supportable = Math.max(1, factPlan.length ? Math.min(factPlan.length, factsTotal) : factsTotal);
@@ -558,7 +563,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 bankId: batch.bankId,
                 batchId,
                 index: i,
-                generationModel: getActiveProvider() ?? undefined,
+                generationModel: imageMode === 'only' ? 'nvidia' : getActiveProvider() ?? undefined,
               });
               stored += 1;
             }
@@ -570,6 +575,110 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         };
         return run();
       };
+
+      if (imageMode === 'only') {
+        const statusResponse = await fetch('/api/oauth/status');
+        const status = statusResponse.ok ? await statusResponse.json() : null;
+        if (!status?.providers?.nvidia?.connected) {
+          throw new AiError('Image-only generation requires a connected NVIDIA vision provider for image question writing and verification.', 'not_connected');
+        }
+
+        setProgressDetail((d) => ({ ...d, imageFirst: customTopic ? `finding curated images matching “${customTopic}”…` : 'finding curated image-bank candidates…' }));
+        const candidateLimit = Math.min(300, targetCount * 3);
+        const candidateLists = customTopic
+          ? [await fetch(`/api/images/bank/entries?q=${encodeURIComponent(customTopic)}&limit=${candidateLimit}`, { signal: controller.signal }).then(async (response) => {
+              if (!response.ok) throw new Error(`Could not search the curated image bank (HTTP ${response.status}).`);
+              const body: any = await response.json().catch(() => ({}));
+              return Array.isArray(body?.results) ? body.results as BankImage[] : [];
+            })]
+          : await Promise.all(imageSubjects.map(async (subject) => {
+              const response = await fetch(`/api/images/bank/entries?subject=${encodeURIComponent(subject)}&limit=${candidateLimit}`, { signal: controller.signal });
+              if (!response.ok) throw new Error(`Could not load the ${subject} image bank (HTTP ${response.status}).`);
+              const body: any = await response.json().catch(() => ({}));
+              return Array.isArray(body?.results) ? body.results as BankImage[] : [];
+            }));
+        const candidates = selectImageBankCandidates(candidateLists, candidateLimit);
+        if (!candidates.length) {
+          const scope = customTopic ? `matching “${customTopic}”` : `for ${imageSubjects.join(', ')}`;
+          setGenState({ busy: false, generated: 0, total: targetCount, batch: 0, totalBatches: 0, dropped: 0, error: `No curated images are currently available ${scope}. No text-only questions were generated.` });
+          setProgressStep('idle');
+          setProgressDetail((d) => ({ ...d, imageFirst: 'no eligible images found' }));
+          return;
+        }
+
+        setProgressDetail((d) => ({ ...d, imageFirst: `0 verified · ${candidates.length} candidate images` }));
+        const optionCount = selectedExam === 'AMC_CAT' ? 5 : 4;
+        let cursor = 0;
+        let completed = 0;
+        let failures = 0;
+        let verifiedCount = 0;
+        const failureCounts: Record<string, number> = {};
+        const recordFailure = (code: string) => {
+          failures += 1;
+          failureCounts[code] = (failureCounts[code] || 0) + 1;
+        };
+        const failureSummary = () => Object.entries(failureCounts).map(([code, count]) => `${code}:${count}`).join(', ');
+        const results: Array<ImageQuestionResult | null> = new Array(candidates.length).fill(null);
+        const worker = async () => {
+          while (!stopEarlyRef.current && !controller.signal.aborted && verifiedCount < targetCount) {
+            const index = cursor++;
+            if (index >= candidates.length) return;
+            const image = candidates[index];
+            let rejectionReported = false;
+            try {
+              const result = await generateImageFirstQuestion({
+                image,
+                exam: selectedExam,
+                difficultyTier,
+                difficultySubLevel,
+                optionCount,
+                signal: controller.signal,
+                onReject: (code) => {
+                  rejectionReported = true;
+                  recordFailure(code);
+                },
+              });
+              if (result?.verification.pass && result.question.imageVerified === true && result.question.image) {
+                results[index] = result;
+                verifiedCount += 1;
+              } else if (!rejectionReported) recordFailure('unclassified-rejection');
+            } catch (error: any) {
+              if (!controller.signal.aborted) recordFailure(error instanceof AiError ? `provider-${error.kind}` : 'request-error');
+              debugLog('H10', `image-only failed for ${image.image_id}: ${error?.message || error}`);
+            } finally {
+              completed += 1;
+              setGenState((state) => ({ ...state, generated: Math.min(verifiedCount, targetCount), batch: completed, totalBatches: candidates.length }));
+              const summary = failureSummary();
+              setProgressDetail((d) => ({ ...d, imageFirst: `${Math.min(verifiedCount, targetCount)} verified · ${completed}/${candidates.length} images checked${summary ? ` · rejected ${summary}` : ''}` }));
+            }
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(3, candidates.length) }, worker));
+
+        const questions = selectVerifiedImageQuestions(results, targetCount);
+        if (!questions.length) {
+          const failureDetails = failureSummary();
+          setGenState({ busy: false, generated: 0, total: targetCount, batch: completed, totalBatches: candidates.length, dropped: failures, error: `No candidate images passed question generation and verification (${failures} rejected${failureDetails ? `: ${failureDetails}` : ''}). No text-only questions were added.` });
+          setProgressStep('done');
+          return;
+        }
+
+        localStorage.setItem('pulse.lastGeneration', JSON.stringify({ at: new Date().toISOString(), count: questions.length, questions }));
+        await onBatch(questions);
+        await Promise.all(batchPromises);
+        setProgressStep('done');
+        setGenState({ busy: false, generated: questions.length, total: targetCount, batch: completed, totalBatches: candidates.length, dropped: failures, error: null });
+        appendBaseRef.current = null;
+        if (questions.length < targetCount || stopEarlyRef.current) {
+          setPartial(questions);
+          setPartialReason(stopEarlyRef.current
+            ? `Stopped after ${questions.length} verified image questions. No text-only questions were added.`
+            : `Only ${questions.length} of ${targetCount} requested questions passed image generation and verification. ${failures} candidates failed${failureSummary() ? ` (${failureSummary()})` : ''}; no text-only questions were added.`);
+          return;
+        }
+        launchWith(questions, labels, chosenSubtopics, true);
+        return;
+      }
 
       // Same settings for the first pass and for any replacement round; only the count and batches differ.
       const moduleUnits = new Set<string>();
@@ -598,7 +707,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         onRetry: (attempt, maxAttempts, reason) =>
           setRetrying(`retrying ${attempt}/${maxAttempts} · ${reason}`),
         customInstructions: appliedProfile ?? undefined,
-        includeImages,
+        includeImages: imageMode === 'mixed',
         questionTypes,
         stemPatterns,
         evidenceSources: selectedExam === 'AMC_CAT' ? evidenceSources : undefined,
@@ -635,7 +744,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       // questions from above remain — the ratio of image to text items is therefore
       // honest, and an unrelated picture can never be attached.
       let imageQuestions: ClinicalQuestion[] = [];
-      if (includeImages && selectedExam) {
+      if (imageMode === 'mixed' && selectedExam) {
         try {
           const perSubject = Math.max(1, Math.round(targetCount / 5));
           const wantImages = Math.min(perSubject, 6); // cap vision cost per run
@@ -788,10 +897,10 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     }
   };
 
-  const launchWith = (questions: ClinicalQuestion[], subjects: string[], chosenSubtopics: string[]) => {
+  const launchWith = (questions: ClinicalQuestion[], subjects: string[], chosenSubtopics: string[], skipSubjectFilter = false) => {
     // Only questions that belong to a selected subject go to the runner.
     const selectedSubjects = new Set(subjects.map(normalizeSubject));
-    const passed = questions.filter((q) => selectedSubjects.size === 0 || selectedSubjects.has(normalizeSubject(q.subject || '')));
+    const passed = skipSubjectFilter ? questions : questions.filter((q) => selectedSubjects.size === 0 || selectedSubjects.has(normalizeSubject(q.subject || '')));
     setHeldBackNote(null);
     if (passed.length === 0) {
       setGenState((st) => ({ ...st, error: 'No question was kept for this module, so nothing was opened.' }));
@@ -844,7 +953,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     const labels = customTopic ? [customTopic] : labelsFor(keys);
     const chosenSubtopics = customTopic ? [customTopic] : topicsForKeys(keys);
     setPartial(null);
-    launchWith(partial, labels, chosenSubtopics);
+    launchWith(partial, labels, chosenSubtopics, imageMode === 'only');
   };
 
   // ------------------------------------------------------------ AI instruction profiles
@@ -993,6 +1102,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
 
   const subjectsChosen = effectiveKeys.length;
   const canLaunch = subjectsChosen > 0 || customTopic.length > 0;
+  const imageOnlySubjects = customTopic ? [] : imageBankSubjectsForLabels(labelsFor(effectiveKeys));
   const activeModalRow = topicModal ? subjectList.find((r) => r.key === topicModal.key) ?? null : null;
   const durationMin = Math.max(1, Math.round(questionCount * 1.1));
 
@@ -1226,24 +1336,34 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 </div>
               </div>
 
-              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-[11px] font-bold text-slate-800">Include image-based questions</div>
-                  <p className="text-[10px] text-slate-500 leading-snug">
-                    Any item where a real ECG / X-ray / CT / histology / clinical photo is expected gets one fetched
-                    from the internet (Wikimedia Commons + Open-i/NLM) — as many as the set needs, each picture used
-                    once. Items stay text-only when no matching figure is found.
-                  </p>
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                <div className="text-[11px] font-bold text-slate-800">Question image mode</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {([
+                    ['text', 'Text only'],
+                    ['mixed', 'Include images'],
+                    ['only', 'Images only'],
+                  ] as const).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setImageMode(value)}
+                      aria-pressed={imageMode === value}
+                      className={`px-2.5 py-1.5 rounded-lg border text-[10px] font-semibold transition-colors ${imageMode === value ? 'bg-[#0f8b8d] border-[#0f8b8d] text-white' : 'bg-white border-slate-200 text-slate-600 hover:border-[#0f8b8d]/50'}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setIncludeImages((v) => !v)}
-                  className={`relative w-9 h-5 rounded-full shrink-0 mt-0.5 transition-colors ${includeImages ? 'bg-[#0f8b8d]' : 'bg-slate-300'}`}
-                  aria-pressed={includeImages}
-                  title={includeImages ? 'Image-based items are on' : 'Image-based items are off'}
-                >
-                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${includeImages ? 'left-[18px]' : 'left-0.5'}`} />
-                </button>
+                <p className="text-[10px] text-slate-500 leading-snug">
+                  {imageMode === 'only'
+                    ? customTopic
+                      ? 'Every question must use a curated image matching this topic and pass vision verification. Requires NVIDIA vision access; unmatched or unverifiable images are not replaced with text questions.'
+                      : 'Every question must use a curated image and pass vision verification. Requires NVIDIA vision access and a supported imaging specialty; unavailable images are not replaced with text questions.'
+                    : imageMode === 'mixed'
+                      ? 'Image-appropriate questions may use a verified figure from Wikimedia Commons or Open-i/NLM. Other questions remain text-only.'
+                      : 'No images will be requested for this set.'}
+                </p>
               </div>
 
               {selectedExam === 'AMC_CAT' && (
@@ -1490,16 +1610,18 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
-                <Sparkles className="w-4 h-4 text-[#0f8b8d]" /> AI generator
+                <Sparkles className="w-4 h-4 text-[#0f8b8d]" /> {imageMode === 'only' ? 'Image-only generation' : 'AI generator'}
               </h3>
               <span className="text-[10px] font-mono text-slate-500 truncate max-w-[55%]">
-                {activeProvider
-                  ? `${activeProvider} · ${providerKnownDown ? 'not connected' : getEffectiveModel(activeProvider)}`
-                  : 'no provider'}
+                {imageMode === 'only'
+                  ? 'NVIDIA vision · writer + verifier'
+                  : activeProvider
+                    ? `${activeProvider} · ${providerKnownDown ? 'not connected' : getEffectiveModel(activeProvider)}`
+                    : 'no provider'}
               </span>
             </div>
 
-            {!activeProvider && (
+            {!activeProvider && imageMode !== 'only' && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10px] leading-relaxed text-amber-900 flex items-start gap-2">
                 <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-600" />
                 <span>
@@ -1515,7 +1637,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               </div>
             )}
 
-            {providerKnownDown && (
+            {providerKnownDown && imageMode !== 'only' && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10px] leading-relaxed text-amber-900 flex items-start gap-2">
                 <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-600" />
                 <span>
@@ -1544,7 +1666,10 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                   {genState.dropped > 0 ? ` · ${genState.dropped} dropped` : ''}
                   {elapsedSec > 0 ? ` · ${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, '0')} elapsed` : ''}
                 </div>
-                {elapsedSec >= 25 && (
+                {progressDetail.imageFirst && (
+                  <div className="text-[10px] font-mono text-slate-500 leading-snug">{progressDetail.imageFirst}</div>
+                )}
+                {elapsedSec >= 25 && imageMode !== 'only' && (
                   <div className="text-[9px] text-slate-400 leading-snug">
                     Generating questions in parallel — each question runs independently through the active provider.
                   </div>
@@ -1557,13 +1682,19 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               </div>
             ) : (
               <p className="text-[10px] text-slate-500 leading-relaxed">
-                {!activeProvider
-                  ? 'Connect a provider first — then this button builds the module.'
-                  : providerKnownDown
-                    ? `${activeProvider} is signed out — reconnect it to generate.`
-                    : canLaunch
-                      ? `${questionCount} questions across ${subjectsChosen} ${selectedExam === 'AMC_CAT' ? 'domains' : 'specialities'} and ${totalChosenSubtopicsCount} topics. Expect about ${Math.max(1, Math.round(questionCount * 0.15))} min (estimate: about 9 s per question, written in parallel).`
-                      : 'Select at least one speciality (or choose All) to build a module.'}
+                {imageMode === 'only'
+                  ? customTopic
+                    ? `Image-only searches curated bank images matching “${customTopic}” and requires NVIDIA vision access. Unmatched or unverifiable images are not replaced with text questions.`
+                    : imageOnlySubjects.length > 0
+                      ? `Image-only uses curated ${imageOnlySubjects.join(', ')} bank images and requires NVIDIA vision access. It never adds text-only questions.`
+                      : 'Image-only mode requires selecting Radiodiagnosis, Dermatology, Ophthalmology, or Pathology.'
+                  : !activeProvider
+                    ? 'Connect a provider first — then this button builds the module.'
+                    : providerKnownDown
+                      ? `${activeProvider} is signed out — reconnect it to generate.`
+                      : canLaunch
+                        ? `${questionCount} questions across ${subjectsChosen} ${selectedExam === 'AMC_CAT' ? 'domains' : 'specialities'} and ${totalChosenSubtopicsCount} topics. Expect about ${Math.max(1, Math.round(questionCount * 0.15))} min (estimate: about 9 s per question, written in parallel).`
+                        : 'Select at least one speciality (or choose All) to build a module.'}
               </p>
             )}
 
@@ -1582,7 +1713,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
 
             <button
               onClick={() => {
-                if (!activeProvider || providerKnownDown) {
+                if (imageMode !== 'only' && (!activeProvider || providerKnownDown)) {
                   onNavigate('settings');
                   return;
                 }
@@ -1604,12 +1735,12 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                   <Sparkles className="w-4 h-4 animate-spin" />
                   <span>Generating… {genState.generated}/{genState.total}</span>
                 </>
-              ) : !activeProvider ? (
+              ) : imageMode !== 'only' && !activeProvider ? (
                 <>
                   <ShieldAlert className="w-4 h-4" />
                   <span>Connect an AI provider in Settings</span>
                 </>
-              ) : providerKnownDown ? (
+              ) : imageMode !== 'only' && providerKnownDown ? (
                 <>
                   <ShieldAlert className="w-4 h-4" />
                   <span>Reconnect {activeProvider} in Settings</span>
@@ -1664,11 +1795,13 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               <div className="space-y-2">
                 <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[10px] leading-relaxed">
                   {partialReason
-                    ? `Generated ${partial.length} of ${genState.total} — the provider failed on a batch: ${partialReason}`
+                    ? imageMode === 'only'
+                      ? partialReason
+                      : `Generated ${partial.length} of ${genState.total} — the provider failed on a batch: ${partialReason}`
                     : `Stopped at ${partial.length} of ${genState.total} questions.`}{' '}
                   Every kept question passed validation; nothing was padded.
                 </div>
-                {partial.length < questionCount && (
+                {imageMode !== 'only' && partial.length < questionCount && (
                   <button
                     onClick={handleContinue}
                     className="w-full py-2 rounded-xl bg-[#001432] hover:bg-[#13294b] text-white text-[11px] font-bold transition-colors flex items-center justify-center gap-2"

@@ -1054,8 +1054,8 @@ export const SettingsAIView: React.FC = () => {
                 <div className="text-[11px] font-bold text-slate-800">Live search at generation time</div>
                 <p className="text-[10px] leading-snug text-slate-500">
                   When no verified picture matches, search Wikimedia Commons (including CDC PHIL material) and
-                  Open-i (NLM / PubMed Central) for the diagnosis. Only CC BY / CC BY-SA / CC0 / public-domain
-                  results are used, proxied and cached locally, with attribution under the image.
+                  Open-i (NLM / PubMed Central) for the diagnosis. Only items explicitly marked CC0 or Public Domain
+                  are used; results are proxied and cached locally, with their source and license information retained.
                 </p>
               </div>
               <button

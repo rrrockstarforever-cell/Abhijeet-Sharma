@@ -53,8 +53,9 @@ export interface ClinicalQuestion {
   imageSourceUrl?: string;
   /** Bank/source id of the attached figure (never an LLM-written URL). */
   imageId?: string;
-  /** Licence of the attached figure, e.g. "CC BY" / "Public domain". */
+  /** License label of the attached figure, expected to be CC0 or Public Domain. */
   imageLicence?: string;
+  imageLicenceUrl?: string;
   /** Ground-truth finding the figure was verified to show (the claim checked by vision). */
   imageGroundTruth?: string;
   /** Result of the strict vision check that had to pass before this image was attached. */

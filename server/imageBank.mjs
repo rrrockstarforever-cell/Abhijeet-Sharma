@@ -3,15 +3,14 @@
 // Why a bank instead of a live search per question: a live keyword search decides the
 // picture AFTER the question exists, which produced unrelated images. Here each entry
 // carries TRUSTED metadata (diagnosis / finding, modality, subject) harvested from
-// licence-clean sources (Wikimedia Commons + Open-i/NLM, CC BY / BY-SA / CC0 / PD), so
-// the question can be written FROM a known image.
+// Public Domain/CC0 sources, so the question can be written FROM a known image.
 //
 // The bank is built once (harvest) and persisted to disk, then read offline. Re-running
 // the harvest merges by image_id and never duplicates.
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { searchImages } from './images.mjs';
+import { searchImages, reusableLicense } from './images.mjs';
 
 const DATA_ROOT = process.env.PULSE_DATA_DIR || join(homedir(), '.pulse-med');
 const BANK_DIR = join(DATA_ROOT, 'image-bank');
@@ -77,22 +76,37 @@ export const SEED_TOPICS = [
   { subject: 'Orthopaedics', modality: 'MRI', ground_truth: 'anterior cruciate ligament tear', query: 'anterior cruciate ligament tear MRI' },
 ];
 
-/** Read the whole bank file (never throws; a corrupt/missing file yields []). */
-function readBankFile() {
+/**
+ * Read every entry in the bank file, including ones whose licence is not reusable. Use this only to REWRITE the file:
+ * writing back a licence-filtered list silently deletes the entries that were filtered out. (Never throws.)
+ */
+function readRawBankFile() {
   try {
     if (!existsSync(BANK_FILE)) return { entries: [], builtAt: null };
-    const raw = readFileSync(BANK_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    const entries = Array.isArray(parsed?.entries) ? parsed.entries : Array.isArray(parsed) ? parsed : [];
-    return { entries: entries.filter((e) => e && typeof e.image_id === 'string'), builtAt: parsed?.builtAt ?? null };
+    const parsed = JSON.parse(readFileSync(BANK_FILE, 'utf8'));
+    const rawEntries = Array.isArray(parsed?.entries) ? parsed.entries : Array.isArray(parsed) ? parsed : [];
+    return { entries: rawEntries.filter((entry) => entry && typeof entry.image_id === 'string'), builtAt: parsed?.builtAt ?? null };
   } catch {
     return { entries: [], builtAt: null };
   }
 }
 
+/** Read the bank for USE (queries, stats, tutor): only entries with a reusable CC0 or public-domain licence. Never throws. */
+function readBankFile() {
+  const raw = readRawBankFile();
+  const entries = raw.entries.flatMap((entry) => {
+    const license = reusableLicense(entry.licence, entry.licenceUrl);
+    return license ? [{ ...entry, licence: license.label, licenceUrl: entry.licenceUrl || license.url }] : [];
+  });
+  return { entries, builtAt: raw.builtAt };
+}
+
 function writeBankFile(entries, builtAt) {
   mkdirSync(BANK_DIR, { recursive: true });
-  writeFileSync(BANK_FILE, JSON.stringify({ builtAt, entries }, null, 2), 'utf8');
+  // Write a temporary file and rename it over the bank: a crash mid-write leaves the old complete file in place.
+  const tmp = `${BANK_FILE}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify({ builtAt, entries }, null, 2), 'utf8');
+  renameSync(tmp, BANK_FILE);
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +154,7 @@ export function rejectImage(image_id, ground_truth, reason) {
 function pruneRejected() {
   const rejected = loadRejected();
   if (rejected.size === 0) return 0;
-  const current = readBankFile();
+  const current = readRawBankFile();
   const kept = current.entries.filter((e) => !rejected.has(e.image_id));
   const removed = current.entries.length - kept.length;
   if (removed > 0) {
@@ -190,6 +204,7 @@ export async function buildImageBank(options = {}) {
     onProgress,
     throttleMs = 1200,
     maxAttempts = 4,
+    search = searchImages,
     // Optional async (entry) => boolean. When supplied, an entry is only added if it
     // RESOLVES TRUE — used to confirm with vision that the image really shows the seed's
     // claimed finding before it enters the bank. Keyword search alone returns merely
@@ -200,7 +215,8 @@ export async function buildImageBank(options = {}) {
   // House-cleaning first: entries the verifier already rejected are dropped, so a
   // rebuild does not resurrect images that are known not to show their claimed finding.
   const pruned = pruneRejected();
-  const existing = readBankFile();
+  const rejectionMemory = loadRejected();
+  const existing = readRawBankFile();
   const byId = new Map(existing.entries.map((e) => [e.image_id, e]));
   const errors = [];
   if (pruned > 0) errors.push(`Pre-run prune: removed ${pruned} previously-rejected image(s).`);
@@ -217,10 +233,15 @@ export async function buildImageBank(options = {}) {
     while (!done && attempt < maxAttempts) {
       attempt += 1;
       try {
-        const { results, errors: searchErrors } = await searchImages(seed.query, { limit: limitPerSeed });
+        const { results, errors: searchErrors } = await search(seed.query, { limit: limitPerSeed });
         const throttled = (searchErrors || []).some((e) => /429|rate|too many/i.test(e));
         for (const row of results || []) {
-          if (!row?.id || !row?.imageUrl) continue;
+          const license = reusableLicense(row.licence, row.licenceUrl);
+          if (!row?.id || !row?.imageUrl || !license) continue;
+          if (rejectionMemory.has(row.id)) {
+            rejected += 1;
+            continue;
+          }
           if (byId.has(row.id)) continue;
           const entry = {
             image_id: row.id,
@@ -228,8 +249,8 @@ export async function buildImageBank(options = {}) {
             sourceUrl: row.articleUrl || row.licenceUrl || '',
             imageUrl: row.imageUrl,
             previewUrl: row.proxyUrl || '',
-            licence: row.licence || '',
-            licenceUrl: row.licenceUrl || '',
+            licence: license.label,
+            licenceUrl: row.licenceUrl || license.url,
             attribution: row.credit || '',
             ground_truth: seed.ground_truth,
             modality: seed.modality,
@@ -310,33 +331,78 @@ export function queryImageBank({ subject, modality, limit = 6, includeRejected =
  *
  * Callers MUST still vision-verify the winner; this only narrows the shortlist.
  */
+export function bankTopicScore(entry, query) {
+  const queryTokens = new Set(topicWords(query));
+  if (!queryTokens.size) return 0;
+  const diagnosisTokens = new Set(topicWords(entry.ground_truth));
+  const bodyTokens = new Set(topicWords(`${entry.body_part || ''} ${entry.ground_truth || ''}`));
+  const modalityTokens = new Set(topicWords(entry.modality));
+  const modalities = MODALITY_GROUPS.filter((group) => group.some((token) => queryTokens.has(token)));
+  const bodyParts = BODY_PART_GROUPS.filter((group) => group.some((token) => queryTokens.has(token)));
+  const diagnosticTerms = [...queryTokens].filter((token) =>
+    !STOPWORDS.has(token) && !TOPIC_NOISE.has(token) &&
+    !MODALITY_GROUPS.some((group) => group.includes(token)) &&
+    !BODY_PART_GROUPS.some((group) => group.includes(token)),
+  );
+
+  if (diagnosticTerms.length) {
+    const matched = diagnosticTerms.filter((token) => diagnosisTokens.has(token)).length;
+    const coverage = matched / diagnosticTerms.length;
+    if (coverage < 0.75) return 0;
+    if (modalities.some((group) => !group.some((token) => modalityTokens.has(token)))) return 0;
+    if (bodyParts.some((group) => !group.some((token) => bodyTokens.has(token)))) return 0;
+    return coverage;
+  }
+
+  if (!modalities.length || !bodyParts.length) return 0;
+  if (modalities.some((group) => !group.some((token) => modalityTokens.has(token)))) return 0;
+  if (bodyParts.some((group) => !group.some((token) => bodyTokens.has(token)))) return 0;
+  return 1;
+}
+
+function topicWords(value) {
+  return String(value || '').toLowerCase().replace(/x[\s-]?ray/g, ' xray ').replace(/[^a-z0-9]+/g, ' ').split(/\s+/).filter(Boolean);
+}
+
+const MODALITY_GROUPS = [
+  ['xray', 'radiograph', 'radiography'],
+  ['ecg', 'ekg', 'electrocardiogram', 'electrocardiograph'],
+  ['ct', 'computed', 'tomography'],
+  ['mri', 'magnetic', 'resonance'],
+  ['ultrasound', 'sonography', 'sonogram'],
+  ['histology', 'histological', 'histopathology', 'biopsy', 'micrograph'],
+  ['fundus', 'fundal', 'retina'],
+];
+const BODY_PART_GROUPS = [
+  ['chest', 'lung', 'lungs', 'pulmonary', 'thorax'],
+  ['brain', 'cerebral', 'intracranial', 'head'],
+  ['knee', 'femur', 'tibia', 'hip', 'shoulder', 'wrist', 'bone', 'musculoskeletal'],
+  ['kidney', 'renal', 'nephro', 'urinary'],
+  ['liver', 'hepato', 'biliary', 'gallbladder', 'pancreas'],
+  ['skin', 'derm', 'cutaneous', 'rash'],
+  ['eye', 'retina', 'fundus', 'optic', 'cornea', 'conjunctiva'],
+  ['heart', 'cardiac', 'myocard', 'cardiology'],
+  ['stomach', 'gastr', 'colon', 'bowel', 'append', 'intestin'],
+];
+const TOPIC_NOISE = new Set(['acute', 'chronic', 'severe', 'mild', 'classic', 'typical', 'condition', 'disease', 'finding', 'findings', 'image', 'images', 'picture', 'pictures', 'photo', 'photograph', 'clinical', 'showing', 'shows', 'with', 'from', 'the', 'of', 'and', 'for', 'in', 'on', 'a', 'an']);
+
+/** Trusted-metadata shortlist for a cue; diagnosis agreement is required when a diagnosis is named. */
 export function searchBankByText(query, { subject, limit = 4 } = {}) {
-  const tokens = String(query || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter((t) => t.length > 2 && !STOPWORDS.has(t));
-  if (!tokens.length) return [];
+  const queryTokens = topicWords(query);
+  if (!queryTokens.length) return [];
   const rejected = loadRejected();
-  const rows = loadImageBank().filter((e) => !rejected.has(e.image_id));
-  // `subject` is only a PREFERENCE, never a hard filter. The bank is tagged with imaging
-  // taxonomy names ("Radiology", "Ophthalmology") while the tutor passes the learner's
-  // content subject ("Medicine", "Pharmacology"), so requiring an exact match silently
-  // emptied the candidate list and every explanation came back text-only.
+  const rows = loadImageBank().filter((entry) => !rejected.has(entry.image_id));
   const wantedSubject = subject ? String(subject).toLowerCase() : '';
-  const scored = rows.map((e) => {
-    const hay = `${e.ground_truth || ''} ${e.body_part || ''} ${e.subject || ''} ${e.modality || ''}`.toLowerCase();
-    let score = 0;
-    for (const t of tokens) if (hay.includes(t)) score += 1;
-    // Reward a subject match when it happens to line up, but never require it.
-    if (wantedSubject && String(e.subject || '').toLowerCase() === wantedSubject) score += 0.5;
-    return { e, score };
-  });
-  return scored
-    .filter((s) => s.score > 0)
+  return rows
+    .map((entry) => {
+      const relevance = bankTopicScore(entry, query);
+      const subjectBonus = wantedSubject && String(entry.subject || '').toLowerCase() === wantedSubject ? 0.01 : 0;
+      return { entry, score: relevance + subjectBonus };
+    })
+    .filter((row) => row.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, Math.max(0, limit))
-    .map((s) => s.e);
+    .map(({ entry }) => entry);
 }
 
 /** Common words that carry no diagnostic signal in a cue. */

@@ -6,7 +6,7 @@ import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } f
 import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
-import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, combinationListMissing, inventedSource, explainsDistractors, explanationLeaks, leadInsFromChips, planSlots, spread, pointsAtMissingPicture, unpointDescribedPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
+import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, combinationListMissing, hasDuplicateOptions, inventedSource, explainsDistractors, explanationLeaks, leadInsFromChips, planSlots, spread, pointsAtMissingPicture, unpointDescribedPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
 
 /**
  * Two key facts this similar are the same fact (word overlap on the key-fact sentences). Set low because
@@ -233,6 +233,8 @@ export interface AiCompleteOptions {
   model?: string;
   /** Question writing and repair: sent to the selected engine. See writeRoute. */
   work?: boolean;
+  /** Generation stage shown in the token breakdown, such as write, repair, examiner or plan. */
+  purpose?: string;
   /** Cancels the HTTP request; the server also drops the upstream call (see /api/ai/complete). */
   signal?: AbortSignal;
 }
@@ -334,6 +336,7 @@ export async function pickSourcedFact(
       messages: [{ role: 'user', content: `Topic: ${topic}${focus ? `\nFocus: ${focus}` : ''}${avoid.length ? `\nAlready used, pick a different fact: ${avoid.slice(-20).map((f) => f.slice(0, 120)).join(' | ')}` : ''}\n\nSources:\n${evidence}` }],
       json: true,
       effort: 'low',
+      purpose: 'fact-pick',
       provider,
       model: getEffectiveModel(provider),
     }).catch((err) => { console.warn(`[fact] call failed: ${err?.message || err}`); return ''; });
@@ -405,6 +408,7 @@ export async function planTopicFacts(
       messages: [{ role: 'user', content: `Topic: ${topic}\nSubtopic: ${subtopics[i]}\nNumber of facts: ${ask}\n\nSources:\n${evidence}` }],
       json: true,
       effort: 'low',
+      purpose: 'fact-plan',
       provider,
       model: getEffectiveModel(provider),
     }).catch(() => '');
@@ -461,6 +465,7 @@ async function dedupePlan(plan: AssignedFact[], provider: AiProviderId): Promise
     messages: [{ role: 'user', content: list }],
     json: true,
     effort: 'low',
+    purpose: 'fact-dedupe',
     provider,
     model: cheapModel(provider),
   }).catch(() => '');
@@ -484,7 +489,7 @@ async function guessSubject(topic: string): Promise<string | undefined> {
     if (provider) {
       const raw = await aiComplete({
         system: 'Name the MBBS subject of an exam topic. Choose exactly one of: Anatomy, Physiology, Biochemistry, Pathology, Pharmacology, Microbiology, Forensic, PSM, Medicine, Surgery, OBG, Paediatrics, Orthopedics, ENT, Ophthalmology, Dermatology, Psychiatry, Radiology, Anaesthesia. Reply with ONLY JSON: {"subject":"..."}.',
-        messages: [{ role: 'user', content: topic }], json: true, effort: 'low', provider, model: cheapModel(provider),
+        messages: [{ role: 'user', content: topic }], json: true, effort: 'low', purpose: 'subject', provider, model: cheapModel(provider),
       }).catch(() => '');
       subject = String(extractJson<{ subject?: string }>(raw)?.subject ?? '').trim() || undefined;
     }
@@ -502,6 +507,7 @@ async function repairExplanation(q: ClinicalQuestion, signal?: AbortSignal): Pro
     messages: [{ role: 'user', content: [q.stem, (q as { questionText?: string }).questionText ?? '', ...q.options.map((o) => `${o.id}) ${o.text}`), `Marked answer: ${q.correctOption}`, `Current explanation: ${String(q.explanation ?? '')}`].join('\n') }],
     json: true,
     effort: 'low',
+    purpose: 'explanation',
     provider,
     model: cheapModel(provider),
     signal,
@@ -518,6 +524,7 @@ async function tagPicturable(plan: AssignedFact[], provider: AiProviderId): Prom
     messages: [{ role: 'user', content: plan.map((f, i) => `${i + 1}. ${f.fact}`).join('\n') }],
     json: true,
     effort: 'low',
+    purpose: 'picture-tag',
     provider,
     model: getEffectiveModel(provider),
   }).catch(() => '');
@@ -542,6 +549,7 @@ async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: Abor
     }],
     json: true,
     effort: 'low',
+    purpose: 'examiner',
     provider,
     model: getEffectiveModel(provider),
     signal,
@@ -629,6 +637,7 @@ async function repairDraft(draft: ClinicalQuestion, problem: string, provider: A
     messages: [{ role: 'user', content: ['Problem to fix: ' + problem, '', 'Stem: ' + draft.stem, 'Question line: ' + line, draft.options.map((o) => `${o.id}) ${o.text}`).join(String.fromCharCode(10)), 'Correct answer: ' + draft.correctOption + ') ' + answer, 'Explanation: ' + (draft.explanation ?? '')].join(String.fromCharCode(10)) }],
     json: true,
     effort: 'low',
+    purpose: 'repair',
     provider,
     model: getEffectiveModel(provider),
   }).catch(() => '');
@@ -649,6 +658,7 @@ async function planFigure(q: ClinicalQuestion, topic: string, signal?: AbortSign
     messages: [{ role: 'user', content: `Topic: ${topic}\n${q.stem} ${q.questionText}\nAnswer: ${answer}` }],
     json: true,
     effort: 'low',
+    purpose: 'picture-plan',
     provider,
     model: cheapModel(provider),
     signal,
@@ -849,6 +859,7 @@ async function completeOn(provider: AiProviderId, model: string, options: AiComp
     json: options.json,
     effort: options.effort,
     groundOn: options.groundOn,
+    purpose: options.purpose,
   };
 
   let res: Response;
@@ -1390,15 +1401,28 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // Any planned fact rejected three times (a toxin fact given a treatment lead-in, a trivia fact whose options come out
   // alike) is retired too: its later rewrites almost never pass, and each one costs a writer call.
   const factDrops = new Map<string, number>();
+  const factAttempts = new Map<string, number>();
+  const retiredFacts = new Set<string>();
   const MAX_DROPS_PER_FACT = 3;
-  const factRetired = (topic: unknown, dropKey?: string): boolean => {
-    const fact = (topic as { assigned?: AssignedFact }).assigned?.fact;
-    // Network, verify and over-target drops say nothing about the fact.
-    if (!fact || !dropKey || ['verify-error', 'over-target', 'unparsed'].includes(dropKey)) return false;
-    const drops = (factDrops.get(fact) ?? 0) + 1;
-    factDrops.set(fact, drops);
-    return drops >= MAX_DROPS_PER_FACT || (dropKey === 'examiner' && (examinerFactFails.get(fact) ?? 0) >= MAX_EXAMINER_FAILS_PER_FACT);
+  const assignedFactKey = (value: unknown): string => factKey(String(value ?? ''));
+  const recordFactDrop = (topic: unknown, dropKey?: string, fallbackFact?: string): void => {
+    const rawFact = (topic as { assigned?: AssignedFact }).assigned?.fact ?? fallbackFact;
+    const key = assignedFactKey(rawFact);
+    // Network, verify, over-target and malformed replies say nothing reliable about the planned fact.
+    if (!key || !dropKey || ['verify-error', 'over-target', 'unparsed'].includes(dropKey)) return;
+    const drops = (factDrops.get(key) ?? 0) + 1;
+    factDrops.set(key, drops);
+    if (drops >= MAX_DROPS_PER_FACT || (dropKey === 'examiner' && (examinerFactFails.get(key) ?? 0) >= MAX_EXAMINER_FAILS_PER_FACT)) retiredFacts.add(key);
   };
+  const reserveFactAttempt = (topic: unknown): boolean => {
+    const key = assignedFactKey((topic as { assigned?: AssignedFact }).assigned?.fact);
+    if (!key || retiredFacts.has(key)) return !key;
+    const attempts = factAttempts.get(key) ?? 0;
+    if (attempts >= MAX_DROPS_PER_FACT) { retiredFacts.add(key); return false; }
+    factAttempts.set(key, attempts + 1);
+    return true;
+  };
+  const isFactRetired = (topic: unknown): boolean => retiredFacts.has(assignedFactKey((topic as { assigned?: AssignedFact }).assigned?.fact));
   // Correct answers kept so far in this set (checked so one answer is not asked twice).
   const acceptedAnswers: string[] = [];
   // The same answers as written, for telling a rewrite which answers are taken (the normalised keys are unreadable).
@@ -1462,9 +1486,17 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const pyqWeightsForPlan = requestedTopic && factPlan?.length
     ? await fetchPyqWeights([...new Set(factPlan.map((f) => f.subtopic))], exam)
     : {};
-  const plannedFacts = requestedTopic && factPlan?.length
+  const orderedPlannedFacts = requestedTopic && factPlan?.length
     ? weightedOrder(factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`)), pyqWeightsForPlan)
     : [];
+  // A duplicated planner fact would otherwise create several slots for one claim and defeat retirement.
+  const plannedFactKeys = new Set<string>();
+  const plannedFacts = orderedPlannedFacts.filter((f) => {
+    const key = factKey(f.fact);
+    if (!key || plannedFactKeys.has(key)) return false;
+    plannedFactKeys.add(key);
+    return true;
+  });
   // Every planned fact gets a slot: its style (vignette, one-liner, NOT, match, statements, ...), lead-in and difficulty,
   // from the styles the learner picked or, when none, the exam's own mix.
   const subjectGuess = plannedFacts.length && requestedTopic ? await guessSubject(requestedTopic) : undefined;
@@ -1570,12 +1602,14 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     for (let a = attempt; a <= MAX_ATTEMPTS; a++) {
       if (outerSignal?.aborted || shouldStop?.()) { stopped = true; return null; }
       if (own.signal.aborted) return null;
+      if (!reserveFactAttempt(topic)) return null;
       try {
         const raw = repaired ? JSON.stringify(repaired) : await aiComplete({
           system: GENERATOR_SYSTEM,
           messages: [{ role: 'user', content: prompt }],
           json: true,
           work: true,
+          purpose: 'write',
           // The thinking pass writes the item and checks its key against the internet sources in one call.
           // Paid providers reason less: the sources are already in the request, so long reasoning mostly adds cost.
           effort: getActiveProvider() === 'nvidia' ? 'high' : 'low',
@@ -1604,9 +1638,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (!(slot?.style === 'image' && q.figureQuery)) unpointDescribedPicture(q);
         // For a typed topic a stem under six words is usually just a label, not context for the question.
         const thinStem = requestedTopic && (q.stem ?? '').trim().split(/\s+/).filter(Boolean).length < 6;
-        // Two options that say nearly the same thing make the item ambiguous, so the item is dropped.
-        const optionTexts = (q.options || []).map((o) => o.text);
-        const twinOptions = optionTexts.some((a, i) => optionTexts.some((b, j) => j > i && stemSimilarity(a, b) >= 0.7));
+        // Only exact normalized duplicates are ambiguous here. A Jaccard check treated standard exam grids as duplicates
+        // because it discarded short discriminators such as G/V, N/C/P, polarity words and dose numbers.
+        const twinOptions = hasDuplicateOptions(q);
         // The same age and sex as a patient already in the set makes the items look alike, so the item is dropped.
         const patientOf = (s: string) => (s.match(/\b\d{1,3}[- ](?:year|month)s?[- ]old\s+(?:man|woman|boy|girl|infant|child|male|female)\b/i)?.[0] ?? '').toLowerCase();
         const myPatient = patientOf(q.stem ?? '');
@@ -1677,7 +1711,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // Without a written key fact, the correct option's text stands in, so repeats are still caught.
         // A planned slot keeps its planned fact as the key fact. The planner already kept those facts distinct.
         const keyFact = sourced ? sourced.fact : ((q.keyFact || '').trim() || (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim());
-        if (assigned && acceptedPlannedFacts.has(assigned.fact)) { dropQ(ctx, 'repeat-planned-fact'); return null; }
+        if (assigned && acceptedPlannedFacts.has(assignedFactKey(assigned.fact))) { dropQ(ctx, 'repeat-planned-fact'); return null; }
         if (!sourced && keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { claimed = false; if (ctx) ctx.reason = `the set already tests this fact. Test a different fact of the topic. Facts already used: ${usedList(acceptedKeyFacts)}`; dropQ(ctx, 'repeat-fact'); return null; }
         // The same correct answer asked again in other words (for example the same imaging test) is also a repeat.
         // Abbreviations and generic words are normalised first, so "CT" and "computed tomography", or "serum lipase level"
@@ -1712,7 +1746,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (examinerProblem) {
           // The examiner's own words go to the rewrite and to the drop file, so a rewrite fixes that problem.
           if (ctx) ctx.reason = `the examiner rejected it: ${examinerProblem}`;
-          if (assigned) examinerFactFails.set(assigned.fact, (examinerFactFails.get(assigned.fact) ?? 0) + 1);
+          if (assigned) {
+            const key = assignedFactKey(assigned.fact);
+            examinerFactFails.set(key, (examinerFactFails.get(key) ?? 0) + 1);
+          }
           dropQ(ctx, 'examiner');
           return null;
         }
@@ -1742,6 +1779,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
             q.imageCaption = liveImageCaption(live);
             q.imageId = live.id;
             q.imageLicence = live.licence;
+            q.imageLicenceUrl = live.licenceUrl;
             q.imageGroundTruth = q.figureQuery;
             q.imageVerified = live.verified === true;
             q.imageVerifyReason = live.verifyReason;
@@ -1761,7 +1799,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         seenStems.add(key);
         acceptedStems.push(fullStem);
         if (keyFact) acceptedKeyFacts.push(keyFact);
-        if (assigned) acceptedPlannedFacts.add(assigned.fact);
+        if (assigned) acceptedPlannedFacts.add(assignedFactKey(assigned.fact));
 
         used.add(`${topic.subtopic}|${focus ?? ''}`);
         return q;
@@ -1870,6 +1908,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       const next: QueueItem = pending ?? queue.shift()!;
       pending = null;
       const { topic, idx, retries, hint, slot: slotOverride, repaired, verifyErrors = 0 } = next;
+      if (isFactRetired(topic)) continue;
       const slot = slotOverride ?? topic.slot;
       const parts = focusParts(topic.subtopic);
       // A planned topic carries its own focus (one drug class, one part of a subtopic); otherwise rotate the parts.
@@ -1902,10 +1941,12 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // The source checker failed for network or provider reasons, not because of the question. The same draft is
         // checked again without using up a rewrite; the provider-error breaker above still ends a run whose provider is down.
         pending = { topic, idx, retries, hint, slot: slotOverride, repaired: ctx.draft as unknown as BatchQuestionSpec, verifyErrors: verifyErrors + 1 };
-      } else if (factRetired(topic, ctx.dropKey)) {
+      } else {
+        recordFactDrop(topic, ctx.dropKey, ctx.fact);
+        if (isFactRetired(topic)) {
         // The planned fact keeps failing (the examiner rejected it twice, or any check rejected it three times): the
         // slot is given up (the drop is already counted), and the lane moves on to the next fact.
-      } else if (retries < MAX_TOPIC_RETRIES && !stopped && !signal?.aborted) {
+        } else if (retries < MAX_TOPIC_RETRIES && !stopped && !signal?.aborted) {
         // The call failed or the question was dropped: the same topic goes back in the queue, so it is written again.
         // The last rewrite of a demanding style (match, statements, calculation, picture) falls back to a plain style, so the slot is not lost.
         const plain: StyleId[] = ['one-liner', 'short-case', 'vignette'];
@@ -1925,6 +1966,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (fixed === null && canRepair) reportRepair('failed');
         else if (fixed) reportRepair('attempted');
         pending = { topic, idx, retries: retries + 1, hint: ctx.reason, slot: nextSlot, repaired: fixed ?? undefined };
+        }
       }
       onProgress?.(questions.length, count, completedCount, Math.max(completedCount, slotCounter));
       if (onBatch && questions.length > 0 && completedCount % Math.max(1, Math.floor(count / 2)) === 0) {

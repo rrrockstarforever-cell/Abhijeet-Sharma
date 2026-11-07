@@ -31,6 +31,104 @@ export interface ImageQuestionResult {
   verification: { pass: boolean; reason: string };
 }
 
+const IMAGE_SUBJECT_ALIASES: Record<string, string[]> = {
+  Radiology: ['radiology', 'radiodiagnosis and radiotherapy'],
+  Dermatology: ['dermatology', 'dermatology and venereology'],
+  Ophthalmology: ['ophthalmology'],
+  Pathology: ['pathology'],
+  Cardiology: ['cardiology'],
+  Orthopaedics: ['orthopaedics', 'orthopedics'],
+};
+
+const normalizeImageSubject = (value: string) => value.toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ').trim();
+
+export function imageBankSubjectsForLabels(labels: string[]): string[] {
+  const selected = new Set(labels.map(normalizeImageSubject));
+  return Object.entries(IMAGE_SUBJECT_ALIASES)
+    .filter(([, aliases]) => aliases.some((alias) => selected.has(normalizeImageSubject(alias))))
+    .map(([subject]) => subject);
+}
+
+export function selectVerifiedImageQuestions(results: Array<ImageQuestionResult | null>, count: number): ClinicalQuestion[] {
+  return results
+    .filter((result): result is ImageQuestionResult => Boolean(
+      result?.verification.pass && result.question.imageVerified === true && result.question.image,
+    ))
+    .slice(0, count)
+    .map((result) => result.question);
+}
+
+export function unsupportedImageDetailCode(
+  question: Pick<ClinicalQuestion, 'stem' | 'questionText' | 'options' | 'correctOption'>,
+  image: BankImage,
+): string | null {
+  const keyedAnswer = question.options.find((option) => option.id === question.correctOption)?.text || '';
+  const stemText = `${question.stem} ${question.questionText}`;
+  const text = `${stemText} ${keyedAnswer}`;
+  const trustedMetadata = `${image.ground_truth} ${image.body_part || ''} ${image.modality || ''}`;
+  const planeClaim = /\b(axial|sagittal|coronal|transverse)\b/i.exec(text)?.[1]?.toLowerCase();
+  const modalityAndPart = `${image.modality || ''} ${image.body_part || ''}`.toLowerCase();
+  // These are conventional acquisition planes strongly implied by the study type;
+  // arbitrary planes still need explicit support in the bank metadata.
+  const impliedPlanes = /\b(?:ct|computed tomography)\b/.test(modalityAndPart) && /\b(?:brain|head)\b/.test(modalityAndPart)
+    ? ['axial', 'transverse']
+    : /\bmri\b/.test(modalityAndPart) && /\bspine\b/.test(modalityAndPart)
+      ? ['sagittal', 'axial', 'transverse']
+      : [];
+  // A routine CT head/brain is conventionally acquired without IV contrast unless
+  // the bank explicitly says otherwise. Other CT regions do not imply a phase.
+  const impliedNonContrastHeadCt = /\b(?:ct|computed tomography)\b/.test(modalityAndPart)
+    && /\b(?:brain|head)\b/.test(modalityAndPart);
+  const claims: Array<[string, RegExp]> = [
+    ['skin-surface', /\b(?:palm|palms|palmar|volar)\b/i],
+    ['skin-surface', /\b(?:dorsum|dorsal|back of (?:the )?hand)\b/i],
+    ['skin-surface', /\b(?:sole|soles|plantar)\b/i],
+    ['scan-plane', /\b(?:axial|sagittal|coronal|transverse)\b/i],
+    ['contrast-phase', /\b(?:non[- ]?contrast|contrast[- ]enhanced|pre[- ]contrast|post[- ]contrast)\b/i],
+  ];
+  const unsupportedDetail = claims.find(([code, claim]) => claim.test(text) && !claim.test(trustedMetadata)
+    && !(code === 'scan-plane' && planeClaim && impliedPlanes.includes(planeClaim))
+    && !(code === 'contrast-phase' && /\bnon[- ]?contrast\b/i.test(text) && impliedNonContrastHeadCt));
+  if (unsupportedDetail) return unsupportedDetail[0];
+
+  const sideClaim = /\b(?:left|right|bilateral|unilateral)\b/i;
+  const visualNoun = '(?:image|radiograph|x-?ray|ct|mri|ecg|fundus|photograph|film|scan)';
+  // A side named before the picture ("right-sided chest X-ray") or after it ("X-ray shows a left ...") is a claim about the picture.
+  const visualSideClaim = new RegExp(`\\b(?:left|right|bilateral|unilateral)[- ]sided\\b[^.!?]{0,60}\\b${visualNoun}\\b`, 'i').test(stemText)
+    || new RegExp(`\\b${visualNoun}\\b[^.!?]{0,120}\\b(?:left|right|bilateral)\\b`, 'i').test(stemText);
+  const answerHasSide = sideClaim.test(keyedAnswer);
+  return (visualSideClaim || answerHasSide) && !sideClaim.test(trustedMetadata) ? 'laterality' : null;
+}
+
+export function hasUnsupportedImageDetailsClaim(
+  question: Pick<ClinicalQuestion, 'stem' | 'questionText' | 'options' | 'correctOption'>,
+  image: BankImage,
+): boolean {
+  return unsupportedImageDetailCode(question, image) !== null;
+}
+
+export function selectImageBankCandidates(candidateLists: BankImage[][], count: number): BankImage[] {
+  const uniqueDiagnoses: BankImage[] = [];
+  const sameDiagnosisAlternates: BankImage[] = [];
+  const imageIds = new Set<string>();
+  const diagnoses = new Set<string>();
+  const maxLength = Math.max(0, ...candidateLists.map((list) => list.length));
+  for (let i = 0; i < maxLength; i++) {
+    for (const list of candidateLists) {
+      const image = list[i];
+      if (!image || imageIds.has(image.image_id)) continue;
+      imageIds.add(image.image_id);
+      const diagnosis = String(image.ground_truth ?? '').trim().toLowerCase();
+      if (diagnosis && diagnoses.has(diagnosis)) sameDiagnosisAlternates.push(image);
+      else {
+        if (diagnosis) diagnoses.add(diagnosis);
+        uniqueDiagnoses.push(image);
+      }
+    }
+  }
+  return [...uniqueDiagnoses, ...sameDiagnosisAlternates].slice(0, count);
+}
+
 /**
  * One-line attribution for a bank image.
  *
@@ -73,8 +171,9 @@ export async function generateImageFirstQuestion(opts: {
   model?: string;
   signal?: AbortSignal;
   onVerify?: (v: { pass: boolean; reason: string }) => void;
+  onReject?: (code: string) => void;
 }): Promise<ImageQuestionResult | null> {
-  const { image, exam, difficultyTier, difficultySubLevel, optionCount, provider, model, signal, onVerify } = opts;
+  const { image, exam, difficultyTier, difficultySubLevel, optionCount, provider, model, signal, onVerify, onReject } = opts;
   const tier = difficultyTier === 'ALL' ? 'MEDIUM' : difficultyTier;
 
   // ---- Step 1: write the question FROM the image (server builds the prompt) ----
@@ -91,6 +190,7 @@ export async function generateImageFirstQuestion(opts: {
         imageId: image.image_id,
         modality: image.modality,
         subject: image.subject,
+        bodyPart: image.body_part || '',
         exam,
         difficultyTier: tier,
         optionCount,
@@ -111,12 +211,18 @@ export async function generateImageFirstQuestion(opts: {
     const msg = typeof body?.error === 'string' ? body.error : `Image-first generation failed (HTTP ${res.status}).`;
     // The model telling us the image does not show the claimed finding is a normal,
     // expected outcome — not a provider failure. Fall back to text-only.
-    if (res.status === 422 || /image_mismatch/i.test(msg)) return null;
+    if (res.status === 422 || /image_mismatch/i.test(msg)) {
+      onReject?.('image-mismatch');
+      return null;
+    }
     throw toAiError(res.status, msg);
   }
 
   const spec = body?.question;
-  if (!spec || typeof spec.stem !== 'string' || !spec.stem.trim()) return null;
+  if (!spec || typeof spec.stem !== 'string' || !spec.stem.trim()) {
+    onReject?.('empty-stem');
+    return null;
+  }
 
   // ---- Step 2: normalise options to the app's { id, text } shape ----
   const rawOptions = spec.options;
@@ -134,10 +240,16 @@ export async function generateImageFirstQuestion(opts: {
   }
   const letters = ['A', 'B', 'C', 'D', 'E'].slice(0, optionCount) as ('A' | 'B' | 'C' | 'D' | 'E')[];
   const entries = letters.filter((k) => byLetter[k]).map((k) => ({ id: k, text: byLetter[k] }));
-  if (entries.length !== optionCount) return null; // incomplete option set => unusable
+  if (entries.length !== optionCount) {
+    onReject?.('incomplete-options');
+    return null;
+  }
 
   const correct = String(spec.correctOption || '').trim().toUpperCase() as ClinicalQuestion['correctOption'];
-  if (!letters.includes(correct)) return null;
+  if (!letters.includes(correct)) {
+    onReject?.('invalid-answer-key');
+    return null;
+  }
 
   const question: ClinicalQuestion = {
     id: `IMG-${exam.replace('_', '')}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
@@ -168,9 +280,16 @@ export async function generateImageFirstQuestion(opts: {
     imageCaption: bankImageCaption(image),
     imageId: image.image_id,
     imageLicence: image.licence,
+    imageLicenceUrl: image.licenceUrl,
     imageGroundTruth: image.ground_truth,
     figureModality: image.modality,
   };
+
+  const detailFailure = unsupportedImageDetailCode(question, image);
+  if (detailFailure) {
+    onReject?.(`unsupported-${detailFailure}`);
+    return null;
+  }
 
   // ---- Step 3: verify the finished item against the image before returning it ----
   const claim = `${image.ground_truth}${image.modality ? ` (${image.modality})` : ''}`;
@@ -179,19 +298,31 @@ export async function generateImageFirstQuestion(opts: {
   // The server's vision timeout is generous (a reasoning model can be slow); this is
   // only a safety net so a wedged request cannot hang the batch forever.
   const timer = setTimeout(() => controller.abort(), 200_000);
+  let verificationErrored = false;
   try {
     const vres = await fetch('/api/images/verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageUrl: image.imageUrl, claim, modality: image.modality }),
+      body: JSON.stringify({
+        imageUrl: image.imageUrl,
+        claim,
+        modality: image.modality || '',
+        bodyPart: image.body_part || '',
+        questionStem: question.stem,
+        questionText: question.questionText,
+        correctAnswer: question.options.find((option) => option.id === question.correctOption)?.text || '',
+        explanation: question.explanation || '',
+        boardPearl: question.boardPearl || '',
+      }),
       signal: controller.signal,
     });
     const vbody: any = await vres.json().catch(() => ({}));
     verdict = {
-      pass: vbody?.pass === true,
+      pass: vres.ok && vbody?.pass === true,
       reason: typeof vbody?.reason === 'string' ? vbody.reason : vres.ok ? 'Not confirmed.' : `HTTP ${vres.status}`,
     };
   } catch (err: any) {
+    verificationErrored = true;
     // Fail closed: an unverifiable image must never be attached.
     verdict = { pass: false, reason: err?.name === 'AbortError' ? 'Verification timed out.' : (err?.message || 'Verification failed.') };
   } finally {
@@ -202,8 +333,10 @@ export async function generateImageFirstQuestion(opts: {
   question.imageVerifyReason = verdict.reason;
   onVerify?.(verdict);
 
-  // Only a verified image may be returned; otherwise the caller falls back to text-only.
-  if (!verdict.pass) return null;
+  if (!verdict.pass) {
+    onReject?.(verificationErrored ? 'verification-error' : 'vision-rejected');
+    return null;
+  }
 
   return {
     question,

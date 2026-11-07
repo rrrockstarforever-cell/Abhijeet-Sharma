@@ -1,8 +1,8 @@
 // Renders one VERIFIED illustration inside an AI explanation.
 //
 // The image was resolved and vision-verified by the server before it arrived here, so this
-// component is presentational only. It shows attribution + licence + source link (required
-// by the CC BY / BY-SA licences) and can be collapsed by the learner.
+// component is presentational only. It retains source and licence information alongside the image
+// for provenance and can be collapsed by the learner.
 import React, { useState } from 'react';
 import { ExternalLink, ImageIcon, Loader2 } from 'lucide-react';
 import type { ExplanationImage } from '../utils/explanationImages.ts';

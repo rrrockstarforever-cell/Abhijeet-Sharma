@@ -1,6 +1,7 @@
 // Persistent Question Bank Storage Manager (IndexedDB).
 // Reuses PulseMedDB (version 2) with new object stores; never destroys existing data.
 // Every generated question is saved here automatically with full metadata + audit.
+import { stripUnlicensedImageFields } from './imageLicense.ts';
 
 const DB_NAME = 'PulseMedDB';
 const DB_VERSION = 2;
@@ -160,6 +161,11 @@ export interface QuestionRecord {
   explanation?: string;
   image?: string;
   imageCaption?: string;
+  imageSourceUrl?: string;
+  imageLicence?: string;
+  imageLicenceUrl?: string;
+  imageId?: string;
+  imageVerified?: boolean;
   sourceType?: string;
   tags?: string[];
   contentFingerprint: string;
@@ -308,6 +314,15 @@ export async function saveGeneratedQuestion(
   }
 
   const now = new Date().toISOString();
+  const imageFields = stripUnlicensedImageFields({
+    image: question.image,
+    imageCaption: question.imageCaption,
+    imageSourceUrl: question.imageSourceUrl,
+    imageLicence: question.imageLicence,
+    imageLicenceUrl: question.imageLicenceUrl,
+    imageId: question.imageId,
+    imageVerified: question.imageVerified,
+  });
   const record: QuestionRecord = {
     id,
     version: 1,
@@ -323,8 +338,13 @@ export async function saveGeneratedQuestion(
     options: question.options,
     correctOption: question.correctOption,
     explanation: question.explanation,
-    image: question.image,
-    imageCaption: question.imageCaption,
+    image: imageFields.image,
+    imageCaption: imageFields.imageCaption,
+    imageSourceUrl: imageFields.imageSourceUrl,
+    imageLicence: imageFields.imageLicence,
+    imageLicenceUrl: imageFields.imageLicenceUrl,
+    imageId: imageFields.imageId,
+    imageVerified: imageFields.imageVerified,
     sourceType: question.sourceType,
     tags: question.citations || [],
     contentFingerprint: fingerprint(question),
@@ -357,11 +377,12 @@ export async function saveGeneratedQuestion(
 // ---------- Queries ----------
 
 export async function getQuestion(id: string): Promise<QuestionRecord | null> {
-  return (await get(STORES.questions, id)) as QuestionRecord | null;
+  const record = (await get(STORES.questions, id)) as QuestionRecord | null;
+  return record ? stripUnlicensedImageFields(record) : null;
 }
 
 export async function listQuestions(filters?: { examId?: string; bankId?: string; subjectId?: string; status?: string }): Promise<QuestionRecord[]> {
-  let rows = (await getAll(STORES.questions)) as QuestionRecord[];
+  let rows = ((await getAll(STORES.questions)) as QuestionRecord[]).map(stripUnlicensedImageFields);
   if (filters?.examId) rows = rows.filter((r) => r.examId === filters.examId);
   if (filters?.bankId) rows = rows.filter((r) => r.bankId === filters.bankId);
   if (filters?.subjectId) rows = rows.filter((r) => r.subjectId === filters.subjectId);

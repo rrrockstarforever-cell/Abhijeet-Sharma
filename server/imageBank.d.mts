@@ -55,6 +55,8 @@ export declare function buildImageBank(options?: {
   throttleMs?: number;
   /** Max attempts per seed with exponential backoff on HTTP 429. Default 4. */
   maxAttempts?: number;
+  /** Search injection for deterministic tests; production defaults to the live licensed search. */
+  search?: (query: string, options?: { limit?: number }) => Promise<{ results: any[]; errors?: string[] }>;
   /**
    * Optional async verifier: return true to admit the entry. Used to vision-confirm at
    * harvest time so the bank only holds images that really show the claimed finding.
@@ -75,10 +77,10 @@ export declare function queryImageBank(options?: {
 
 export declare function getBankImage(imageId: string): BankEntry | null;
 
-/**
- * Token-overlap search over the trusted bank fields, for explanation image cues.
- * Returns candidates only — callers must vision-verify before showing one.
- */
+/** Score topic/diagnosis agreement from the trusted metadata; zero means no match. */
+export declare function bankTopicScore(entry: Partial<BankEntry>, query: string): number;
+
+/** Diagnosis-aware shortlist over the trusted bank fields; callers must vision-verify before use. */
 export declare function searchBankByText(query: string, options?: { subject?: string; limit?: number }): BankEntry[];
 
 export declare function bankStats(): BankStats;

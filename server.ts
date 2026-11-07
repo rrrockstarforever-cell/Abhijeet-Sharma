@@ -19,7 +19,7 @@ import {
 import { aiLog } from './server/oauth.mjs';
 import { research as webResearch, literatureSources, SOURCE_REGISTRY } from './server/web.mjs';
 import { pyqWeights, pyqSource } from './server/pyqFrequency.mjs';
-import { searchImages, fetchImage, REFERENCE_SOURCES } from './server/images.mjs';
+import { searchImages, fetchImage, REFERENCE_SOURCES, parseVisionVerdict, buildVisionVerificationPrompt } from './server/images.mjs';
 import { buildImageBank, loadImageBank, queryImageBank, getBankImage, bankStats, rejectImage, searchBankByText } from './server/imageBank.mjs';
 import { generateQuestionFromImage } from './server/visionQuestion.mjs';
 import {
@@ -298,6 +298,8 @@ const nvidiaStats = {
   dropped: {} as Record<string, number>,
   // Repair outcomes for rejected drafts: attempted (sent), accepted (kept after its checks), failed (no repair returned).
   repairs: {} as Record<string, number>,
+  tokens: { input: 0, output: 0, total: 0, calls: 0, unreported: 0 },
+  tokenStages: {} as Record<string, { calls: number; input: number; output: number; total: number }>,
   byModel: {} as Record<string, Record<NvidiaAttemptOutcome, number>>,
   events: [] as { at: string; model: string; outcome: string; detail: string }[],
 };
@@ -309,6 +311,26 @@ function nvidiaAttempt(model: string, outcome: NvidiaAttemptOutcome, detail = ''
   const counts = (nvidiaStats.byModel[model] ??= { ok: 0, refused: 0, error: 0, timeout: 0 });
   counts[outcome] += 1;
   nvidiaEvent(model, outcome, detail);
+}
+function recordTokenUsage(purpose: string | undefined, body: any): void {
+  const usage = body?.usage ?? body?.token_usage ?? body?.usageMetadata;
+  const input = Number(usage?.prompt_tokens ?? usage?.input_tokens ?? usage?.promptTokenCount ?? 0);
+  const output = Number(usage?.completion_tokens ?? usage?.output_tokens ?? usage?.candidatesTokenCount ?? 0);
+  const total = Number(usage?.total_tokens ?? usage?.totalTokenCount ?? input + output);
+  if (![input, output, total].every(Number.isFinite) || total <= 0) {
+    nvidiaStats.tokens.unreported += 1;
+    return;
+  }
+  const stage = String(purpose || 'other').slice(0, 40);
+  const row = (nvidiaStats.tokenStages[stage] ??= { calls: 0, input: 0, output: 0, total: 0 });
+  row.calls += 1;
+  row.input += input;
+  row.output += output;
+  row.total += total;
+  nvidiaStats.tokens.calls += 1;
+  nvidiaStats.tokens.input += input;
+  nvidiaStats.tokens.output += output;
+  nvidiaStats.tokens.total += total;
 }
 function nvidiaFinish(model: string, outcome: NvidiaFinishOutcome, detail = '') {
   nvidiaStats.inFlight = Math.max(0, nvidiaStats.inFlight - 1);
@@ -558,6 +580,7 @@ async function runCompletion(opts: {
     const content = body?.choices?.[0]?.message?.content;
     const text = typeof content === 'string' ? content : '';
     aiLog({ provider: 'vyce', model: model_, status: r.status, text_len: text.length, json: !!json });
+    recordTokenUsage(opts.purpose, body);
     if (!text.trim()) {
       throw new ApiError(`VyceAI returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || 'unknown'}).`, 502);
     }
@@ -661,6 +684,7 @@ async function runCompletion(opts: {
     const content = body?.choices?.[0]?.message?.content;
     const text = typeof content === 'string' ? content : '';
     aiLog({ provider: 'nvidia', model: model_, status: httpRes.status, text_len: text.length, json: !!json });
+    recordTokenUsage(opts.purpose, body);
     if (!text.trim()) {
       nvidiaFinish(model_, 'failed', 'empty');
       throw new ApiError(`NVIDIA returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || 'unknown'}).`, 502);
@@ -1908,6 +1932,8 @@ app.post('/api/ai/nvidia-stats/reset', (_req: Request, res: Response) => {
   nvidiaStats.accepted = 0;
   nvidiaStats.dropped = {};
   nvidiaStats.repairs = {};
+  nvidiaStats.tokens = { input: 0, output: 0, total: 0, calls: 0, unreported: 0 };
+  nvidiaStats.tokenStages = {};
   res.json({ ok: true });
 });
 
@@ -1960,6 +1986,8 @@ app.get('/api/ai/nvidia-stats', (_req: Request, res: Response) => {
     questionsStopped: f.stopped,
     accepted: nvidiaStats.accepted,
     repairs: nvidiaStats.repairs,
+    tokens: nvidiaStats.tokens,
+    tokenStages: nvidiaStats.tokenStages,
     dropped: nvidiaStats.dropped,
     attempts: totals,
     byModel: Object.fromEntries(Object.entries(nvidiaStats.byModel).map(([k, v]) => [k.replace('nvidia/', ''), v])),
@@ -2326,8 +2354,8 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/images/search?q=... -> licence-filtered clinical figures from Open-i (NLM).
-// Only CC BY / CC BY-SA / CC0 / public-domain results are returned; NC/ND are dropped.
+// GET /api/images/search?q=... -> PD/CC0-licensed clinical figures from Open-i (NLM) and Wikimedia Commons.
+// Results also need strong metadata relevance; weak or uncertain matches are omitted.
 app.get('/api/images/search', async (req: Request, res: Response) => {
   const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   if (!query) return res.status(400).json({ error: 'q is required.' });
@@ -2361,6 +2389,7 @@ async function visionVerify(
   claim: string,
   modality: string,
   key: string,
+  questionContext: { questionStem?: string; questionText?: string; correctAnswer?: string; explanation?: string; boardPearl?: string; bodyPart?: string } = {},
   attempt = 0,
 ): Promise<{ pass: boolean; reason: string; debug?: { raw: string; finish?: string } }> {
   const { buffer, type } = await fetchImage(imageUrl);
@@ -2371,16 +2400,16 @@ async function visionVerify(
   }
   const dataUrl = `data:${type};base64,${buffer.toString('base64')}`;
   const model_ = process.env.VISION_MODEL || DEFAULT_MODELS.nvidia;
-  const instruction = [
-    'One image is shown, attached to a medical exam question.',
-    `The question claims the image shows: "${claim}"${modality ? ` (modality: ${modality})` : ''}.`,
-    'Look ONLY at the pixels. Decide:',
-    '1. Does this image actually depict that finding / condition / diagnosis?',
-    '2. Is the modality consistent (an ECG is not a photo; a chest X-ray is not a histology slide)?',
-    'First say, in "shows", what this image specifically shows (the exact condition or finding if you can tell, for example "bovine spongiform encephalopathy, brain histology" or "adrenoleukodystrophy MRI").',
-    'Then set pass=true ONLY if what it shows is the SAME specific condition or finding as the claim. A picture of a different disease in the same modality (a brain slide for a kidney disease, an MRI of another white-matter disease) is pass=false. A picture that is only "consistent with" the claim, or where you cannot tell the specific condition from the pixels alone, is pass=false. If the image is unrelated, a chart, text or a different body part, pass=false.',
-    'Answer with ONLY this JSON object and nothing else: {"shows": "what the image shows", "pass": true, "reason": "one short sentence"}',
-  ].join('\n');
+  const instruction = buildVisionVerificationPrompt({
+    claim,
+    modality,
+    questionStem: questionContext.questionStem,
+    questionText: questionContext.questionText,
+    correctAnswer: questionContext.correctAnswer,
+    explanation: questionContext.explanation,
+    boardPearl: questionContext.boardPearl,
+    bodyPart: questionContext.bodyPart,
+  });
   const payload = JSON.stringify({
     model: model_,
     messages: [
@@ -2418,7 +2447,7 @@ async function visionVerify(
     // image is not discarded (and forced to text-only) because NVIDIA hiccuped.
     if (r.status >= 500 && attempt < 1) {
       await new Promise((resolve) => setTimeout(resolve, 1500));
-      return visionVerify(imageUrl, claim, modality, key, attempt + 1);
+      return visionVerify(imageUrl, claim, modality, key, questionContext, attempt + 1);
     }
     aiLog({ provider: 'nvidia', model: model_, status: r.status, error: true, route: 'images/verify' });
     return { pass: false, reason: `Vision check failed (HTTP ${r.status}) — image skipped.` };
@@ -2433,23 +2462,13 @@ async function visionVerify(
   // Some reasoning models put the answer (or everything) in reasoning_content.
   if (!text.trim() && typeof msg?.reasoning_content === 'string') text = msg.reasoning_content;
   const finish = body?.choices?.[0]?.finish_reason;
-  // Vision models sometimes emit almost-JSON (an unquoted string value, stray prose).
-  // This verdict is only a boolean + a short sentence, so extract both tolerantly
-  // rather than throwing away a real answer because of one missing quote.
-  const passMatch = text.match(/"pass"\s*:\s*(true|false)/i);
-  const reasonMatch = text.match(/"reason"\s*:\s*"?([^"}\n]+)"?/i);
-  const parsed = parseJsonBlock(text);
-  const pass = parsed?.pass === true || (!parsed && passMatch?.[1]?.toLowerCase() === 'true');
-  const parsedReason = typeof parsed?.reason === 'string' && parsed.reason.trim()
-    ? parsed.reason.trim()
-    : reasonMatch?.[1]?.trim();
-  const reason = parsedReason
-    ? parsedReason.slice(0, 240)
-    : pass
-      ? 'Verified.'
-      : finish === 'length'
-        ? 'Vision model ran out of tokens before answering — image skipped.'
-        : 'Model did not confirm the claimed finding.';
+  const verdict = parseVisionVerdict(text);
+  const pass = verdict?.pass === true;
+  const reason = verdict?.reason || (pass
+    ? 'Verified.'
+    : finish === 'length'
+      ? 'Vision model ran out of tokens before answering — image skipped.'
+      : 'Model did not return a complete structured verdict — image skipped.');
   aiLog({ provider: 'nvidia', model: model_, status: r.status, route: 'images/verify', pass, finish, text_len: text.length });
   return process.env.VISION_DEBUG
     ? { pass, reason, debug: { raw: text.slice(0, 1500), finish } }
@@ -2465,6 +2484,12 @@ app.post('/api/images/verify', async (req: Request, res: Response) => {
   const imageUrl = typeof req.body?.imageUrl === 'string' ? req.body.imageUrl : '';
   const claim = typeof req.body?.claim === 'string' ? req.body.claim.trim().slice(0, 800) : '';
   const modality = typeof req.body?.modality === 'string' ? req.body.modality.trim().slice(0, 40) : '';
+  const questionStem = typeof req.body?.questionStem === 'string' ? req.body.questionStem.trim().slice(0, 4000) : '';
+  const questionText = typeof req.body?.questionText === 'string' ? req.body.questionText.trim().slice(0, 2000) : '';
+  const correctAnswer = typeof req.body?.correctAnswer === 'string' ? req.body.correctAnswer.trim().slice(0, 500) : '';
+  const explanation = typeof req.body?.explanation === 'string' ? req.body.explanation.trim().slice(0, 3000) : '';
+  const boardPearl = typeof req.body?.boardPearl === 'string' ? req.body.boardPearl.trim().slice(0, 1000) : '';
+  const bodyPart = typeof req.body?.bodyPart === 'string' ? req.body.bodyPart.trim().slice(0, 60) : '';
   if (!imageUrl || !claim) {
     return res.status(400).json({ error: 'imageUrl and claim are required.' });
   }
@@ -2473,7 +2498,7 @@ app.post('/api/images/verify', async (req: Request, res: Response) => {
     return res.json({ pass: false, reason: 'No vision provider connected — image skipped.' });
   }
   try {
-    const verdict = await visionVerify(imageUrl, claim, modality, key);
+    const verdict = await visionVerify(imageUrl, claim, modality, key, { questionStem, questionText, correctAnswer, explanation, boardPearl, bodyPart });
     return res.json(verdict);
   } catch (err: any) {
     return res.json({ pass: false, reason: err?.message || 'Vision check failed — image skipped.' });
@@ -2543,8 +2568,11 @@ app.get('/api/images/bank/entries', (req: Request, res: Response) => {
   try {
     const subject = typeof req.query.subject === 'string' ? req.query.subject : undefined;
     const modality = typeof req.query.modality === 'string' ? req.query.modality : undefined;
+    const query = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 300) : '';
     const limit = Number(req.query.limit) || 6;
-    const rows = subject || modality ? queryImageBank({ subject, modality, limit }) : loadImageBank().slice(0, limit);
+    const rows = query
+      ? searchBankByText(query, { subject, limit })
+      : subject || modality ? queryImageBank({ subject, modality, limit }) : loadImageBank().slice(0, limit);
     return res.json({ success: true, total: loadImageBank().length, results: rows });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Could not read the image bank.' });
@@ -2624,17 +2652,27 @@ app.post('/api/images/generate-question', async (req: Request, res: Response) =>
     return res.status(401).json({ error: notConnectedMessage('nvidia') });
   }
   try {
-    const question = await generateQuestionFromImage({
+    const writeOnce = () => generateQuestionFromImage({
       imageUrl,
       groundTruth,
       modality: typeof body.modality === 'string' ? body.modality : '',
       subject: typeof body.subject === 'string' ? body.subject : '',
+      bodyPart: typeof body.bodyPart === 'string' ? body.bodyPart.trim().slice(0, 60) : '',
       exam: typeof body.exam === 'string' ? body.exam : 'NEET_PG',
       difficultyTier: typeof body.difficultyTier === 'string' ? body.difficultyTier : 'MEDIUM',
       optionCount: Number(body.optionCount) === 5 ? 5 : 4,
       apiKey: key,
       model: typeof body.model === 'string' ? body.model : process.env.VISION_MODEL || DEFAULT_MODELS.nvidia,
     });
+    let question;
+    try {
+      question = await writeOnce();
+    } catch (firstErr: any) {
+      // The vision model sometimes answers with text that is not JSON. That is a one-off, so one more attempt is made
+      // before the image is given up; a real mismatch or a provider outage is not retried.
+      if (!/did not return usable JSON/i.test(String(firstErr?.message || ''))) throw firstErr;
+      question = await writeOnce();
+    }
     return res.json({ success: true, question, model: process.env.VISION_MODEL || DEFAULT_MODELS.nvidia });
   } catch (err: any) {
     const msg = String(err?.message || 'Image-first generation failed.');
@@ -2653,8 +2691,8 @@ app.post('/api/images/generate-question', async (req: Request, res: Response) =>
 app.get('/api/images/sources', (_req: Request, res: Response) => {
   res.json({
     embedded: [
-      { name: 'Open-i (NLM / PubMed Central)', url: 'https://openi.nlm.nih.gov/', note: 'Live search; CC BY / BY-SA / CC0 / public domain only.' },
-      { name: 'Wikimedia Commons (CDC PHIL and others)', url: 'https://commons.wikimedia.org/', note: 'Curated verified library shipped with the app.' },
+      { name: 'Open-i (NLM / PubMed Central)', url: 'https://openi.nlm.nih.gov/', note: 'Live search; CC0 and Public Domain items only.' },
+      { name: 'Wikimedia Commons (CDC PHIL and others)', url: 'https://commons.wikimedia.org/', note: 'PD/CC0 images only; verify the license shown for each source file.' },
     ],
     reference: REFERENCE_SOURCES,
   });
