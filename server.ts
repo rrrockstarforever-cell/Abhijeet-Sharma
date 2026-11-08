@@ -78,6 +78,7 @@ const DEFAULT_MODELS: Record<string, string> = {
   custom: 'gpt-4o-mini',
   nvidia: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
   vyce: 'deepseek-v4.1',
+  deeprelay: 'deeprelay/deepseek-v4.1-flash',
 };
 
 // UI provider ids -> old oauth.mjs internal ids
@@ -109,6 +110,9 @@ const VYCE_BASE_URL = 'https://vyceai.com/v1';
 function vyceKey(): string {
   return (process.env.VYCE_API_KEY || '').trim();
 }
+
+const DEEPRELAY_BASE_URL = 'https://api.deeprelay.ai/v1';
+function deepRelayKey(): string { return (process.env.DEEPRELAY_API_KEY || '').trim(); }
 
 /**
  * Map the app's effort levels onto NVIDIA's chat-template reasoning controls.
@@ -256,6 +260,8 @@ function isProviderConnected(providerId: string): boolean {
   if (providerId === 'opencode') return Boolean(opencodeKey());
   if (providerId === 'nvidia') return Boolean(nvidiaKey());
   if (providerId === 'vyce') return Boolean(vyceKey());
+  if (providerId === 'deeprelay') return Boolean(deepRelayKey());
+  if (providerId === 'deeprelay') return Boolean(deepRelayKey());
   if (providerId === 'custom') return Boolean(getActiveCustomEndpoint());
   try {
     const s = oauthStatus();
@@ -279,6 +285,7 @@ function notConnectedMessage(providerId: string): string {
   if (providerId === 'vyce') {
     return 'VyceAI is not connected. Paste your VyceAI API key in Settings → AI Subscription Hub.';
   }
+  if (providerId === 'deeprelay') return 'Deep Relay is not connected. Paste your Deep Relay API key in Settings → AI Subscription Hub.';
   if (providerId === 'custom') {
     return 'Custom provider is not connected. Add a custom endpoint in Settings → AI Subscription Hub.';
   }
@@ -595,6 +602,19 @@ async function runCompletion(opts: {
     }
     return text;
   }
+  if (provider === 'deeprelay') {
+    const key = deepRelayKey();
+    if (!key) throw new ApiError(notConnectedMessage('deeprelay'), 401);
+    const model_ = model || DEFAULT_MODELS.deeprelay;
+    const r = await fetch(`${DEEPRELAY_BASE_URL}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, body: JSON.stringify({ model: model_, messages: [...(system ? [{ role: 'system', content: system }] : []), ...messages.map((m) => ({ role: m.role, content: m.content }))], temperature: 0.7, ...(json ? { response_format: { type: 'json_object' } } : {}) }), ...(signal ? { signal } : {}) });
+    const raw = await r.text(); let body: any = {};
+    try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
+    if (!r.ok) { aiLog({ provider: 'deeprelay', model: model_, status: r.status, error: true }); throw new ApiError(`Deep Relay: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502); }
+    const content = body?.choices?.[0]?.message?.content; const text = typeof content === 'string' ? content : '';
+    aiLog({ provider: 'deeprelay', model: model_, status: r.status, text_len: text.length, json: !!json }); recordTokenUsage(opts.purpose, body);
+    if (!text.trim()) throw new ApiError(`Deep Relay returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || 'unknown'}).`, 502);
+    return text;
+  }
 
   if (provider === 'nvidia') {
     const key = nvidiaKey();
@@ -747,6 +767,7 @@ app.get('/api/oauth/status', (req: Request, res: Response) => {
       opencode: { connected: isProviderConnected('opencode') },
       nvidia: { connected: isProviderConnected('nvidia') },
       vyce: { connected: isProviderConnected('vyce') },
+      deeprelay: { connected: isProviderConnected('deeprelay') },
       custom: { connected: isProviderConnected('custom') },
     },
     defaults: DEFAULT_MODELS,
@@ -1270,6 +1291,13 @@ app.post('/api/settings/vyce-key', (req: Request, res: Response) => {
   }
 });
 
+app.post('/api/settings/deeprelay-key', (req: Request, res: Response) => {
+  const key = String(req.body?.apiKey || '').trim();
+  if (!/^[A-Za-z0-9_.\-]{10,}$/.test(key)) return res.status(400).json({ error: 'That does not look like a valid Deep Relay API key.' });
+  try { writeEnvValue('DEEPRELAY_API_KEY', key); return res.json({ ok: true, connected: true }); }
+  catch (err: any) { return res.status(500).json({ error: err?.message || 'Could not save the Deep Relay API key.' }); }
+});
+
 // ==========================================
 // CUSTOM ENDPOINTS (user-configurable OpenAI-compatible endpoints)
 // ==========================================
@@ -1701,11 +1729,22 @@ async function listVyceModels(): Promise<{ models: { id: string; name: string; s
   }
 }
 
+async function listDeepRelayModels(): Promise<{ models: { id: string; name: string; source: string }[]; error?: string }> {
+  if (!isProviderConnected('deeprelay')) return { models: [], error: 'No Deep Relay API key saved.' };
+  try {
+    const r = await fetch(`${DEEPRELAY_BASE_URL}/models`, { method: 'GET', headers: { Authorization: `Bearer ${deepRelayKey()}` } });
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(providerErrorText(b, r.status));
+    const rows: any[] = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
+    return { models: rows.map((m) => ({ id: String(m?.id ?? m?.name ?? ''), name: String(m?.name || m?.id || ''), source: 'account' })).filter((m) => m.id) };
+  } catch (e: any) { return { models: [], error: e?.message || 'Could not list Deep Relay models.' }; }
+}
+
 app.get('/api/models/available', async (req: Request, res: Response) => {
   const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
   const probe = req.query.probe === '1' || req.query.probe === 'true';
   const only = String(req.query.provider || '').trim();
-  if (only && !['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'nvidia', 'vyce'].includes(only)) {
+  if (only && !['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'nvidia', 'vyce', 'deeprelay'].includes(only)) {
     return res.status(400).json({ error: `Unknown provider: ${only}` });
   }
   // The full, unprobed list is cacheable; targeted or probed requests are not.
@@ -1762,6 +1801,9 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
     providers.vyce = vy.models;
     if (vy.error) errors.vyce = vy.error;
   }
+  if (!only || only === 'deeprelay') {
+    const dr = await listDeepRelayModels(); providers.deeprelay = dr.models; if (dr.error) errors.deeprelay = dr.error;
+  }
 
   const payload = {
     providers,
@@ -1779,7 +1821,7 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
 app.post('/api/models/probe', async (req: Request, res: Response) => {
   const provider = String(req.body?.provider || '').trim();
   const model = String(req.body?.model || '').trim();
-  if (!['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'nvidia', 'vyce'].includes(provider)) {
+  if (!['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'nvidia', 'vyce', 'deeprelay'].includes(provider)) {
     return res.status(400).json({ error: 'Choose a provider to test.' });
   }
   if (!model || model.length > 200) {
@@ -2939,7 +2981,7 @@ app.get('/api/providers/status', (req: Request, res: Response) => {
   const customEndpoints = readCustomEndpoints();
   res.json({
     providers: [
-      ...(['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia', 'vyce'] as string[]).map((id) => ({
+      ...(['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia', 'vyce', 'deeprelay'] as string[]).map((id) => ({
         id,
         model: DEFAULT_MODELS[id],
         connected: isProviderConnected(id),

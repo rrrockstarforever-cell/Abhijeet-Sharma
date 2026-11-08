@@ -53,21 +53,6 @@ export function reviewQuestion(question: ClinicalQuestion, runLlm = false): Prom
   }).then((r) => r.json().then((j) => (r.ok ? (j.review as QAReview) : Promise.reject(new Error(j.error || 'QA review failed.')))));
 }
 
-export function reviewBatch(questions: ClinicalQuestion[]): Promise<QAReview[]> {
-  return fetch('/api/qa/review-batch', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      questions: questions.map((q) => ({
-        id: q.id, stem: q.stem, questionText: q.questionText, options: q.options,
-        correctOption: q.correctOption, explanation: q.explanation, subject: q.subject,
-        subtopic: q.subtopic, examType: q.examType, image: q.image, imageCaption: q.imageCaption,
-      })),
-      runLlm: false,
-      ...workBody(),
-    }),
-  }).then((r) => r.json().then((j) => (r.ok ? (j.reviews as QAReview[]) : Promise.reject(new Error(j.error || 'QA batch failed.')))));
-}
 
 /** Second mechanism: refine generated questions before QA. Removes answer leakage,
  *  obvious hints, and option-structure telegraphing. Falls back to the original list. */
@@ -112,9 +97,3 @@ export function updateReviewStatus(id: string, status: string): void {
   persistBank(bank);
 }
 
-export function loadReviews(): QAReview[] {
-  try {
-    const raw = localStorage.getItem(REVIEWS_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
-}

@@ -43,10 +43,12 @@ const EXAM_CARDS: { id: ExamType; label: string; storageKeys: string[] }[] = [
 ];
 
 const loadStoredExamDate = (storageKeys: string[]): string => {
-  for (const k of storageKeys) {
-    const val = localStorage.getItem(k);
-    if (val) return val;
-  }
+  try {
+    for (const k of storageKeys) {
+      const val = localStorage.getItem(k);
+      if (val) return val;
+    }
+  } catch { /* storage blocked or unavailable */ }
   return '';
 };
 
@@ -57,16 +59,16 @@ const loadStoredExamDate = (storageKeys: string[]): string => {
 
 const loadStoredDateList = (storageKeys: string[], fallback: string): string[] => {
   for (const key of storageKeys) {
-    const raw = localStorage.getItem(`exam.dates.${key.split('.').pop()}`);
-    if (raw) {
-      try {
+    try {
+      const raw = localStorage.getItem(`exam.dates.${key.split('.').pop()}`);
+      if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
           const clean = parsed.filter((v: unknown): v is string => typeof v === 'string' && !Number.isNaN(new Date(v).getTime()));
           if (clean.length) return clean;
         }
-      } catch { /* old or corrupt value — fall through to the single date */ }
-    }
+      }
+    } catch { /* storage blocked or corrupt value — fall through to the single date */ }
   }
   return fallback ? [fallback] : [];
 };
@@ -287,19 +289,44 @@ export const Sidebar: React.FC<SidebarProps> = ({
     };
   };
 
-  const navItems = [
-    { id: 'analytics' as AppView, label: 'Performance Analytics', icon: BarChart3 },
-    { id: 'practice' as AppView, label: 'Practice Builder', icon: FileQuestion },
-    { id: 'question-bank' as AppView, label: 'Question Bank', icon: Database },
-    { id: 'test-runner' as AppView, label: 'Active Test Runner', icon: Timer, badge: 'Live' },
-    { id: 'mistakes' as AppView, label: 'Mistakes & Spaced Review', icon: AlertOctagon, badge: srsDueCount > 0 ? `${srsDueCount} due` : unresolvedMistakesCount > 0 ? String(unresolvedMistakesCount) : undefined },
-    { id: 'highlights' as AppView, label: 'Highlights & Memory', icon: Bookmark },
-    { id: 'ai-tutor' as AppView, label: 'Clinical AI Tutor', icon: Brain },
-    { id: 'pdf-reader' as AppView, label: 'PDF Reader & OCR', icon: BookOpen },
-    { id: 'research' as AppView, label: 'Clinical Evidence Browser', icon: Compass },
-    { id: 'image-review' as AppView, label: 'Image Question Review', icon: Images },
-    { id: 'qa' as AppView, label: 'QA & Benchmark', icon: ShieldCheck },
-    { id: 'settings' as AppView, label: 'AI Subscriptions & OCR', icon: Sliders },
+  const navSections = [
+    {
+      label: 'Study',
+      items: [
+        { id: 'analytics' as AppView, label: 'Performance Analytics', icon: BarChart3 },
+        { id: 'question-bank' as AppView, label: 'Question Bank', icon: Database },
+        { id: 'pdf-reader' as AppView, label: 'PDF Reader & OCR', icon: BookOpen },
+        { id: 'highlights' as AppView, label: 'Highlights & Memory', icon: Bookmark },
+      ],
+    },
+    {
+      label: 'Practice',
+      items: [
+        { id: 'practice' as AppView, label: 'Practice Builder', icon: FileQuestion },
+        { id: 'test-runner' as AppView, label: 'Active Test Runner', icon: Timer, badge: 'Live' },
+      ],
+    },
+    {
+      label: 'Review',
+      items: [
+        { id: 'mistakes' as AppView, label: 'Mistakes & Spaced Review', icon: AlertOctagon, badge: srsDueCount > 0 ? `${srsDueCount} due` : unresolvedMistakesCount > 0 ? String(unresolvedMistakesCount) : undefined },
+        { id: 'image-review' as AppView, label: 'Image Question Review', icon: Images },
+      ],
+    },
+    {
+      label: 'Tools',
+      items: [
+        { id: 'ai-tutor' as AppView, label: 'Clinical AI Tutor', icon: Brain },
+        { id: 'research' as AppView, label: 'Clinical Evidence Browser', icon: Compass },
+        { id: 'qa' as AppView, label: 'QA & Benchmark', icon: ShieldCheck },
+      ],
+    },
+    {
+      label: 'Settings',
+      items: [
+        { id: 'settings' as AppView, label: 'AI Subscriptions & OCR', icon: Sliders },
+      ],
+    },
   ];
 
   return (
@@ -357,8 +384,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       {/* Navigation List */}
-      <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-1">
-        {navItems.map((item) => {
+      <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-3">
+        {navSections.map((section) => (
+          <section key={section.label} aria-label={section.label} className="space-y-1">
+            <h2 className="px-3.5 pt-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              {section.label}
+            </h2>
+            {section.items.map((item) => {
           const isActive = currentView === item.id;
           const Icon = item.icon;
 
@@ -396,7 +428,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               )}
             </button>
           );
-        })}
+            })}
+          </section>
+        ))}
       </nav>
 
       {/* Real Live Countdown Cards per Exam */}
@@ -471,7 +505,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         type="datetime-local"
                         value={tempDateInput}
                         onChange={(e) => setTempDateInput(e.target.value)}
-                        className="flex-1 min-w-0 px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[11px] text-white focus:outline-none focus:border-[#0f8b8d]"
+                        className="flex-1 min-w-0 px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-[11px] text-slate-800 dark:text-white focus:outline-none focus:border-[#0f8b8d]"
                       />
                       <button
                         type="button"
@@ -489,7 +523,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       value={pasteInput}
                       onChange={(e) => detectDates(e.target.value)}
                       placeholder="Paste dates or exam notice…"
-                      className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-white placeholder:text-slate-500 focus:outline-none focus:border-[#0f8b8d]"
+                      className="w-full px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-[10px] text-slate-800 dark:text-white placeholder:text-slate-500 focus:outline-none focus:border-[#0f8b8d]"
                     />
 
                     {/* Internet check, restricted to the official exam body. Suggests only. */}
@@ -539,7 +573,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         <select
                           value={draftSelected}
                           onChange={(e) => setDraftSelected(e.target.value)}
-                          className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-white focus:outline-none focus:border-[#0f8b8d]"
+                          className="w-full px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-[10px] text-slate-800 dark:text-white focus:outline-none focus:border-[#0f8b8d]"
                         >
                           {draftDates.map((d) => (
                             <option key={d} value={d}>
@@ -649,7 +683,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             value={dateVal}
                             onClick={(e) => e.stopPropagation()}
                             onChange={(e) => selectExamDate(exam.id, exam.storageKeys, e.target.value)}
-                            className="mt-1 w-full px-1.5 py-0.5 bg-slate-900/80 border border-slate-700 rounded text-[10px] text-slate-200 focus:outline-none focus:border-[#0f8b8d]"
+                            className="mt-1 w-full px-1.5 py-0.5 bg-white dark:bg-slate-900/80 border border-slate-300 dark:border-slate-700 rounded text-[10px] text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#0f8b8d]"
                             title="Choose which exam date to count down to"
                           >
                             {examDateLists[exam.id].map((d) => (

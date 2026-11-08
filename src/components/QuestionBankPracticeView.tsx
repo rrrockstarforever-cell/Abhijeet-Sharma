@@ -279,11 +279,14 @@ const parseRecallText = (text: string): PastedRecallParse => {
 interface QuestionBankPracticeViewProps {
   onNavigate: (view: AppView) => void;
   onLaunchTest: (questions: ClinicalQuestion[], mode: 'EXAM' | 'TUTOR', exam: ExamType) => void;
+  /** Subjects to pre-select, for example a weak subject sent from the analytics remediation link. */
+  initialSubjects?: string[];
 }
 
 export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> = ({
   onNavigate,
-  onLaunchTest
+  onLaunchTest,
+  initialSubjects
 }) => {
   const [activeTab, setActiveTab] = useState<ActiveBankTab>('emedici');
   
@@ -609,8 +612,15 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
   }, [currentPool]);
 
   // Reset selected filters when switching tabs if they don't exist in new pool
+  // A subject requested from outside (weak-topic remediation) is applied once the bank lists it; until then it is held,
+  // so this reset does not clear it while the banks are still loading.
+  const pendingInitialSubjects = useRef<string[]>(initialSubjects ?? []);
   useEffect(() => {
-    setSelectedSubjects(prev => prev.filter(s => availableSubjects.includes(s)));
+    const ready = pendingInitialSubjects.current.filter(s => availableSubjects.includes(s));
+    if (ready.length > 0) {
+      pendingInitialSubjects.current = pendingInitialSubjects.current.filter(s => !ready.includes(s));
+    }
+    setSelectedSubjects(prev => [...new Set([...prev, ...ready])].filter(s => availableSubjects.includes(s)));
     setSelectedTopics(prev => prev.filter(t => availableTopics.includes(t)));
     setSelectedGroups(prev => prev.filter(g => availableGroups.includes(g)));
     setSelectedPapers(prev => prev.filter(p => availablePapers.includes(p)));
@@ -1188,7 +1198,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
               <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                    Subjects ({availableSubjects.length})
+                    Subjects ({availableSubjects.length} available)
                   </span>
                   {selectedSubjects.length > 0 && (
                     <button
@@ -1199,6 +1209,12 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                     </button>
                   )}
                 </div>
+
+                {selectedSubjects.length > 0 && (
+                  <p className="text-[11px] font-semibold text-slate-700" aria-live="polite">
+                    Selected: {selectedSubjects.join(', ')}
+                  </p>
+                )}
 
                 {availableSubjects.length === 0 ? (
                   <p className="text-xs text-slate-400 italic">No subject tags found in imported file</p>
@@ -1503,6 +1519,13 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                 <div className="text-xs font-mono text-slate-500 mb-1.5">
                   Available: <strong className="text-slate-800">{filteredQuestions.length}</strong> matching questions
                 </div>
+                {filteredQuestions.length === 0 && (
+                  <p role="status" aria-live="polite" className="text-xs text-slate-500 mb-2">
+                    {(availableSubjects.length + availableTopics.length) === 0
+                      ? 'This bank has no questions yet. Import a bank to start.'
+                      : 'No questions match these filters.'}
+                  </p>
+                )}
                 <button
                   type="button"
                   onClick={handleLaunch}

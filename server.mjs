@@ -2504,6 +2504,11 @@ dotenv.config();
 var __filename = fileURLToPath(import.meta.url);
 var __dirname = path3.dirname(__filename);
 var app = express();
+app.use((req, res, next) => {
+  const host = String(req.headers.host || "").toLowerCase().replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return next();
+  res.status(403).json({ error: "This server only accepts requests from this computer." });
+});
 var PORT = parseInt(process.env.PORT || "3000", 10);
 var DATA_DIR2 = process.env.PULSE_DATA_DIR || path3.join(os3.homedir(), ".pulse-med");
 var ENV_FILE = path3.join(DATA_DIR2, ".env");
@@ -4931,23 +4936,22 @@ async function startServer() {
       res.sendFile(path3.resolve(__dirname, "dist", "index.html"));
     });
   }
-  const HOST = process.env.HOST ?? "::";
-  const httpServer = app.listen(PORT, HOST, () => {
-    console.log(`[Pulse Med Server] Running on http://localhost:${PORT} (host: ${HOST})`);
-  });
-  httpServer.on("error", (err) => {
-    if (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL") {
-      console.warn(`[Pulse Med Server] Could not bind ${HOST}, retrying on 127.0.0.1`);
-      app.listen(PORT, "127.0.0.1", () => {
-        console.log(`[Pulse Med Server] Running on http://127.0.0.1:${PORT}`);
-      });
-    } else {
+  const hosts = process.env.HOST ? [process.env.HOST] : ["127.0.0.1", "::1"];
+  for (const host of hosts) {
+    const httpServer = app.listen(PORT, host, () => {
+      console.log(`[Pulse Med Server] Running on http://${host.includes(":") ? `[${host}]` : host}:${PORT} (this computer only)`);
+    });
+    httpServer.on("error", (err) => {
+      if (host !== "127.0.0.1" && (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL")) {
+        console.warn(`[Pulse Med Server] Could not bind ${host} (${err.code}); IPv4 loopback is still served.`);
+        return;
+      }
       throw err;
-    }
-  });
-  httpServer.requestTimeout = 0;
-  httpServer.headersTimeout = 0;
-  httpServer.keepAliveTimeout = 12e4;
+    });
+    httpServer.requestTimeout = 0;
+    httpServer.headersTimeout = 0;
+    httpServer.keepAliveTimeout = 12e4;
+  }
 }
 startServer();
 export {

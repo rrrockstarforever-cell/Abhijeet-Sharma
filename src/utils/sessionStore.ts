@@ -7,7 +7,14 @@ export interface UserSession {
 export const loadActiveTest = (): any => {
   try {
     const saved = localStorage.getItem('activeTest');
-    return saved ? JSON.parse(saved) : null;
+    if (!saved) return null;
+    const parsed = JSON.parse(saved);
+    if (
+      !parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
+      !Array.isArray(parsed.questions) ||
+      !['NEET_PG', 'INI_CET', 'AMC_CAT'].includes(parsed.exam)
+    ) return null;
+    return parsed;
   } catch (e) {
     console.error('Failed to load active test:', e);
     return null;

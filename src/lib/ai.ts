@@ -80,9 +80,9 @@ function focusParts(subtopic: string): string[] {
   const after = subtopic.includes(':') ? subtopic.split(':').slice(1).join(':') : subtopic;
   return after.split(/,|&| and /).map((s) => s.trim()).filter(Boolean);
 }
-export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'opencode' | 'nvidia' | 'vyce';
+export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'opencode' | 'nvidia' | 'vyce' | 'deeprelay';
 
-export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia', 'vyce'];
+export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia', 'vyce', 'deeprelay'];
 
 // Server defaults (mirrored in server.ts); models are user-selectable and persisted
 // in localStorage as `ai.model.<provider>` and sent with every request.
@@ -99,6 +99,7 @@ export const DEFAULT_MODELS: Record<string, string> = {
   nvidia: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
   // VyceAI (https://vyceai.com/v1) — OpenAI-compatible, serves DeepSeek models.
   vyce: 'deepseek-v4.1',
+  deeprelay: 'deeprelay/deepseek-v4.1-flash',
 };
 
 // Console-only model ids a previous version of the app offered for OpenCode. They are not
@@ -944,41 +945,6 @@ export function extractJson<T = any>(raw: string): T | null {
   }
 }
 
-/**
- * A reply cut off mid-item (token limit, dropped connection) is invalid JSON as a whole,
- * but every item before the cut is intact. Walk the "questions" array and keep each
- * COMPLETE object so one truncated tail never throws away a whole batch.
- */
-export function salvageQuestionObjects(text: string): any[] {
-  if (!text) return [];
-  const key = text.indexOf('"questions"');
-  const open = text.indexOf('[', key >= 0 ? key : 0);
-  if (open < 0) return [];
-  const items: any[] = [];
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  let start = -1;
-  for (let i = open + 1; i < text.length; i++) {
-    const c = text[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '{') { if (depth === 0) start = i; depth++; }
-    else if (c === '}') {
-      depth--;
-      if (depth === 0 && start >= 0) {
-        try { items.push(JSON.parse(text.slice(start, i + 1))); } catch { /* skip a malformed item */ }
-        start = -1;
-      }
-    } else if (c === ']' && depth === 0) break;
-  }
-  return items;
-}
 
 // ---------- AI exam-question generation ----------
 

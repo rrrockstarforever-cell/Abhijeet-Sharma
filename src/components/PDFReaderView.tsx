@@ -331,16 +331,16 @@ function normalizeOcrWords(
 
 // How the copilot answers: a teacher working through the passage with the student, not a summary.
 const TEACHER_SYSTEM =
-  'You are a patient senior doctor teaching a medical student for an exam. Teach; do not just state facts. ' +
-  'Work through the passage the way a good teacher does at a whiteboard: ' +
-  '(1) the big idea in one plain sentence; ' +
-  '(2) the reasoning step by step, saying why each step follows from the one before and naming the mechanism; ' +
-  '(3) one concrete analogy or clinical picture that makes it stick; ' +
-  '(4) the trap students usually fall into and how to tell the two apart; ' +
-  '(5) one short question for the student to answer in their head, then its answer on the next line. ' +
-  'Do not repeat the passage word for word. Use short paragraphs and numbered steps, no filler. ' +
-  'Stay grounded in the passage and cite it as [book p. N]. If the passage does not cover a step, say so and label that step as general knowledge.';
-
+  'You are a patient teacher. The student has never studied this subject, so start from zero. ' +
+  'Explain the selected passage from the beginning: ' +
+  '(1) the simplest definition of the idea in plain words; ' +
+  '(2) define every medical word, abbreviation and symbol the first time it appears, in brackets; ' +
+  '(3) one simple everyday example that is not medical; ' +
+  "(4) the clinical meaning (how it affects a patient's care): why it matters for a patient; " +
+  '(5) each step of any process, with what happens at that step; ' +
+  '(6) one question for the student to answer, then the answer on the next line. ' +
+  'Use short sentences and common words. Stay grounded in the passage and cite it as [book p. N]. ' +
+  'Mark any fact not in the passage with a dagger symbol (†, meaning not in the passage). If the passage does not cover a step, say so.';
 interface PDFReaderViewProps {
   onNavigate: (view: AppView, targetId?: string) => void;
   darkMode?: boolean;
@@ -480,7 +480,11 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   if (restoredView.current === null) {
     try {
       const raw = localStorage.getItem(LAST_VIEW_KEY);
-      restoredView.current = raw ? JSON.parse(raw) : { docId: '', page: 1 };
+      const parsed = raw ? JSON.parse(raw) : null;
+      restoredView.current = parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+        typeof parsed.docId === 'string' && Number.isInteger(parsed.page) && parsed.page > 0
+        ? parsed
+        : { docId: '', page: 1 };
     } catch {
       restoredView.current = { docId: '', page: 1 };
     }
@@ -1664,8 +1668,8 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   };
 
   // Selection popup actions: open the Ask panel on the selected text and answer straight away.
-  const EXPLAIN_PROMPT = 'Teach me this selection from the start: the big idea, the mechanism step by step, an analogy, and the trap students fall into.';
-  const NOTES_PROMPT = 'Turn this passage into a short revision note card: one bold title line, 3-6 high-yield bullets, a "High-yield:" line, and a citation.';
+  const EXPLAIN_PROMPT = "Explain this selection to someone who has never studied this subject: start with the simplest definition, define every medical or technical term the first time it appears (clinical means related to patient care), give one simple everyday example, then the clinical meaning, and mark any fact not in the passage with a dagger symbol (†).";
+  const NOTES_PROMPT = 'Turn this passage into a beginner-friendly revision note card for someone meeting the topic for the first time: one bold title line, a plain-English definition, 3-6 bullets, and define any medical or technical term in each bullet, a "Why it matters:" line, and a citation in the form [book p. N]; mark outside facts with †.';
   const runSelectionAi = (text: string, label: string, prompt?: string, saveNote = false) => {
     setRightTab('copilot');
     setShowNotes(true);

@@ -28,6 +28,8 @@ export default function App() {
   const [restoredTest] = useState(() => loadActiveTest());
   const [currentExam, setCurrentExam] = useState<ExamType>((restoredTest?.exam as ExamType) ?? 'INI_CET');
   const [activeQuestionId, setActiveQuestionId] = useState<string>(restoredTest?.activeQuestionId ?? '');
+  // Subject sent from the analytics remediation link; pre-selects the Question Bank filter once.
+  const [remediationSubjects, setRemediationSubjects] = useState<string[]>([]);
   const [activeTestQuestions, setActiveTestQuestions] = useState<ClinicalQuestion[] | undefined>(restoredTest?.questions);
   const [activeTestMode, setActiveTestMode] = useState<'EXAM' | 'TUTOR'>(restoredTest?.mode ?? 'TUTOR');
 
@@ -160,9 +162,12 @@ export default function App() {
         return (
           <PerformanceAnalyticsView 
             onNavigate={handleNavigate}
-            onLaunchRemediation={(subject: string) => 
-              handleNavigate('test-runner', subject.includes('Pathology') ? 'Q-PA-1049' : 'Q10')
-            }
+            // Sample change: remediation no longer jumps to fixed sample questions; the student picks a real
+            // question for the weak subject in the Question Bank.
+            onLaunchRemediation={(subject: string) => {
+              setRemediationSubjects([subject]);
+              handleNavigate('question-bank');
+            }}
           />
         );
       case 'practice':
@@ -176,7 +181,8 @@ export default function App() {
         );
       case 'question-bank':
         return (
-          <QuestionBankPracticeView 
+          <QuestionBankPracticeView
+            initialSubjects={remediationSubjects}
             onNavigate={handleNavigate}
             onLaunchTest={handleLaunchBankQuestions}
           />

@@ -857,7 +857,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
             <select
               value={persona}
               onChange={(e) => setPersona(e.target.value as typeof persona)}
-              className="appearance-none bg-slate-800/80 border border-slate-700 text-[11px] font-semibold text-white rounded-lg pl-2.5 pr-7 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+              className="appearance-none bg-white dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 text-[11px] font-semibold text-slate-800 dark:text-white rounded-lg pl-2.5 pr-7 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
             >
               {PERSONAS.map((p) => (
                 <option key={p.id} value={p.id}>{p.label}</option>
@@ -871,7 +871,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
             <select
               value={provider ?? ''}
               onChange={(e) => handleProviderChange(e.target.value as AiProviderId)}
-              className="appearance-none bg-slate-800/80 border border-slate-700 text-[11px] font-semibold text-white rounded-lg pl-2.5 pr-7 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] disabled:opacity-50"
+              className="appearance-none bg-white dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 text-[11px] font-semibold text-slate-800 dark:text-white rounded-lg pl-2.5 pr-7 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] disabled:opacity-50"
               disabled={connectedCount === 0}
             >
               {connectedCount === 0 && <option value="">No provider connected</option>}
@@ -890,7 +890,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
             list="tutor-model-options"
             placeholder="model id"
             title={model || (provider ? getEffectiveModel(provider) : '')}
-            className="w-64 bg-slate-800/80 border border-slate-700 text-[11px] font-mono text-white rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] disabled:opacity-50 placeholder-slate-500"
+            className="w-64 bg-white dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 text-[11px] font-mono text-slate-800 dark:text-white rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] disabled:opacity-50 placeholder-slate-500"
           />
           <datalist id="tutor-model-options">
             {provider && providerMap[provider]?.connected && (
@@ -904,7 +904,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
               value={effort}
               onChange={(e) => handleEffortChange(e.target.value as EffortLevel)}
               title="Reasoning effort (subscription providers)"
-              className="appearance-none bg-slate-800/80 border border-slate-700 text-[11px] font-semibold text-white rounded-lg pl-2.5 pr-7 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+              className="appearance-none bg-white dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 text-[11px] font-semibold text-slate-800 dark:text-white rounded-lg pl-2.5 pr-7 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
             >
               {EFFORT_LEVELS.map((level) => (
                 <option key={level} value={level}>{level} effort</option>

@@ -15,6 +15,7 @@ import {
 import { AppView, ExamType } from '../types.ts';
 import { summarizeAttempts, listAttempts, AttemptRecord } from '../utils/attemptStore.ts';
 import { loadActiveTest } from '../utils/sessionStore.ts';
+import { Card } from '../components/ui/card.tsx';
 
 interface PerformanceAnalyticsViewProps {
   onNavigate: (view: AppView) => void;
@@ -215,7 +216,7 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
       {/* 4-Stat Metric Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Coverage Velocity */}
-        <div className="bg-white border border-[#e3e7ee] rounded-xl p-4 shadow-xs relative">
+        <Card className="p-4 relative">
           <div className="flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
             <span>COVERAGE VELOCITY</span>
             <button className="text-slate-400 hover:text-[#0f8b8d] transition-colors" title="Sync">
@@ -238,10 +239,10 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
               {hasData ? `${summary.correct.toLocaleString()} correct` : '—'}
             </span>
           </div>
-        </div>
+        </Card>
 
         {/* Cumulative Accuracy */}
-        <div className="bg-white border border-[#e3e7ee] rounded-xl p-4 shadow-xs">
+        <Card className="p-4">
           <div className="flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
             <span>CUMULATIVE ACCURACY</span>
             <ShieldCheck className="w-4 h-4 text-[#0f8b8d]" />
@@ -277,10 +278,10 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
               </>
             )}
           </div>
-        </div>
+        </Card>
 
         {/* Response Partition */}
-        <div className="bg-white border border-[#e3e7ee] rounded-xl p-4 shadow-xs">
+        <Card className="p-4">
           <div className="flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
             <span>RESPONSE PARTITION</span>
             <PieChart className="w-4 h-4 text-slate-400" />
@@ -312,10 +313,10 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
               </>
             )}
           </div>
-        </div>
+        </Card>
 
         {/* National Standing / Exam Date Countdown */}
-        <div className="bg-white border border-[#e3e7ee] rounded-xl p-4 shadow-xs bg-linear-to-br from-white to-slate-50/80">
+        <Card className="p-4 bg-linear-to-br from-white to-slate-50/80">
           <div className="flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
             <span>EXAM COUNTDOWN</span>
             <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-teal-100 text-teal-800">
@@ -340,7 +341,7 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
             <Trophy className="w-3.5 h-3.5 text-[#f2a541]" />
             {hasData ? `Accuracy: ${summary.accuracyPercent}%` : 'No data yet'}
           </div>
-        </div>
+        </Card>
       </div>
 
       {/* Main Split: Subject Accuracy Table (Left) + Difficulty & Synthesis Insights (Right) */}
@@ -417,6 +418,7 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
                       <td className="py-3 px-3 text-right">
                         <button
                           onClick={() => onLaunchRemediation(sub.name)}
+                          title="Opens the Question Bank filtered to this subject"
                           className={`px-3 py-1 rounded-md text-xs font-semibold transition-all shadow-xs ${
                             sub.accuracy < 65
                               ? 'bg-[#d64545] hover:bg-red-700 text-white'
@@ -467,6 +469,7 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
                       <span>{w.correct} / {w.total} correct</span>
                       <button
                         onClick={() => onLaunchRemediation(w.subject)}
+                        title="Opens the Question Bank filtered to this subject"
                         className="text-xs font-semibold text-[#d64545] hover:underline"
                       >
                         Remediate

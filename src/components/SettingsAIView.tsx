@@ -165,6 +165,21 @@ const REAL_PROVIDERS: AIProvider[] = [
       { id: DEFAULT_MODELS.vyce, name: 'DeepSeek V4.1', description: 'VyceAI default model', latencyEstimate: '—', contextWindow: '—' },
     ]
   },
+  {
+    id: 'deeprelay',
+    name: 'Deep Relay (DeepSeek)',
+    brand: 'deepseek',
+    model: DEFAULT_MODELS.deeprelay,
+    status: 'ready',
+    type: 'API Key (Deep Relay)',
+    features: ['API Key in Settings', 'DeepSeek models', 'OpenAI-compatible /chat/completions'],
+    isDefault: false,
+    isSignedIn: false,
+    hasTokenConfigured: false,
+    availableModels: [
+      { id: DEFAULT_MODELS.deeprelay, name: 'DeepSeek V4.1 Flash', description: 'Default fast model', latencyEstimate: '—', contextWindow: '—' },
+    ]
+  },
 ];
 
 function getClientSessionId(): string {
@@ -188,6 +203,8 @@ export const SettingsAIView: React.FC = () => {
   
   // Real OAuth Sign-In Modal State
   const [selectedProvider, setSelectedProvider] = useState<AIProvider | null>(null);
+  // Which provider cards are open in the AI Subscription Hub (dropdown). Unset = open only for the active engine.
+  const [expandedProviders, setExpandedProviders] = useState<Record<string, boolean>>({});
   const [isLoadingFlow, setIsLoadingFlow] = useState<boolean>(false);
   const [deviceCodeData, setDeviceCodeData] = useState<{
     userCode: string;
@@ -409,7 +426,7 @@ export const SettingsAIView: React.FC = () => {
     setDeviceCodeData(null);
     setPkceData(null);
 
-    if (provider.id === 'gemini' || provider.id === 'opencode' || provider.id === 'nvidia' || provider.id === 'vyce') {
+    if (provider.id === 'gemini' || provider.id === 'opencode' || provider.id === 'nvidia' || provider.id === 'vyce' || provider.id === 'deeprelay') {
       // Key-based providers: the pasted key is handled inside the modal.
       setIsLoadingFlow(false);
       return;
@@ -578,16 +595,18 @@ export const SettingsAIView: React.FC = () => {
     }
   };
 
-  // Save the pasted key (Gemini, OpenCode, NVIDIA or VyceAI); the server stores it in the user's data dir.
+  // Save the pasted key (Gemini, OpenCode, NVIDIA, VyceAI or Deep Relay); the server stores it in the user's data dir.
   const handleSaveKey = async () => {
     const key = keyInput.trim();
     if (!key || !selectedProvider) return;
     const endpoint = selectedProvider.id === 'opencode' ? '/api/settings/opencode-key'
       : selectedProvider.id === 'nvidia' ? '/api/settings/nvidia-key'
+      : selectedProvider.id === 'deeprelay' ? '/api/settings/deeprelay-key'
       : selectedProvider.id === 'vyce' ? '/api/settings/vyce-key'
       : '/api/settings/gemini-key';
     const label = selectedProvider.id === 'opencode' ? 'OpenCode'
       : selectedProvider.id === 'nvidia' ? 'NVIDIA'
+      : selectedProvider.id === 'deeprelay' ? 'Deep Relay'
       : selectedProvider.id === 'vyce' ? 'VyceAI'
       : 'Gemini';
     setIsSavingKey(true);
@@ -607,6 +626,9 @@ export const SettingsAIView: React.FC = () => {
       setKeyInput('');
       if (selectedProvider.id === 'nvidia') {
         persistModel('nvidia', nvidiaModel);
+      }
+      if (selectedProvider.id === 'deeprelay') {
+        persistModel('deeprelay', DEFAULT_MODELS.deeprelay);
       }
       if (selectedProvider.id === 'vyce') {
         persistModel('vyce', DEFAULT_MODELS.vyce);
@@ -1195,6 +1217,7 @@ export const SettingsAIView: React.FC = () => {
           <div className="space-y-3.5">
             {providers.map((p) => {
               const isActive = p.id === activeProviderId;
+              const isExpanded = expandedProviders[p.id] ?? isActive;
               const isConnected = Boolean(p.hasTokenConfigured);
               const catalogModels = modelCatalog[p.id] ?? [];
               const liveAccountModels = accountModels[p.id] ?? [];
@@ -1228,7 +1251,21 @@ export const SettingsAIView: React.FC = () => {
                       : 'border-slate-200 hover:border-slate-300'
                   }`}
                 >
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setExpandedProviders((prev) => ({ ...prev, [p.id]: !isExpanded }))}
+                    aria-expanded={isExpanded}
+                    className="w-full flex items-center justify-between gap-3 text-left"
+                  >
+                    <span className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-bold text-slate-900">{p.name}</span>
+                      {isActive && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">ACTIVE ENGINE</span>}
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${isConnected ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-slate-100 text-slate-500 border-slate-200"}`}>{isConnected ? "Connected" : "Not connected"}</span>
+                    </span>
+                    <span className="text-xs font-semibold text-[#0f8b8d]">{isExpanded ? "Hide" : "Show"} ▾</span>
+                  </button>
+                  {isExpanded && (
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:flex-wrap justify-between gap-3 min-w-0 w-full">
                     <div className="flex items-start gap-3">
                       <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm shrink-0 shadow-xs ${
                         p.id === 'gemini' 
@@ -1383,7 +1420,7 @@ export const SettingsAIView: React.FC = () => {
 
                     {/* Controls: Sign In Button or Connected State + Set Active */}
                     <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
-                      {(p.id === 'gemini' || p.id === 'opencode' || p.id === 'nvidia' || p.id === 'vyce') ? (
+                  {(p.id === 'gemini' || p.id === 'opencode' || p.id === 'nvidia' || p.id === 'vyce' || p.id === 'deeprelay') ? (
                         <div className="flex items-center gap-2">
                           <span className={`text-xs font-bold px-3 py-1.5 rounded-lg border flex items-center gap-1.5 ${
                             isConnected
@@ -1514,6 +1551,7 @@ export const SettingsAIView: React.FC = () => {
                       </button>
                     </div>
                   </div>
+                  )}
                 </div>
               );
             })}
@@ -1545,6 +1583,8 @@ export const SettingsAIView: React.FC = () => {
                           ? 'NVIDIA API Key'
                           : selectedProvider.id === 'vyce'
                             ? 'VyceAI API Key'
+                          : selectedProvider.id === 'deeprelay'
+                            ? 'Deep Relay API Key'
                           : selectedProvider.id === 'custom' && editingEndpoint
                             ? 'Edit Endpoint'
                             : selectedProvider.id === 'custom'
@@ -1558,7 +1598,7 @@ export const SettingsAIView: React.FC = () => {
                         ? 'Key saved locally — never shown again'
                         : selectedProvider.id === 'opencode'
                           ? 'Console / Go key saved locally — never shown again'
-                          : selectedProvider.id === 'nvidia' || selectedProvider.id === 'vyce'
+                          : selectedProvider.id === 'nvidia' || selectedProvider.id === 'vyce' || selectedProvider.id === 'deeprelay'
                             ? 'Key saved locally — never shown again'
                             : selectedProvider.id === 'custom' && editingEndpoint
                               ? 'Configure your custom endpoint below.'
@@ -1578,7 +1618,7 @@ export const SettingsAIView: React.FC = () => {
 
             {/* This is the real local flow, not a web demo: the code comes from the
                 provider right now and the token is stored on this computer only. */}
-            {selectedProvider.id !== 'gemini' && selectedProvider.id !== 'opencode' && selectedProvider.id !== 'nvidia' && selectedProvider.id !== 'vyce' && selectedProvider.id !== 'custom' && (
+                {selectedProvider.id !== 'gemini' && selectedProvider.id !== 'opencode' && selectedProvider.id !== 'nvidia' && selectedProvider.id !== 'vyce' && selectedProvider.id !== 'deeprelay' && selectedProvider.id !== 'custom' && (
               <p className="text-[11px] leading-relaxed text-slate-600 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
                 {selectedProvider.id === 'claude'
                   ? 'Open the Claude approval page, sign in, then paste the code Claude shows you. The token stays on this computer.'
@@ -1901,7 +1941,7 @@ export const SettingsAIView: React.FC = () => {
             )}
 
             {/* Key-based providers: Gemini, OpenCode, NVIDIA */}
-            {(selectedProvider.id === 'gemini' || selectedProvider.id === 'opencode' || selectedProvider.id === 'nvidia' || selectedProvider.id === 'vyce') && (
+                  {(selectedProvider.id === 'gemini' || selectedProvider.id === 'opencode' || selectedProvider.id === 'nvidia' || selectedProvider.id === 'vyce' || selectedProvider.id === 'deeprelay') && (
               <div className="space-y-4 py-2">
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
                   <div className="flex items-center gap-2 font-bold text-slate-800">
@@ -1913,6 +1953,8 @@ export const SettingsAIView: React.FC = () => {
                       ? 'Create an API key in the OpenCode Console (console.opencode.ai) and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser. If you already use the OpenCode CLI on this machine, its stored key is used automatically.'
                       : selectedProvider.id === 'nvidia'
                         ? 'Create an API key in the NVIDIA build portal (build.nvidia.com) and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser.'
+                        : selectedProvider.id === 'deeprelay'
+                          ? 'Paste your Deep Relay API key here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser.'
                         : selectedProvider.id === 'vyce'
                           ? 'Paste your VyceAI API key here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser. Requests go to https://vyceai.com/v1 with the DeepSeek model deepseek-v4.1.'
                         : 'Create the key in Google AI Studio and paste it here. It is saved by the local server to your user data directory (.env, outside the repo) and is never displayed again or sent back to the browser.'}
@@ -1925,6 +1967,8 @@ export const SettingsAIView: React.FC = () => {
                       ? 'OpenCode API Key'
                       : selectedProvider.id === 'nvidia'
                         ? 'NVIDIA API Key'
+                        : selectedProvider.id === 'deeprelay'
+                          ? 'Deep Relay API Key'
                         : selectedProvider.id === 'vyce'
                           ? 'VyceAI API Key'
                           : 'Gemini API Key'}
@@ -1936,6 +1980,8 @@ export const SettingsAIView: React.FC = () => {
                     placeholder={selectedProvider.id === 'opencode' ? 'sk-… / your OpenCode Console API key'
                       : selectedProvider.id === 'nvidia'
                         ? 'nvapi-… / your NVIDIA API key'
+                        : selectedProvider.id === 'deeprelay'
+                          ? 'your Deep Relay API key'
                         : selectedProvider.id === 'vyce'
                           ? 'your VyceAI API key'
                           : 'AIza… / your Gemini API key'}
