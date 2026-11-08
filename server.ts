@@ -38,6 +38,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+// Only this computer may talk to the server. The server holds the user's AI keys, so it must never answer a request
+// addressed to another host name. Browsers send the Host header as the name they used (localhost, 127.0.0.1 or [::1]),
+// so requests for any other name (including a web page reaching the server through DNS rebinding) are refused.
+app.use((req: Request, res: Response, next: () => void) => {
+  const host = String(req.headers.host || '').toLowerCase().replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return next();
+  res.status(403).json({ error: 'This server only accepts requests from this computer.' });
+});
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
 // User data dir (Electron passes PULSE_DATA_DIR=app.getPath('userData'); dev fallback keeps
@@ -2983,32 +2992,28 @@ async function startServer() {
     });
   }
 
-  // Bind to all interfaces so the app is reachable as BOTH http://localhost:PORT
-  // (which browsers may resolve to IPv6 ::1) and http://127.0.0.1:PORT. Binding to
-  // 127.0.0.1 alone made localhost requests fail with ECONNREFUSED / 502 Bad Gateway.
-  // Override with HOST when a specific interface is required.
-  const HOST = process.env.HOST ?? '::';
-  const httpServer = app.listen(PORT, HOST, () => {
-    console.log(`[Pulse Med Server] Running on http://localhost:${PORT} (host: ${HOST})`);
-  });
-  // Some Windows stacks only expose one family per socket; fall back to IPv4 if the
-  // IPv6/dual-stack bind fails outright.
-  httpServer.on('error', (err: NodeJS.ErrnoException) => {
-    if (err.code === 'EAFNOSUPPORT' || err.code === 'EADDRNOTAVAIL') {
-      console.warn(`[Pulse Med Server] Could not bind ${HOST}, retrying on 127.0.0.1`);
-      app.listen(PORT, '127.0.0.1', () => {
-        console.log(`[Pulse Med Server] Running on http://127.0.0.1:${PORT}`);
-      });
-    } else {
+  // Listen on the loopback addresses only, so other computers on the network cannot reach the server. Both IPv4 and
+  // IPv6 loopback are opened, because "localhost" may resolve to either (binding only one caused ECONNREFUSED before).
+  // HOST can still override this with one specific address.
+  const hosts = process.env.HOST ? [process.env.HOST] : ['127.0.0.1', '::1'];
+  for (const host of hosts) {
+    const httpServer = app.listen(PORT, host, () => {
+      console.log(`[Pulse Med Server] Running on http://${host.includes(':') ? `[${host}]` : host}:${PORT} (this computer only)`);
+    });
+    // A machine without IPv6 cannot bind ::1; the IPv4 server still works, so that failure is only a warning.
+    httpServer.on('error', (err: NodeJS.ErrnoException) => {
+      if (host !== '127.0.0.1' && (err.code === 'EAFNOSUPPORT' || err.code === 'EADDRNOTAVAIL')) {
+        console.warn(`[Pulse Med Server] Could not bind ${host} (${err.code}); IPv4 loopback is still served.`);
+        return;
+      }
       throw err;
-    }
-  });
-  // A 10-question JSON batch can legitimately take minutes. Node's default 300 s
-  // requestTimeout would destroy the socket mid-answer (and the client saw that as a
-  // generic empty response). The AI routes are bounded by their own abort signal instead.
-  httpServer.requestTimeout = 0;
-  httpServer.headersTimeout = 0;
-  httpServer.keepAliveTimeout = 120_000;
+    });
+    // A 10-question JSON batch can legitimately take minutes. Node's default 300 s
+    // requestTimeout would destroy the socket mid-answer. The AI routes are bounded by their own abort signal instead.
+    httpServer.requestTimeout = 0;
+    httpServer.headersTimeout = 0;
+    httpServer.keepAliveTimeout = 120_000;
+  }
 }
 
 startServer();
