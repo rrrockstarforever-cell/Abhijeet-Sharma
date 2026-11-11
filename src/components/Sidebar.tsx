@@ -39,16 +39,14 @@ interface SidebarProps {
 const EXAM_CARDS: { id: ExamType; label: string; storageKeys: string[] }[] = [
   { id: 'NEET_PG', label: 'NEET-PG', storageKeys: ['exam.date.NEET_PG', 'exam.date.NEET-PG'] },
   { id: 'INI_CET', label: 'INI-CET', storageKeys: ['exam.date.INI_CET', 'exam.date.INI-CET'] },
-  { id: 'AMC_CAT', label: 'AMC CAT', storageKeys: ['exam.date.AMC_CAT', 'exam.date.AMC-CAT'] },
+  { id: 'AMC_CAT' as ExamType, label: 'AMC CAT', storageKeys: ['exam.date.AMC_CAT', 'exam.date.AMC-CAT'] },
 ];
 
 const loadStoredExamDate = (storageKeys: string[]): string => {
-  try {
-    for (const k of storageKeys) {
-      const val = localStorage.getItem(k);
-      if (val) return val;
-    }
-  } catch { /* storage blocked or unavailable */ }
+  for (const k of storageKeys) {
+    const val = localStorage.getItem(k);
+    if (val) return val;
+  }
   return '';
 };
 
@@ -59,16 +57,16 @@ const loadStoredExamDate = (storageKeys: string[]): string => {
 
 const loadStoredDateList = (storageKeys: string[], fallback: string): string[] => {
   for (const key of storageKeys) {
-    try {
-      const raw = localStorage.getItem(`exam.dates.${key.split('.').pop()}`);
-      if (raw) {
+    const raw = localStorage.getItem(`exam.dates.${key.split('.').pop()}`);
+    if (raw) {
+      try {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
           const clean = parsed.filter((v: unknown): v is string => typeof v === 'string' && !Number.isNaN(new Date(v).getTime()));
           if (clean.length) return clean;
         }
-      }
-    } catch { /* storage blocked or corrupt value — fall through to the single date */ }
+      } catch { /* old or corrupt value — fall through to the single date */ }
+    }
   }
   return fallback ? [fallback] : [];
 };
@@ -197,7 +195,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       const future = dates.find((d) => new Date(d).getTime() > Date.now());
       setDraftSelected((prev) => prev || future || dates[0]);
       setOfficialNote(
-        `${body.officialBody}: ${dates.length} date${dates.length === 1 ? '' : 's'} found on the official site — tick the one you want, then Save.`,
+ `${body.officialBody}: ${dates.length} date${dates.length === 1 ? '' : 's'} found on the official site — tick the one you want, then Save.`,
       );
     } catch (e: any) {
       setOfficialNote(`Could not reach the server (${e?.message || 'network error'}).`);
@@ -289,58 +287,33 @@ export const Sidebar: React.FC<SidebarProps> = ({
     };
   };
 
-  const navSections = [
-    {
-      label: 'Study',
-      items: [
-        { id: 'analytics' as AppView, label: 'Performance Analytics', icon: BarChart3 },
-        { id: 'question-bank' as AppView, label: 'Question Bank', icon: Database },
-        { id: 'pdf-reader' as AppView, label: 'PDF Reader & OCR', icon: BookOpen },
-        { id: 'highlights' as AppView, label: 'Highlights & Memory', icon: Bookmark },
-      ],
-    },
-    {
-      label: 'Practice',
-      items: [
-        { id: 'practice' as AppView, label: 'Practice Builder', icon: FileQuestion },
-        { id: 'test-runner' as AppView, label: 'Active Test Runner', icon: Timer, badge: 'Live' },
-      ],
-    },
-    {
-      label: 'Review',
-      items: [
-        { id: 'mistakes' as AppView, label: 'Mistakes & Spaced Review', icon: AlertOctagon, badge: srsDueCount > 0 ? `${srsDueCount} due` : unresolvedMistakesCount > 0 ? String(unresolvedMistakesCount) : undefined },
-        { id: 'image-review' as AppView, label: 'Image Question Review', icon: Images },
-      ],
-    },
-    {
-      label: 'Tools',
-      items: [
-        { id: 'ai-tutor' as AppView, label: 'Clinical AI Tutor', icon: Brain },
-        { id: 'research' as AppView, label: 'Clinical Evidence Browser', icon: Compass },
-        { id: 'qa' as AppView, label: 'QA & Benchmark', icon: ShieldCheck },
-      ],
-    },
-    {
-      label: 'Settings',
-      items: [
-        { id: 'settings' as AppView, label: 'AI Subscriptions & OCR', icon: Sliders },
-      ],
-    },
+  const navItems = [
+    { id: 'analytics' as AppView, label: 'Performance Analytics', icon: BarChart3 },
+    { id: 'practice' as AppView, label: 'Practice Builder', icon: FileQuestion },
+    { id: 'question-bank' as AppView, label: 'Question Bank', icon: Database },
+    { id: 'test-runner' as AppView, label: 'Active Test Runner', icon: Timer, badge: 'Live' },
+    { id: 'mistakes' as AppView, label: 'Mistakes & Spaced Review', icon: AlertOctagon, badge: srsDueCount > 0 ? `${srsDueCount} due` : unresolvedMistakesCount > 0 ? String(unresolvedMistakesCount) : undefined },
+    { id: 'highlights' as AppView, label: 'Highlights & Memory', icon: Bookmark },
+    { id: 'ai-tutor' as AppView, label: 'Clinical AI Tutor', icon: Brain },
+    { id: 'pdf-reader' as AppView, label: 'PDF Reader & OCR', icon: BookOpen },
+    { id: 'research' as AppView, label: 'Clinical Evidence Browser', icon: Compass },
+    { id: 'image-review' as AppView, label: 'Image Question Review', icon: Images },
+    { id: 'qa' as AppView, label: 'QA & Benchmark', icon: ShieldCheck },
+    { id: 'settings' as AppView, label: 'AI Subscriptions & OCR', icon: Sliders },
   ];
 
   return (
-    <aside className="w-64 bg-[#001432] text-slate-200 flex flex-col shrink-0 border-r border-[#13294b] h-screen select-none z-20">
+    <aside className="w-64  text-slate-200 flex flex-col shrink-0 border-r  h-screen select-none z-20">
       {/* Brand Header */}
-      <div className="p-5 pb-4 border-b border-[#13294b]">
+      <div className="p-5 pb-4 border-b ">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#0f8b8d] to-[#8ff3f4] flex items-center justify-center text-[#001432] shadow-sm font-black text-lg">
+          <div className="w-9 h-9 rounded-xl flex items-center justify-center  shadow-sm font-medium text-lg">
             P
           </div>
           <div>
-            <div className="text-sm font-extrabold tracking-tight text-white flex items-center gap-1.5">
+            <div className="text-sm font-medium tracking-tight text-white flex items-center gap-1.5">
               <span>PULSE MED</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.2 bg-[#0f8b8d]/20 text-[#8ff3f4] rounded border border-[#0f8b8d]/30">
+              <span className="text-[10px] font-mono px-1.5 py-0.2   rounded border ">
                 PRO
               </span>
             </div>
@@ -349,12 +322,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         {/* 3-Way Exam Switcher (USMLE Removed) */}
-        <div className="mt-4 p-1 bg-[#13294b] rounded-xl flex items-center justify-between text-[11px] font-bold">
+        <div className="mt-4 p-1  rounded-xl flex items-center justify-between text-[11px] font-medium">
           <button
             onClick={() => onSelectExam('NEET_PG')}
             className={`flex-1 py-1.5 rounded-lg transition-all text-center ${
               selectedExam === 'NEET_PG'
-                ? 'bg-[#0f8b8d] text-white shadow-xs'
+                ? ' text-white shadow-xs'
                 : 'text-slate-400 hover:text-white'
             }`}
           >
@@ -364,17 +337,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
             onClick={() => onSelectExam('INI_CET')}
             className={`flex-1 py-1.5 rounded-lg transition-all text-center ${
               selectedExam === 'INI_CET'
-                ? 'bg-[#0f8b8d] text-white shadow-xs'
+                ? ' text-white shadow-xs'
                 : 'text-slate-400 hover:text-white'
             }`}
           >
             INI-CET
           </button>
           <button
-            onClick={() => onSelectExam('AMC_CAT')}
+            onClick={() => onSelectExam('AMC_CAT' as ExamType)}
             className={`flex-1 py-1.5 rounded-lg transition-all text-center ${
-              selectedExam === 'AMC_CAT'
-                ? 'bg-[#0f8b8d] text-white shadow-xs'
+              selectedExam === ('AMC_CAT' as ExamType)
+                ? ' text-white shadow-xs'
                 : 'text-slate-400 hover:text-white'
             }`}
           >
@@ -384,13 +357,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       {/* Navigation List */}
-      <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-3">
-        {navSections.map((section) => (
-          <section key={section.label} aria-label={section.label} className="space-y-1">
-            <h2 className="px-3.5 pt-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-              {section.label}
-            </h2>
-            {section.items.map((item) => {
+      <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-1">
+        {navItems.map((item) => {
           const isActive = currentView === item.id;
           const Icon = item.icon;
 
@@ -400,14 +368,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
               onClick={() => onNavigate(item.id)}
               className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all group ${
                 isActive
-                  ? 'bg-gradient-to-r from-[#0f8b8d] to-[#00696b] text-white shadow-md'
-                  : 'text-slate-300 hover:bg-[#13294b]/70 hover:text-white'
+                  ? 'text-white shadow-md'
+                  : 'text-slate-300  hover:text-white'
               }`}
             >
               <div className="flex items-center gap-3">
                 <Icon
                   className={`w-4 h-4 transition-colors ${
-                    isActive ? 'text-[#8ff3f4]' : 'text-slate-400 group-hover:text-slate-200'
+                    isActive ? '' : 'text-slate-400 group-hover:text-slate-200'
                   }`}
                 />
                 <span className="truncate">{item.label}</span>
@@ -415,7 +383,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
               {item.badge && (
                 <span
-                  className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
+                  className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-medium ${
                     isActive
                       ? 'bg-white/20 text-white'
                       : item.badge.includes('Due') || item.badge === 'Live'
@@ -428,19 +396,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
               )}
             </button>
           );
-            })}
-          </section>
-        ))}
+        })}
       </nav>
 
       {/* Real Live Countdown Cards per Exam */}
       <div className="px-3 pb-2 shrink-0 max-h-[52vh] overflow-y-auto">
-        <div className="flex items-center justify-between px-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider sticky top-0 bg-[#001432] pb-1 z-10">
+        <div className="flex items-center justify-between px-1 text-[10px] font-medium text-slate-400 uppercase tracking-wider sticky top-0  pb-1 z-10">
           <span className="flex items-center gap-1.5">
-            <Timer className="w-3.5 h-3.5 text-[#0f8b8d]" />
+            <Timer className="w-3.5 h-3.5 " />
             Exam Countdowns
           </span>
-          <span className="text-[9px] font-mono text-[#8ff3f4]">Live</span>
+          <span className="text-[9px] font-mono ">Live</span>
         </div>
 
         <div className="space-y-1.5">
@@ -460,18 +426,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 }}
                 className={`p-2.5 rounded-xl border text-xs transition-all ${
                   isSelected
-                    ? 'bg-gradient-to-br from-[#0f8b8d]/25 to-[#13294b] border-[#0f8b8d] ring-1 ring-[#0f8b8d]/50 shadow-xs'
-                    : 'bg-[#13294b]/40 hover:bg-[#13294b]/70 border-slate-700/60 text-slate-300'
+                    ? '/25  ring-1  shadow-xs'
+                    : '  border-slate-700/60 text-slate-300'
                 }`}
               >
                 {/* Header: Exam Title & Selected Badge */}
                 <div className="flex items-center justify-between mb-1">
                   <div className="flex items-center gap-1.5">
-                    <span className={`font-bold text-xs ${isSelected ? 'text-white' : 'text-slate-300'}`}>
+                    <span className={`font-medium text-xs ${isSelected ? 'text-white' : 'text-slate-300'}`}>
                       {exam.label}
                     </span>
                     {isSelected && (
-                      <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 bg-[#0f8b8d]/30 text-[#8ff3f4] rounded border border-[#0f8b8d]/40">
+                      <span className="text-[9px] font-mono font-medium px-1.5 py-0.2   rounded border ">
                         Selected
                       </span>
                     )}
@@ -505,13 +471,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         type="datetime-local"
                         value={tempDateInput}
                         onChange={(e) => setTempDateInput(e.target.value)}
-                        className="flex-1 min-w-0 px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-[11px] text-slate-800 dark:text-white focus:outline-none focus:border-[#0f8b8d]"
+                        className="flex-1 min-w-0 px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[11px] text-white focus:outline-none focus:"
                       />
                       <button
                         type="button"
                         onClick={() => { addDraftDate(tempDateInput); setTempDateInput(''); }}
                         disabled={!tempDateInput}
-                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-[10px] font-bold text-[#8ff3f4]"
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-[10px] font-medium "
                       >
                         Add
                       </button>
@@ -523,7 +489,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       value={pasteInput}
                       onChange={(e) => detectDates(e.target.value)}
                       placeholder="Paste dates or exam notice…"
-                      className="w-full px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-[10px] text-slate-800 dark:text-white placeholder:text-slate-500 focus:outline-none focus:border-[#0f8b8d]"
+                      className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-white placeholder:text-slate-500 focus:outline-none focus:"
                     />
 
                     {/* Internet check, restricted to the official exam body. Suggests only. */}
@@ -531,7 +497,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       type="button"
                       onClick={() => checkOfficialDates(exam)}
                       disabled={checkingExam === exam.id}
-                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-[10px] font-bold text-[#8ff3f4]"
+                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-[10px] font-medium "
                       title="Search the official exam body for the announced date"
                     >
                       {checkingExam === exam.id ? (
@@ -559,7 +525,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             href={l.url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="block truncate text-[9px] font-mono text-[#8ff3f4] hover:underline"
+                            className="block truncate text-[9px] font-mono  hover:underline"
                             title={l.title || l.url}
                           >
                             Open {l.host} ↗
@@ -573,7 +539,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         <select
                           value={draftSelected}
                           onChange={(e) => setDraftSelected(e.target.value)}
-                          className="w-full px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-[10px] text-slate-800 dark:text-white focus:outline-none focus:border-[#0f8b8d]"
+                          className="w-full px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-white focus:outline-none focus:"
                         >
                           {draftDates.map((d) => (
                             <option key={d} value={d}>
@@ -587,7 +553,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                               key={d}
                               className={`inline-flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.5 rounded border ${
                                 draftSelected === d
-                                  ? 'bg-[#0f8b8d]/30 text-[#8ff3f4] border-[#0f8b8d]/50'
+                                  ? '  '
                                   : 'bg-slate-800 text-slate-400 border-slate-700'
                               }`}
                             >
@@ -610,7 +576,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     )}
 
                     {detectedNote && (
-                      <p className="text-[9px] text-[#8ff3f4] leading-snug">{detectedNote}</p>
+                      <p className="text-[9px]  leading-snug">{detectedNote}</p>
                     )}
 
                     <div className="flex items-center justify-between text-[10px]">
@@ -632,7 +598,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         <button
                           type="button"
                           onClick={() => handleSaveExamDate(exam.id, exam.storageKeys)}
-                          className="px-2 py-0.5 bg-[#0f8b8d] hover:bg-[#00696b] text-white font-bold rounded"
+                          className="px-2 py-0.5   text-white font-medium rounded"
                         >
                           Save
                         </button>
@@ -649,7 +615,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           e.stopPropagation();
                           openEditor(exam);
                         }}
-                        className="mt-0.5 text-[11px] font-semibold text-[#8ff3f4] hover:underline flex items-center gap-1"
+                        className="mt-0.5 text-[11px] font-semibold  hover:underline flex items-center gap-1"
                       >
                         <Calendar className="w-3 h-3" />
                         <span>Set exam date</span>
@@ -674,7 +640,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                     {countdown.status === 'ACTIVE' && (
                       <div>
-                        <div className="font-mono font-bold text-xs text-white tracking-wide">
+                        <div className="font-mono font-medium text-xs text-white tracking-wide">
                           {countdown.text}
                         </div>
                         {/* More than one sitting/shift: choose which date to count down to. */}
@@ -683,7 +649,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             value={dateVal}
                             onClick={(e) => e.stopPropagation()}
                             onChange={(e) => selectExamDate(exam.id, exam.storageKeys, e.target.value)}
-                            className="mt-1 w-full px-1.5 py-0.5 bg-white dark:bg-slate-900/80 border border-slate-300 dark:border-slate-700 rounded text-[10px] text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#0f8b8d]"
+                            className="mt-1 w-full px-1.5 py-0.5 bg-slate-900/80 border border-slate-700 rounded text-[10px] text-slate-200 focus:outline-none focus:"
                             title="Choose which exam date to count down to"
                           >
                             {examDateLists[exam.id].map((d) => (
@@ -708,12 +674,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       {/* Footer Controls: Dark Mode Toggle */}
-      <div className="p-3 border-t border-[#13294b] flex items-center justify-between text-xs text-slate-400 shrink-0">
+      <div className="p-3 border-t  flex items-center justify-between text-xs text-slate-400 shrink-0">
         <span className="text-[11px] font-mono text-slate-500">Board Exam Engine</span>
 
         <button
           onClick={onToggleDarkMode}
-          className="p-1.5 rounded-lg bg-[#13294b] hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
+          className="p-1.5 rounded-lg  hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
           title="Toggle Dark Mode"
         >
           {darkMode ? <Sun className="w-3.5 h-3.5 text-amber-300" /> : <Moon className="w-3.5 h-3.5" />}

@@ -1,6 +1,6 @@
 // Real OCR via tesseract.js (PARITY section 5). Used by:
-//   - the PDF reader's "Read with OCR" action (scanned pages / Force OCR)
-//   - the Mistake Notebook screenshot capture
+// - the PDF reader's "Read with OCR" action (scanned pages / Force OCR)
+// - the Mistake Notebook screenshot capture
 // Language data is downloaded by tesseract itself on first use; nothing is faked.
 // The module is imported dynamically so the editor runs without OCR assets until
 // the user actually starts a recognition job.
@@ -112,7 +112,7 @@ export async function ocrImage(
     const result: any = await withTimeout(
       worker.recognize(source, {}, { hocr: true }),
       120_000,
-      'Recognising a page',
+ 'Recognising a page',
     );
     const text = typeof result?.data?.text === 'string' ? result.data.text.trim() : '';
     const confidence =
@@ -164,7 +164,7 @@ export async function createOcrPool(workerCount = ocrConcurrency()): Promise<Ocr
         },
       }),
       60_000,
-      'Loading the OCR engine',
+ 'Loading the OCR engine',
     );
     return slot;
   };
@@ -197,7 +197,7 @@ export async function createOcrPool(workerCount = ocrConcurrency()): Promise<Ocr
         const result: any = await withTimeout(
           slot.worker.recognize(source, {}, { hocr: true }),
           120_000,
-          'Recognising a page',
+ 'Recognising a page',
         );
         const text = typeof result?.data?.text === 'string' ? result.data.text.trim() : '';
         const confidence =

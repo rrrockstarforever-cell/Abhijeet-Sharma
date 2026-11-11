@@ -18,23 +18,6 @@ export interface ExamProfile {
   version: number;
 }
 
-const AMC_CAT: ExamProfile = {
-  id: 'AMC_CAT',
-  edition: '2026',
-  label: 'AMC CAT MCQ',
-  options: 5,
-  multipleCorrect: false,
-  allowedQuestionTypes: ['single-best-answer'],
-  guidelineJurisdiction: 'Australia',
-  learningObjectives: ['data gathering', 'data interpretation', 'management'],
-  curriculum: ['adult health', 'child health', 'women’s health', 'mental health', 'emergency medicine', 'Aboriginal and Torres Strait Islander health'],
-  difficultyRequirements: { easy: 20, medium: 45, hard: 35 },
-  scoring: '+1 correct, no negative marking',
-  metadata: { references: 'Therapeutic Guidelines (eTG), AMH, RACGP Red Book, Murtagh’s General Practice, NIP' },
-  permittedMedia: ['image', 'table'],
-  version: 1,
-};
-
 const NEET_PG: ExamProfile = {
   id: 'NEET_PG',
   edition: '2026',
@@ -69,7 +52,7 @@ const INI_CET: ExamProfile = {
   version: 1,
 };
 
-const REGISTRY: Record<string, ExamProfile> = { AMC_CAT, NEET_PG, INI_CET };
+const REGISTRY: Record<string, ExamProfile> = { NEET_PG, INI_CET };
 
 export function getExamProfile(examType: string): ExamProfile | null {
   return REGISTRY[examType] ?? null;

@@ -34,16 +34,16 @@ export interface TeachingNote {
 
 // Step 1: one page image becomes an exact transcript, with no teaching and no interpretation.
 export const PAGE_TRANSCRIBE_SYSTEM = [
-  'You transcribe one page of a medical book from its image, including handwriting. Output only the transcript.',
-  'Copy every word, number, ordinal (1st, 2nd, 3rd), unit, age and weight band, drug name, enzyme name and symbol (↑ ↓ →) exactly as written. Look twice at small digits and at lookalike names such as CYP2C9 and CYP2C19.',
-  'Keep the structure: headings, bullets, and tables as rows with " | " between cells. Show which label sits under which heading. For a diagram, list what it shows, in order.',
-  'Abbreviations stay as written (D/t, C/I, MI, DOC). Do not explain, correct or add anything. Write [unclear] for anything you cannot read; never guess.',
-  'Skip watermarks, website names, video timestamps, page numbers and the words "Active space".',
+ 'You transcribe one page of a medical book from its image, including handwriting. Output only the transcript.',
+ 'Copy every word, number, ordinal (1st, 2nd, 3rd), unit, age and weight band, drug name, enzyme name and symbol (↑ ↓ →) exactly as written. Look twice at small digits and at lookalike names such as CYP2C9 and CYP2C19.',
+ 'Keep the structure: headings, bullets, and tables as rows with " | " between cells. Show which label sits under which heading. For a diagram, list what it shows, in order.',
+ 'Abbreviations stay as written (D/t, C/I, MI, DOC). Do not explain, correct or add anything. Write [unclear] for anything you cannot read; never guess.',
+ 'Skip watermarks, website names, video timestamps, page numbers and the words "Active space".',
 ].join('\n');
 
 // Step 2: the transcripts become a teaching note.
 export const TEACHING_NOTE_SYSTEM = [
-  'You are a patient medical teacher writing for a reader with no prior medical knowledge. Assume they have never met this subject. Explain the selected chapter, topic, or paragraph from the beginning. Never use an undefined term. The first time any medical word, abbreviation, acronym, symbol, unit, normal value, anatomical name, drug class, test, or mechanism appears, define it in plain English; expand abbreviations (e.g., "MI (myocardial infarction, heart attack)"). Start each section with the simplest definition: what it is and why it matters. Then give one simple, everyday, non-medical example. Then state the clinical meaning: when and why it matters for patients. Use short sentences and common words. Explain every step of a process and what acts at each step. Use the pages for all book-specific facts, numbers, names, and exceptions; keep them exact. You may add basic definitions and everyday examples needed for a first-time reader; mark any added clinical fact or mechanism not on the pages with †. Never invent or contradict source facts. If the source says [unclear], say "unclear in source." Use tables only for simple comparisons, traps for named exam mistakes, and hooks at most twice. Reply only with JSON: {"title":"...","takeaway":"...","sections":[{"heading":"...","page":123,"blocks":[{"type":"text","text":"..."},{"type":"steps","items":[{"title":"...","detail":"...","tag":"..."}]},{"type":"table","columns":["..."],"rows":[["..."]]},{"type":"trap","text":"..."},{"type":"figure","page":123,"caption":"..."},{"type":"hook","text":"..."}]}],"selfCheck":[{"q":"...","a":"..."}]}. Write 2-4 selfCheck questions that test first-time understanding.',
+ 'You are a patient medical teacher writing for a reader with no prior medical knowledge. Assume they have never met this subject. Explain the selected chapter, topic, or paragraph from the beginning. Never use an undefined term. The first time any medical word, abbreviation, acronym, symbol, unit, normal value, anatomical name, drug class, test, or mechanism appears, define it in plain English; expand abbreviations (e.g., "MI (myocardial infarction, heart attack)"). Start each section with the simplest definition: what it is and why it matters. Then give one simple, everyday, non-medical example. Then state the clinical meaning: when and why it matters for patients. Use short sentences and common words. Explain every step of a process and what acts at each step. Use the pages for all book-specific facts, numbers, names, and exceptions; keep them exact. You may add basic definitions and everyday examples needed for a first-time reader; mark any added clinical fact or mechanism not on the pages with †. Never invent or contradict source facts. If the source says [unclear], say "unclear in source." Use tables only for simple comparisons, traps for named exam mistakes, and hooks at most twice. Reply only with JSON: {"title":"...","takeaway":"...","sections":[{"heading":"...","page":123,"blocks":[{"type":"text","text":"..."},{"type":"steps","items":[{"title":"...","detail":"...","tag":"..."}]},{"type":"table","columns":["..."],"rows":[["..."]]},{"type":"trap","text":"..."},{"type":"figure","page":123,"caption":"..."},{"type":"hook","text":"..."}]}],"selfCheck":[{"q":"...","a":"..."}]}. Write 2-4 selfCheck questions that test first-time understanding.',
 ].join('\n');
 
 const str = (v: unknown) => (typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : '');
@@ -163,7 +163,7 @@ export function teachingNoteToText(note: TeachingNote): string {
 /** **bold** and the † "not from the book" mark. */
 function inline(text: string): React.ReactNode[] {
   return text.split(/(\*\*[^*]+\*\*|†)/g).filter(Boolean).map((part, i) => {
-    if (part === '†') return <sup key={i} className="font-bold text-[#00696b]" title="Not stated on these pages">†</sup>;
+    if (part === '†') return <sup key={i} className="font-medium " title="Not stated on these pages">†</sup>;
     if (part.startsWith('**') && part.endsWith('**')) return <strong key={i} className="font-semibold text-slate-900">{part.slice(2, -2)}</strong>;
     return <React.Fragment key={i}>{part}</React.Fragment>;
   });
@@ -186,7 +186,7 @@ const FigureBlock: React.FC<{ page: number; caption: string; renderPage?: Render
         <img src={src} alt={caption || `Book page ${page}`} onClick={() => setBig((v) => !v)} className={`mx-auto cursor-zoom-in rounded-md border border-slate-200 bg-white ${big ? 'w-full' : 'max-h-96'}`} />
       ) : (
         <div className="flex h-24 items-center justify-center text-[11px] text-slate-500">
-          {failed ? (onOpenPage ? <button onClick={() => onOpenPage(page)} className="font-semibold text-[#00696b] hover:underline">Open page {page} to see the figure</button> : `See page ${page}`) : <Loader2 className="h-4 w-4 animate-spin" />}
+          {failed ? (onOpenPage ? <button onClick={() => onOpenPage(page)} className="font-semibold  hover:underline">Open page {page} to see the figure</button> : `See page ${page}`) : <Loader2 className="h-4 w-4 animate-spin" />}
         </div>
       )}
       <figcaption className="mt-1.5 text-[11.5px] leading-snug text-slate-600">{caption ? inline(caption) : null} <span className="text-slate-400">(page {page})</span></figcaption>
@@ -201,7 +201,7 @@ const Block: React.FC<{ block: NoteBlock; renderPage?: RenderPage; onOpenPage?: 
     const trap = block.type === 'trap';
     return (
       <div className={`rounded-xl border p-3 ${trap ? 'border-rose-200 bg-rose-50' : 'border-amber-200 bg-amber-50'}`}>
-        <div className={`mb-1 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider ${trap ? 'text-rose-700' : 'text-amber-800'}`}>
+        <div className={`mb-1 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider ${trap ? 'text-rose-700' : 'text-amber-800'}`}>
           {trap ? <AlertTriangle className="h-3 w-3" /> : <Lightbulb className="h-3 w-3" />}
           {trap ? 'Exam trap' : 'Memory hook'}
         </div>
@@ -216,7 +216,7 @@ const Block: React.FC<{ block: NoteBlock; renderPage?: RenderPage; onOpenPage?: 
           <li key={i} className="rounded-lg bg-teal-50 p-2 text-[11.5px] leading-snug text-slate-700">
             <b className="mb-1 block text-[12px] text-slate-900">{inline(item.title)}</b>
             {inline(item.detail)}
-            {item.tag && <span className="mt-1 block font-semibold text-[#00696b]">{inline(item.tag)}</span>}
+            {item.tag && <span className="mt-1 block font-semibold ">{inline(item.tag)}</span>}
           </li>
         ))}
       </ol>
@@ -228,7 +228,7 @@ const Block: React.FC<{ block: NoteBlock; renderPage?: RenderPage; onOpenPage?: 
         <thead>
           <tr>
             {block.columns.map((c, i) => (
-              <th key={i} className="border-b-2 border-slate-200 px-2 py-1.5 text-left text-[10px] font-bold uppercase tracking-wide text-slate-500">{c}</th>
+              <th key={i} className="border-b-2 border-slate-200 px-2 py-1.5 text-left text-[10px] font-medium uppercase tracking-wide text-slate-500">{c}</th>
             ))}
           </tr>
         </thead>
@@ -252,7 +252,7 @@ const CheckItem: React.FC<{ item: WebCheckItem }> = ({ item }) => (
     {item.explanation && <p className="mt-0.5">{item.explanation}</p>}
     {item.quote && <p className="mt-0.5 italic text-slate-500">"{item.quote}"</p>}
     {item.source && /^https?:\/\//.test(item.source.url) && (
-      <a href={item.source.url} target="_blank" rel="noreferrer" className="mt-0.5 inline-block font-semibold text-[#00696b] hover:underline">
+      <a href={item.source.url} target="_blank" rel="noreferrer" className="mt-0.5 inline-block font-semibold  hover:underline">
         {item.source.title}
       </a>
     )}
@@ -272,10 +272,10 @@ const WebCheckPanel: React.FC<{ check?: WebCheck; checking: boolean; onRun?: () 
   return (
     <div className={`rounded-xl border p-3 ${conflicts.length || check?.status === 'failed' ? 'border-rose-200 bg-rose-50' : 'border-slate-200 bg-slate-50'}`}>
       <div className="flex items-start gap-2">
-        {checking ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-[#00696b]" /> : <Globe className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#00696b]" />}
+        {checking ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin " /> : <Globe className="mt-0.5 h-3.5 w-3.5 shrink-0 " />}
         <p className="min-w-0 flex-1 text-[12px] font-semibold leading-snug text-slate-800">{summary}</p>
         {onRun && !checking && (
-          <button onClick={onRun} className="shrink-0 rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[10px] font-bold text-slate-700 hover:bg-slate-100">
+          <button onClick={onRun} className="shrink-0 rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[10px] font-medium text-slate-700 hover:bg-slate-100">
             {check ? 'Check again' : 'Check on the web'}
           </button>
         )}
@@ -316,7 +316,7 @@ export const StructuredNote: React.FC<{
   const hasMarks = JSON.stringify(note).includes('†');
   return (
     <article className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-      <header className="bg-[#0d3b3e] px-4 py-3.5 text-white">
+      <header className=" px-4 py-3.5 text-white">
         <div className="flex items-center justify-between gap-2">
           <p className="text-[10px] font-semibold text-teal-200">{range}</p>
           {onDelete && (
@@ -325,7 +325,7 @@ export const StructuredNote: React.FC<{
             </button>
           )}
         </div>
-        <h3 className="mt-0.5 text-[17px] font-bold leading-tight">{note.title || 'Notes'}</h3>
+        <h3 className="mt-0.5 text-[17px] font-medium leading-tight">{note.title || 'Notes'}</h3>
         {note.takeaway && <p className="mt-1.5 text-[13px] leading-5 text-teal-50">{note.takeaway.replace(/\*\*/g, '')}</p>}
       </header>
       <div className="space-y-5 p-4">
@@ -337,11 +337,11 @@ export const StructuredNote: React.FC<{
         )}
         {note.sections.map((section, i) => (
           <section key={i} className="space-y-2.5">
-            <h4 className="flex flex-wrap items-baseline gap-x-2 text-[15px] font-bold leading-snug text-slate-900">
+            <h4 className="flex flex-wrap items-baseline gap-x-2 text-[15px] font-medium leading-snug text-slate-900">
               {inline(section.heading)}
               {section.page && (
                 onOpenPage ? (
-                  <button onClick={() => onOpenPage(section.page!)} className="text-[11px] font-medium text-slate-500 hover:text-[#00696b] hover:underline" title={`Open page ${section.page}`}>
+                  <button onClick={() => onOpenPage(section.page!)} className="text-[11px] font-medium text-slate-500  hover:underline" title={`Open page ${section.page}`}>
                     p. {section.page}
                   </button>
                 ) : (
@@ -354,7 +354,7 @@ export const StructuredNote: React.FC<{
         ))}
         {note.selfCheck.length > 0 && (
           <section className="space-y-1.5">
-            <h4 className="text-[15px] font-bold text-slate-900">Test yourself</h4>
+            <h4 className="text-[15px] font-medium text-slate-900">Test yourself</h4>
             {note.selfCheck.map((c, i) => (
               <details key={i} className="rounded-lg border border-slate-200 px-3 py-2">
                 <summary className="cursor-pointer text-[13px] font-semibold leading-5 text-slate-800">{inline(c.q)}</summary>
@@ -366,7 +366,7 @@ export const StructuredNote: React.FC<{
         <p className="border-t border-slate-100 pt-2 text-[11px] leading-snug text-slate-500">
           {hasMarks && (
             <>
-              <sup className="font-bold text-[#00696b]">†</sup> Not stated on these pages. Added by the AI, so verify it.{' '}
+              <sup className="font-medium ">†</sup> Not stated on these pages. Added by the AI, so verify it.{' '}
             </>
           )}
           The AI can misread handwriting, so check numbers and exceptions against the page.

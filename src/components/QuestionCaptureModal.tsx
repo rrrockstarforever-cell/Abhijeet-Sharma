@@ -149,17 +149,17 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
     try {
       const raw = await aiComplete({
         system:
-          'You convert raw OCR text from a medical exam question into structured JSON. ' +
-          'Never invent clinical content that is not present in the text; leave fields empty when unclear. ' +
-          'Respond with ONLY a JSON object, no markdown.',
+ 'You convert raw OCR text from a medical exam question into structured JSON. ' +
+ 'Never invent clinical content that is not present in the text; leave fields empty when unclear. ' +
+ 'Respond with ONLY a JSON object, no markdown.',
         messages: [{
           role: 'user',
           content:
-            `Exam: ${exam.replace('_', '-')}\n\nRaw text:\n"""\n${text.slice(0, 8000)}\n"""\n\n` +
-            'Return exactly: {"stem":"vignette / scenario","questionText":"the actual question sentence",' +
-            '"options":[{"id":"A","text":"..."},{"id":"B","text":"..."},{"id":"C","text":"..."},{"id":"D","text":"..."}],' +
-            '"correctOption":"A","explanation":"why the answer is correct and the main distractor is wrong",' +
-            '"subject":"discipline","subtopic":"topic","boardPearl":"one-line pearl","citations":["source if present"]}',
+ `Exam: ${exam.replace('_', '-')}\n\nRaw text:\n"""\n${text.slice(0, 8000)}\n"""\n\n` +
+ 'Return exactly: {"stem":"vignette / scenario","questionText":"the actual question sentence",' +
+ '"options":[{"id":"A","text":"..."},{"id":"B","text":"..."},{"id":"C","text":"..."},{"id":"D","text":"..."}],' +
+ '"correctOption":"A","explanation":"why the answer is correct and the main distractor is wrong",' +
+ '"subject":"discipline","subtopic":"topic","boardPearl":"one-line pearl","citations":["source if present"]}',
         }],
         json: true,
         provider,
@@ -261,15 +261,15 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
     ? `${getActiveProvider()} · ${getEffectiveModel(getActiveProvider()!)}`
     : 'no active provider';
 
-  const field = 'w-full text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]';
+  const field = 'w-full text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:';
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-start justify-center p-4 overflow-y-auto">
       <div className="bg-white rounded-2xl max-w-3xl w-full my-6 p-5 shadow-2xl border border-slate-200 space-y-4">
         <div className="flex items-start justify-between border-b border-slate-100 pb-3">
           <div>
-            <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-              <ClipboardPaste className="w-4 h-4 text-[#0f8b8d]" /> Capture a question
+            <h3 className="text-base font-medium text-slate-900 flex items-center gap-2">
+              <ClipboardPaste className="w-4 h-4 " /> Capture a question
             </h3>
             <p className="text-[11px] text-slate-500 mt-0.5">
               Paste a screenshot with <strong>Ctrl+V</strong> (or choose an image), OCR it, then structure it with your active AI.
@@ -287,7 +287,7 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
         {savedId && (
           <div className="p-2.5 bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] rounded-xl flex items-center gap-2">
             <CheckCircle2 className="w-3.5 h-3.5" /> Saved to the Mistake Notebook as {savedId}.
-            <button onClick={onClose} className="ml-auto font-bold underline">Close</button>
+            <button onClick={onClose} className="ml-auto font-medium underline">Close</button>
           </div>
         )}
 
@@ -297,7 +297,7 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
             <div
               onDrop={(e) => { e.preventDefault(); pickImage(e.dataTransfer.files?.[0] ?? null); }}
               onDragOver={(e) => e.preventDefault()}
-              className="rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 min-h-36 flex flex-col items-center justify-center p-3 text-center"
+              className="rounded-xl border border-dashed border-slate-300 bg-slate-50 min-h-36 flex flex-col items-center justify-center p-3 text-center"
             >
               {image ? (
                 <div className="space-y-2 w-full">
@@ -314,7 +314,7 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
                   <ClipboardPaste className="w-6 h-6 text-slate-300 mb-1" />
                   <p className="text-[11px] text-slate-600 font-semibold">Paste a screenshot (Ctrl+V)</p>
                   <p className="text-[10px] text-slate-400 mt-0.5">or drop an image here / choose a file</p>
-                  <button onClick={() => fileRef.current?.click()} className="mt-2 px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-bold text-slate-700 flex items-center gap-1">
+                  <button onClick={() => fileRef.current?.click()} className="mt-2 px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[10px] font-medium text-slate-700 flex items-center gap-1">
                     <ImagePlus className="w-3 h-3" /> Choose image
                   </button>
                 </>
@@ -326,15 +326,15 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
               <button
                 onClick={runOcr}
                 disabled={!image || ocrBusy}
-                className="flex-1 py-1.5 rounded-lg bg-[#001432] text-white text-[10px] font-bold disabled:opacity-40 flex items-center justify-center gap-1"
+                className="flex-1 py-1.5 rounded-lg  text-white text-[10px] font-medium disabled:opacity-40 flex items-center justify-center gap-1"
               >
-                {ocrBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <ScanText className="w-3 h-3 text-[#8ff3f4]" />}
+                {ocrBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <ScanText className="w-3 h-3 " />}
                 {ocrBusy ? 'Recognising…' : 'Run OCR'}
               </button>
               <button
                 onClick={structureWithAi}
                 disabled={!ocrText.trim() || structBusy}
-                className="flex-1 py-1.5 rounded-lg bg-[#0f8b8d] hover:bg-[#00696b] text-white text-[10px] font-bold disabled:opacity-40 flex items-center justify-center gap-1"
+                className="flex-1 py-1.5 rounded-lg   text-white text-[10px] font-medium disabled:opacity-40 flex items-center justify-center gap-1"
               >
                 {structBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
                 Structure with AI
@@ -342,7 +342,7 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
             </div>
             <div className="text-[9px] font-mono text-slate-400 text-right">{providerLabel}</div>
 
-            <label className="text-[10px] font-bold text-slate-600 block">OCR text (editable)</label>
+            <label className="text-[10px] font-medium text-slate-600 block">OCR text (editable)</label>
             <textarea
               value={ocrText}
               onChange={(e) => setOcrText(e.target.value)}
@@ -359,34 +359,34 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
           <div className="space-y-2">
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Source / test</label>
-                <input value={source} onChange={(e) => setSource(e.target.value)} placeholder="e.g. AMC CAT mock 3" className={field} />
+                <label className="text-[10px] font-medium text-slate-600 block mb-0.5">Source / test</label>
+                <input value={source} onChange={(e) => setSource(e.target.value)} placeholder="e.g. mock test 3" className={field} />
               </div>
               <div>
-                <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Subject</label>
+                <label className="text-[10px] font-medium text-slate-600 block mb-0.5">Subject</label>
                 <input value={draft.subject} onChange={(e) => setDraft((d) => ({ ...d, subject: e.target.value }))} placeholder="e.g. Cardiology" className={field} />
               </div>
             </div>
             <div>
-              <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Topic</label>
+              <label className="text-[10px] font-medium text-slate-600 block mb-0.5">Topic</label>
               <input value={draft.subtopic} onChange={(e) => setDraft((d) => ({ ...d, subtopic: e.target.value }))} placeholder="e.g. Acute coronary syndrome" className={field} />
             </div>
             <div>
-              <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Stem</label>
+              <label className="text-[10px] font-medium text-slate-600 block mb-0.5">Stem</label>
               <textarea value={draft.stem} onChange={(e) => setDraft((d) => ({ ...d, stem: e.target.value }))} rows={3} className={`${field} resize-y`} />
             </div>
             <div>
-              <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Question</label>
+              <label className="text-[10px] font-medium text-slate-600 block mb-0.5">Question</label>
               <input value={draft.questionText} onChange={(e) => setDraft((d) => ({ ...d, questionText: e.target.value }))} className={field} />
             </div>
 
             <div className="space-y-1">
-              <label className="text-[10px] font-bold text-slate-600 block">Options (select the correct one)</label>
+              <label className="text-[10px] font-medium text-slate-600 block">Options (select the correct one)</label>
               {draft.options.map((o) => (
                 <div key={o.id} className="flex items-center gap-1.5">
                   <button
                     onClick={() => setDraft((d) => ({ ...d, correctOption: o.id }))}
-                    className={`w-6 h-6 rounded-full text-[10px] font-bold shrink-0 ${
+                    className={`w-6 h-6 rounded-full text-[10px] font-medium shrink-0 ${
                       draft.correctOption === o.id ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600'
                     }`}
                     title="Mark as correct answer"
@@ -399,7 +399,7 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
               {draft.options.length < 5 && (
                 <button
                   onClick={() => setDraft((d) => ({ ...d, options: [...d.options, { id: 'E', text: '' }] }))}
-                  className="text-[10px] font-semibold text-[#0f8b8d] underline"
+                  className="text-[10px] font-semibold  underline"
                 >
                   + Add option E
                 </button>
@@ -407,21 +407,21 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
             </div>
 
             <div>
-              <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Explanation (optional)</label>
+              <label className="text-[10px] font-medium text-slate-600 block mb-0.5">Explanation (optional)</label>
               <textarea value={draft.explanation} onChange={(e) => setDraft((d) => ({ ...d, explanation: e.target.value }))} rows={3} className={`${field} resize-y`} />
             </div>
 
             <div className="flex items-center gap-2 pt-1">
-              <span className="text-[10px] font-bold text-slate-600">In the source test I got this:</span>
+              <span className="text-[10px] font-medium text-slate-600">In the source test I got this:</span>
               <button
                 onClick={() => setMarkedCorrect(false)}
-                className={`px-2 py-1 rounded-lg text-[10px] font-bold border ${!markedCorrect ? 'bg-rose-50 border-rose-300 text-rose-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}
+                className={`px-2 py-1 rounded-lg text-[10px] font-medium border ${!markedCorrect ? 'bg-rose-50 border-rose-300 text-rose-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}
               >
                 Incorrect
               </button>
               <button
                 onClick={() => setMarkedCorrect(true)}
-                className={`px-2 py-1 rounded-lg text-[10px] font-bold border ${markedCorrect ? 'bg-emerald-50 border-emerald-300 text-emerald-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}
+                className={`px-2 py-1 rounded-lg text-[10px] font-medium border ${markedCorrect ? 'bg-emerald-50 border-emerald-300 text-emerald-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}
               >
                 Correct
               </button>
@@ -436,9 +436,9 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
             <button
               onClick={save}
               disabled={!!savedId}
-              className="px-3 py-1.5 text-[11px] font-bold bg-[#001432] hover:bg-[#13294b] text-white rounded-lg flex items-center gap-1.5 disabled:opacity-40"
+              className="px-3 py-1.5 text-[11px] font-medium   text-white rounded-lg flex items-center gap-1.5 disabled:opacity-40"
             >
-              <Save className="w-3.5 h-3.5 text-[#8ff3f4]" /> Save to notebook
+              <Save className="w-3.5 h-3.5 " /> Save to notebook
             </button>
           </div>
         </div>

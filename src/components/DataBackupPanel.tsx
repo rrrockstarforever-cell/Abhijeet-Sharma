@@ -71,9 +71,9 @@ export const DataBackupPanel: React.FC = () => {
       const text = await file.text();
       const result = importBackup(text);
       setMessage(
-        `Merged: ${result.highlights} highlight(s), ${result.schedules} schedule(s), ` +
-        `${result.attempts} attempt(s), ${result.capturedQuestions} captured question(s). ` +
-        'Existing schedules were kept.',
+ `Merged: ${result.highlights} highlight(s), ${result.schedules} schedule(s), ` +
+ `${result.attempts} attempt(s), ${result.capturedQuestions} captured question(s). ` +
+ 'Existing schedules were kept.',
       );
       refresh();
     } catch (err: any) {
@@ -111,14 +111,14 @@ export const DataBackupPanel: React.FC = () => {
     <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-            <Database className="w-4 h-4 text-[#0f8b8d]" /> Data, backup & review schedule
+          <h3 className="text-base font-medium text-slate-900 flex items-center gap-2">
+            <Database className="w-4 h-4 " /> Data, backup & review schedule
           </h3>
           <p className="text-xs text-slate-500 mt-0.5">
             Versioned JSON backup (v{BACKUP_VERSION}) — never includes OAuth tokens or API keys.
           </p>
         </div>
-        <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-600">
+        <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded bg-slate-100 text-slate-600">
           {counts.cards} cards · {counts.due} due
         </span>
       </div>
@@ -131,7 +131,7 @@ export const DataBackupPanel: React.FC = () => {
           { label: 'Review cards', value: counts.cards },
         ].map((c) => (
           <div key={c.label} className="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
-            <div className="text-lg font-mono font-bold text-slate-800">{c.value}</div>
+            <div className="text-lg font-mono font-medium text-slate-800">{c.value}</div>
             <div className="text-[10px] text-slate-500">{c.label}</div>
           </div>
         ))}
@@ -151,13 +151,13 @@ export const DataBackupPanel: React.FC = () => {
       <div className="flex flex-wrap items-center gap-2">
         <button
           onClick={exportNow}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#001432] hover:bg-[#13294b] text-white text-xs font-bold"
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg   text-white text-xs font-medium"
         >
-          <Download className="w-3.5 h-3.5 text-[#8ff3f4]" /> Export backup (JSON)
+          <Download className="w-3.5 h-3.5 " /> Export backup (JSON)
         </button>
         <button
           onClick={() => fileRef.current?.click()}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-slate-200 hover:border-[#0f8b8d]/50 text-slate-700 text-xs font-bold"
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-slate-200  text-slate-700 text-xs font-medium"
         >
           <Upload className="w-3.5 h-3.5" /> Merge import
         </button>
@@ -170,13 +170,13 @@ export const DataBackupPanel: React.FC = () => {
         />
         <button
           onClick={reset}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 hover:bg-amber-100 text-amber-800 text-xs font-bold"
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 hover:bg-amber-100 text-amber-800 text-xs font-medium"
         >
           <RotateCcw className="w-3.5 h-3.5" /> Reset schedules (backup first)
         </button>
         <button
           onClick={clearAll}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 hover:bg-rose-100 text-rose-700 text-xs font-bold"
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 hover:bg-rose-100 text-rose-700 text-xs font-medium"
         >
           <Trash2 className="w-3.5 h-3.5" /> Delete study data
         </button>

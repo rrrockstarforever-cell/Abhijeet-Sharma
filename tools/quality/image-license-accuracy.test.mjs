@@ -3,7 +3,8 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildImageQuestionInstruction } from '../../server/visionQuestion.mjs';
+// IMPORTANT: server/visionQuestion.mjs was removed with NVIDIA integration.
+// The image-question instruction checks below were removed because they depended on it.
 import { buildVisionVerificationPrompt, parseVisionVerdict, relevanceOf, reusableLicense, reusableSearchResult } from '../../server/images.mjs';
 import { normalizeReusableImageLicense, stripUnlicensedImageFields } from '../../src/utils/imageLicense.ts';
 
@@ -47,9 +48,9 @@ expect('non-visible history and mucosal details must be rejected', consistencyPr
 expect('verifier audits visual anatomy details', consistencyPrompt.includes('body site/surface, laterality'), true);
 const unsupportedContext = parseVisionVerdict('{"shows":"target lesions","unsupported_question_claims":["patient age and URI history are not visible"],"pass":true,"reason":"The diagnosis matches."}');
 expect('nonvisual case context vetoes an otherwise positive verdict', unsupportedContext?.pass, false);
-const imageWriterPrompt = buildImageQuestionInstruction({ groundTruth: 'erythema multiforme', modality: 'clinical photo', subject: 'Dermatology', bodyPart: 'skin', examLabel: 'INI-CET', optionCount: 4 });
-expect('image-only writer is told not to invent patient context', imageWriterPrompt.includes('Do NOT invent patient age, sex, symptoms, history'), true);
-expect('image-only writer states side, plane and phase only from metadata', imageWriterPrompt.includes('unless the trusted metadata above states it'), true);
+// Removed NVIDIA image-question writer checks because server/visionQuestion.mjs was deleted:
+// - image-only writer is told not to invent patient context
+// - image-only writer states side, plane and phase only from metadata
 const genericPrompt = buildVisionVerificationPrompt({ claim: 'lobar pneumonia', modality: 'X-ray' });
 expect('generic bank verification retains label-only behavior', genericPrompt.includes('No generated question context was provided'), true);
 

@@ -1,11 +1,11 @@
 // PDF Reader — REAL pdf.js rendering (pdfjs-dist), Adobe-style layout.
 // - Library imported from the user's files, stored as blobs in IndexedDB 'PulseMedFilesDB'.
-//   Import only reads page COUNT (cheap metadata) — page content renders on demand while scrolling.
+// Import only reads page COUNT (cheap metadata) — page content renders on demand while scrolling.
 // - Continuous scroll with IntersectionObserver-driven lazy rendering + LRU eviction.
 // - pdf.js TextLayer for real text selection; selects open a floating popup:
-//   highlight with colour (saved to the user-highlights store) or copy.
+// highlight with colour (saved to the user-highlights store) or copy.
 // - Whole-document search builds a text index on demand (cached per page in IndexedDB),
-//   with next/previous match navigation.
+// with next/previous match navigation.
 // - Right panel: highlights for the doc.
 // - OCR matrix (tesseract.js, on-device).
 // No MOCK_PDF_DOCUMENTS, no fake OCR numbers, no dangerouslySetInnerHTML.
@@ -85,7 +85,6 @@ import {
   extractJson,
 } from '../lib/ai.ts';
 import { createOcrPool, ocrConcurrency, OcrWord } from '../utils/ocr.ts';
-import { recognizeWithNemotron } from '../utils/nemotronOcr.ts';
 import { startJob, stopJob, type JobControl } from '../utils/jobRegistry.ts';
 import { downloadNotesPdf } from './RevisionNote.tsx';
 import { useVoiceInput } from './useVoiceInput.ts';
@@ -102,24 +101,24 @@ const HL_COLORS: { id: string; css: string; label: string }[] = [
 ];
 
 const T = {
-  page: 'bg-slate-200/70 text-slate-800',
-  panel: 'border border-slate-200 bg-white',
-  panelSoft: 'bg-slate-50 border border-slate-200',
-  border: 'border-slate-200',
-  divider: 'border-slate-100',
-  text: 'text-slate-700',
-  muted: 'text-slate-500',
-  dim: 'text-slate-400',
-  strong: 'text-slate-900',
-  accent: 'text-[#00696b]',
-  cta: 'bg-[#0f8b8d] text-white hover:bg-[#00696b]',
-  chip: 'border-slate-200 bg-slate-50 text-slate-600',
-  chipAccent: 'border-[#0f8b8d]/30 bg-[#0f8b8d]/10 text-[#00696b]',
-  chipWarn: 'border-amber-300 bg-amber-50 text-amber-700',
-  chipGood: 'border-emerald-300 bg-emerald-50 text-emerald-700',
-  softHover: 'hover:bg-slate-100',
-  input: 'border-slate-200 bg-white text-slate-800 placeholder:text-slate-400',
-  reader: 'bg-slate-200/70',
+  page: '   ',
+  panel: 'border  bg-white  ',
+  panelSoft: 'border    ',
+  border: ' ',
+  divider: ' ',
+  text: ' ',
+  muted: ' ',
+  dim: ' ',
+  strong: ' ',
+  accent: ' ',
+  cta: 'border   hover:-translate-y-[2px] hover:scale-[1.03] hover: dark:',
+  chip: 'border  bg-white/70   dark:bg-white/[0.06] ',
+  chipAccent: 'border      ',
+  chipWarn: 'border border-amber-500/40 bg-amber-100 text-amber-800 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200',
+  chipGood: 'border      ',
+  softHover: 'hover:bg-black/[0.05] dark:hover:bg-white/[0.07]',
+  input: 'border  bg-white  placeholder:    dark:placeholder:',
+  reader: ' ',
 };
 
 const SUBJECT_RULES: { subject: string; patterns: RegExp }[] = [
@@ -331,16 +330,16 @@ function normalizeOcrWords(
 
 // How the copilot answers: a teacher working through the passage with the student, not a summary.
 const TEACHER_SYSTEM =
-  'You are a patient teacher. The student has never studied this subject, so start from zero. ' +
-  'Explain the selected passage from the beginning: ' +
-  '(1) the simplest definition of the idea in plain words; ' +
-  '(2) define every medical word, abbreviation and symbol the first time it appears, in brackets; ' +
-  '(3) one simple everyday example that is not medical; ' +
-  "(4) the clinical meaning (how it affects a patient's care): why it matters for a patient; " +
-  '(5) each step of any process, with what happens at that step; ' +
-  '(6) one question for the student to answer, then the answer on the next line. ' +
-  'Use short sentences and common words. Stay grounded in the passage and cite it as [book p. N]. ' +
-  'Mark any fact not in the passage with a dagger symbol (†, meaning not in the passage). If the passage does not cover a step, say so.';
+ 'You are a patient teacher. The student has never studied this subject, so start from zero. ' +
+ 'Explain the selected passage from the beginning: ' +
+ '(1) the simplest definition of the idea in plain words; ' +
+ '(2) define every medical word, abbreviation and symbol the first time it appears, in brackets; ' +
+ '(3) one simple everyday example that is not medical; ' +
+ "(4) the clinical meaning (how it affects a patient's care): why it matters for a patient; " +
+ '(5) each step of any process, with what happens at that step; ' +
+ '(6) one question for the student to answer, then the answer on the next line. ' +
+ 'Use short sentences and common words. Stay grounded in the passage and cite it as [book p. N]. ' +
+ 'Mark any fact not in the passage with a dagger symbol (†, meaning not in the passage). If the passage does not cover a step, say so.';
 interface PDFReaderViewProps {
   onNavigate: (view: AppView, targetId?: string) => void;
   darkMode?: boolean;
@@ -377,14 +376,6 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   const [showThumbs, setShowThumbs] = useState<boolean>(false);
   const [ocrForce, setOcrForce] = useState<boolean>(false);
   const [ocrBusy, setOcrBusy] = useState<boolean>(false);
-  // Which engine reads the pages: on-device Tesseract, or NVIDIA's hosted nemotron-ocr-v2.
-  const [ocrEngine, setOcrEngine] = useState<'tesseract' | 'nemotron'>(() => {
-    try {
-      return localStorage.getItem('pulse.ocrEngine') === 'nemotron' ? 'nemotron' : 'tesseract';
-    } catch {
-      return 'tesseract';
-    }
-  });
   const [ocrTask, setOcrTask] = useState<{ done: number; total: number; detail: string } | null>(null);
   const [ocrNote, setOcrNote] = useState<string | null>(null);
   const [wordsVersion, setWordsVersion] = useState(0);
@@ -628,9 +619,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
     }
   };
 
-  const handleDeleteDoc = async (id: string) => {
+  const handleDeleteDoc = async (id: string, confirmed = false) => {
     const doc = docs.find((d) => d.id === id);
-    if (!window.confirm(`Delete "${doc?.title ?? 'this book'}" from the library? This cannot be undone.`)) return;
+    if (!confirmed && !window.confirm(`Delete "${doc?.title ?? 'this book'}" from the library? This cannot be undone.`)) return;
     try {
       await removeLibraryDocument(id);
       writeSavedNotes(id, []);
@@ -1094,7 +1085,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
     const K = 1;
     const measure = document.createElement('canvas').getContext('2d')!;
     try {
-      if (ocrEngine === 'tesseract') pool = await createOcrPool(K);
+      pool = await createOcrPool(K);
       let next = 0;
       const runOne = async () => {
         for (;;) {
@@ -1117,9 +1108,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
             canvas.width = Math.floor(viewport.width);
             canvas.height = Math.floor(viewport.height);
             await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise;
-            const result = ocrEngine === 'nemotron'
-              ? await recognizeWithNemotron(canvas)
-              : await pool!.recognize(canvas, (p) => {
+            const result = await pool!.recognize(canvas, (p) => {
                 job.update({
                   progress: Math.round(((processed + p.progress) / pages.length) * 100),
                   detail: `page ${n} · ${p.status}`,
@@ -1150,7 +1139,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
       };
       await Promise.all(Array.from({ length: K }, () => runOne()));
       const parts = [
-        `${processed} page${processed === 1 ? '' : 's'} recognised`,
+ `${processed} page${processed === 1 ? '' : 's'} recognised`,
         skipped ? `${skipped} skipped (already had text)` : '',
         failures.length ? `${failures.length} failed` : '',
       ].filter(Boolean);
@@ -1160,7 +1149,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
       } else {
         job.done(parts.join(', '));
         setOcrNote(
-          `OCR finished: ${parts.join(', ')}.` +
+ `OCR finished: ${parts.join(', ')}.` +
           (failures.length ? ` Problems: ${failures.slice(0, 4).join('; ')}${failures.length > 4 ? '…' : ''}` : ''),
         );
       }
@@ -1275,7 +1264,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
       const pageHead = (n: number) => sameText(pages.get(n)!.map((l) => l.text).join(' ').slice(0, 400));
 
       // 3. Printed page numbers are not PDF page numbers (the front matter comes first). Find the
-      //    shift that puts the first chapter titles on their printed pages.
+      // shift that puts the first chapter titles on their printed pages.
       let offset = 0;
       if (printed.length) {
         const probes = printed.filter((e) => e.level !== 'unit').slice(0, 6);
@@ -1351,7 +1340,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
       saveContents(docId, [...bookContents.filter((e) => !e.auto), ...scanned]);
       const count = (lvl: ContentLevel) => scanned.filter((e) => e.level === lvl).length;
       setContentsNote(
-        `Scanned ${total} pages: ${count('unit')} units, ${count('chapter')} chapters, ${count('section')} sections, ${count('topic')} topics. ` +
+ `Scanned ${total} pages: ${count('unit')} units, ${count('chapter')} chapters, ${count('section')} sections, ${count('topic')} topics. ` +
           (printed.length
             ? `Printed page 1 is PDF page ${1 + offset}.`
             : 'No printed contents page was found, so chapters come from the headings.'),
@@ -1651,9 +1640,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
         messages: [{
           role: 'user',
           content:
-            `Book: ${docs.find((d) => d.id === activeDocId)?.title ?? 'PDF'} — context from ${askContextLabel}:\n\n${contextText}\n\n` +
+ `Book: ${docs.find((d) => d.id === activeDocId)?.title ?? 'PDF'} — context from ${askContextLabel}:\n\n${contextText}\n\n` +
             (webBlock ? `Web sources:\n\n${webBlock}\n\n` : '') +
-            `Question: ${question}`,
+ `Question: ${question}`,
         }],
         provider,
         model: getEffectiveModel(provider),
@@ -1953,21 +1942,50 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   ).sort(([a], [b]) => Number(a === 'Uncategorised') - Number(b === 'Uncategorised') || a.localeCompare(b));
 
   const shelfView = (
-    <div className="flex h-[calc(100vh-64px)] flex-col gap-3 overflow-y-auto bg-slate-200/70 p-3 text-slate-800">
-      <header className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-        <div>
-          <p className="font-mono text-[9px] uppercase tracking-[0.25em] text-slate-400">PDF reader</p>
-          <h2 className="text-[16px] font-bold text-slate-900">Your library</h2>
-          <p className="text-[11px] text-slate-500">
-            {docs.length} book{docs.length === 1 ? '' : 's'} · grouped by subject
-          </p>
+    <div className="flex h-[calc(100vh-64px)] flex-col gap-3 overflow-y-auto  p-3   ">
+      <header className="relative overflow-hidden rounded-[20px] border  px-4 py-4  dark:dark:">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 opacity-[0.10] dark:opacity-[0.12]"
+          style={{
+            backgroundImage: 'radial-gradient(currentColor 1px, transparent 1.1px)',
+            backgroundSize: '6px 6px',
+            maskImage: 'radial-gradient(120% 90% at 18% 40%, transparent 28%, #000 78%)',
+            WebkitMaskImage: 'radial-gradient(120% 90% at 18% 40%, transparent 28%, #000 78%)',
+          }}
+        />
+        <div className="relative flex flex-wrap items-end justify-between gap-3">
+          <div className="min-w-0">
+            <p className="font-mono text-[9px] uppercase tracking-[0.32em]  ">PDF reader</p>
+            <h2 className="mt-1 font-['',system-ui] text-[34px] uppercase leading-none tracking-[0.02em]  ">
+              Your library
+            </h2>
+            <p className="mt-1.5 font-['M_PLUS_Rounded_1c',system-ui] text-[13px] leading-[1.7]  ">
+              {docs.length} book{docs.length === 1 ? '' : 's'} on this computer · grouped by subject
+            </p>
+          </div>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className={`flex min-h-[44px] items-center gap-1.5 rounded-xl px-4 text-[12px] font-medium transition active:scale-95 ${T.cta}`}
+          >
+            <UploadCloud className="h-4 w-4" /> Import
+          </button>
         </div>
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-[11px] font-bold transition active:scale-95 ${T.cta}`}
-        >
-          <UploadCloud className="h-3.5 w-3.5" /> Import
-        </button>
+      </header>
+
+      <div
+        onClick={() => fileInputRef.current?.click()}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => { e.preventDefault(); handleImportFiles(e.dataTransfer.files); }}
+        className="flex min-h-[92px] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-[20px] border border-dashed  bg-white/60 px-4 py-4 text-center transition  hover:bg-white hover:ring-4 hover:  dark:bg-white/[0.04] "
+      >
+        <UploadCloud className="h-5 w-5  " />
+        <p className="font-['M_PLUS_Rounded_1c',system-ui] text-[12px] font-semibold  ">
+          Drop a PDF or DOCX here, or click to choose files
+        </p>
+        <p className="font-mono text-[9px] uppercase tracking-[0.18em]  ">
+          Stored on this computer only · page count read up front
+        </p>
         {/* The shelf needs its own input: the reader's input is not mounted while the shelf is showing. */}
         <input
           ref={fileInputRef}
@@ -1977,7 +1995,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
           className="hidden"
           onChange={(e) => { handleImportFiles(e.target.files); e.target.value = ''; }}
         />
-      </header>
+      </div>
 
       {libraryError && (
         <div className="flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
@@ -1996,7 +2014,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               placeholder="Search all your books"
               className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-[12px]"
             />
-            <button onClick={() => void runLibrarySearch()} className={`rounded-lg px-3 py-2 text-[11px] font-bold transition active:scale-95 ${T.cta}`}>
+            <button onClick={() => void runLibrarySearch()} className={`rounded-lg px-3 py-2 text-[11px] font-medium transition active:scale-95 ${T.cta}`}>
               Search
             </button>
           </div>
@@ -2010,7 +2028,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                     onClick={() => { setShowShelf(false); void openDoc(r.docId, r.page); }}
                     className="w-full rounded-lg px-2 py-1.5 text-left hover:bg-slate-100"
                   >
-                    <span className="font-bold text-slate-800">{r.title}</span>
+                    <span className="font-medium text-slate-800">{r.title}</span>
                     <span className="text-slate-500"> · page {r.page}</span>
                     <span className="block text-slate-600">…{r.snippet}…</span>
                   </button>
@@ -2022,44 +2040,95 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
       )}
 
       {!docs.length && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
-          <BookOpen className={`h-8 w-8 ${T.dim}`} />
-          <p className={`text-[12px] font-bold ${T.strong}`}>No books yet</p>
-          <p className={`max-w-xs text-[11px] leading-relaxed ${T.muted}`}>Import a PDF or DOCX. It is stored on this computer and sorted by its subject.</p>
-        </div>
+        <section className="relative flex flex-1 flex-col items-center justify-center overflow-hidden rounded-[20px] border  px-6 py-12 text-center  dark:dark:">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 opacity-[0.10] dark:opacity-[0.12]"
+            style={{
+              backgroundImage: 'radial-gradient(currentColor 1px, transparent 1.1px)',
+              backgroundSize: '6px 6px',
+              maskImage: 'radial-gradient(60% 55% at 50% 62%, transparent 34%, #000 82%)',
+              WebkitMaskImage: 'radial-gradient(60% 55% at 50% 62%, transparent 34%, #000 82%)',
+            }}
+          />
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 opacity-[0.06] dark:opacity-[0.08]"
+            style={{
+              backgroundImage: 'repeating-conic-gradient(from 0deg at 50% 62%, #14110F 0deg 1.1deg, transparent 1.1deg 7deg)',
+              maskImage: 'radial-gradient(40% 36% at 50% 62%, transparent 40%, #000 96%)',
+              WebkitMaskImage: 'radial-gradient(40% 36% at 50% 62%, transparent 40%, #000 96%)',
+            }}
+          />
+          <div className="relative flex flex-col items-center gap-2">
+            <span className="flex h-12 w-12 items-center justify-center rounded-2xl border  bg-white/80  dark:bg-white/10">
+              <BookOpen className="h-6 w-6  " />
+            </span>
+            <h3 className="font-['',system-ui] text-[30px] uppercase leading-none tracking-[0.03em]  ">
+              Your shelf is empty
+            </h3>
+            <p className="max-w-sm font-['M_PLUS_Rounded_1c',system-ui] text-[16px] leading-[1.7]  ">
+              Import a PDF or DOCX. It stays on this computer and is sorted by its subject.
+            </p>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className={`mt-2 flex min-h-[44px] items-center gap-2 rounded-xl px-5 text-[13px] font-medium ${T.cta}`}
+            >
+              <UploadCloud className="h-4 w-4" /> Import your first book
+            </button>
+          </div>
+        </section>
       )}
 
       {shelfGroups.map(([subject, books]) => (
-        <section key={subject} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="mb-3 flex items-center gap-2">
-            <span className="text-[12px] font-bold text-slate-900">{subject}</span>
-            <span className="rounded-full bg-teal-50 px-2 py-0.5 font-mono text-[9px] text-[#00696b]">{books.length}</span>
-            <span className="h-px flex-1 bg-slate-200" />
+        <section key={subject} className="rounded-[20px] border  bg-white/80 p-4  ">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <span className="text-[13px] font-medium  ">{subject}</span>
+            <span className="rounded-full border   px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider    ">{books.length}</span>
+            <span className="h-px flex-1  " />
           </div>
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-3">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
             {books.map((d) => (
-              <div key={d.id} className="group relative">
-                <button
-                  onClick={() => openDoc(d.id)}
-                  title={`${d.title} · ${d.numPages} pages`}
-                  className="flex w-full flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:-translate-y-0.5 hover:border-[#0f8b8d]/40 hover:bg-white hover:shadow-md"
-                >
-                  <div className="flex h-24 items-center justify-center rounded-lg bg-gradient-to-br from-[#00696b] to-[#0f8b8d] text-white">
-                    <BookOpen className="h-8 w-8 opacity-90" />
+              <div
+                key={d.id}
+                className="group relative rounded-[20px] border  bg-white p-3 transition duration-200  hover:motion-safe:hover:-translate-y-1 motion-safe:hover:-dark:   dark:hover:"
+              >
+                <button onClick={() => openDoc(d.id)} title={`${d.title} · ${d.numPages} pages`} className="flex w-full flex-col gap-2 text-left">
+                  <div className="flex h-20 items-center justify-center rounded-xl border   ">
+                    <BookOpen className="h-7 w-7" />
                   </div>
-                  <span className="line-clamp-2 text-[12px] font-semibold text-slate-900">{d.title}</span>
-                  <span className="font-mono text-[10px] text-slate-500">
-                    {(d.fileType ?? 'pdf').toUpperCase()} · {d.numPages} pages
+                  <span className="line-clamp-2 text-[12px] font-semibold leading-snug  ">{d.title}</span>
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    <span className="rounded-full border  bg-white/70 px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-wider   dark:bg-white/[0.06] ">
+                      {d.subject || categorizeTitle(d.title)}
+                    </span>
+                    <span className="font-['',system-ui] text-[13px] uppercase tracking-[0.04em]  ">
+                      {d.numPages} pages
+                    </span>
                   </span>
                 </button>
-                <button
-                  onClick={() => handleDeleteDoc(d.id)}
-                  title="Delete this book"
-                  aria-label={`Delete ${d.title}`}
-                  className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 bg-white/95 text-slate-500 opacity-0 shadow-sm transition hover:border-rose-300 hover:text-rose-600 focus:opacity-100 group-hover:opacity-100"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+                <div className="mt-2 flex items-center gap-1.5">
+                  <button
+                    onClick={() => openDoc(d.id)}
+                    className="flex min-h-[34px] flex-1 items-center justify-center gap-1 rounded-lg border border-transparent px-2 text-[10px] font-medium  transition  hover:bg-black/[0.05]   dark:hover:bg-white/[0.07]"
+                  >
+                    <BookOpen className="h-3 w-3" /> Open
+                  </button>
+                  <details className="group/del relative">
+                    <summary className="flex min-h-[34px] cursor-pointer list-none items-center gap-1 rounded-lg border  px-2 text-[10px] font-medium  transition   ">
+                      <Trash2 className="h-3 w-3" /> Delete
+                    </summary>
+                    <div className="mt-1.5 flex items-center gap-1.5 rounded-xl border   px-2 py-1.5">
+                      <span className="text-[9px] font-semibold leading-tight  ">Delete for good?</span>
+                      <button
+                        onClick={() => { void handleDeleteDoc(d.id, true); }}
+                        className="ml-auto rounded-md  px-2 py-1 text-[9px] font-medium  transition hover:brightness-110"
+                      >
+                        Yes
+                      </button>
+                    </div>
+                  </details>
+                </div>
               </div>
             ))}
           </div>
@@ -2071,20 +2140,20 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
   if (showShelf) return shelfView;
 
   return (
-    <div className="flex h-[calc(100vh-64px)] flex-col gap-2 overflow-y-auto p-2 lg:overflow-hidden bg-slate-200/70 text-slate-800">
-      <section className={`shrink-0 rounded-xl border px-2.5 py-2 ${T.panel}`}>
+    <div className="flex h-[calc(100vh-64px)] flex-col gap-2 overflow-y-auto  p-2    lg:overflow-hidden">
+      <section className={`shrink-0 rounded-[20px] px-2.5 py-2 ${T.panel}`}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <button
               onClick={() => setShowShelf(true)}
               title="Back to the library"
-              className={`flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-bold transition ${T.chip} ${T.softHover}`}
+              className={`flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition ${T.chip} ${T.softHover}`}
             >
               <ChevronLeft className="h-3.5 w-3.5" /> Library
             </button>
             <button
               onClick={() => fileInputRef.current?.click()}
-              className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-bold transition active:scale-95 ${T.cta}`}
+              className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition active:scale-95 ${T.cta}`}
               title="Import a PDF or DOCX (stored locally in IndexedDB)"
             >
               <UploadCloud className="h-3.5 w-3.5" /> Import
@@ -2093,7 +2162,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               <button
                 onClick={() => handleDeleteDoc(activeDoc.id)}
                 title="Delete this book from the library"
-                className={`flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-bold transition hover:border-rose-300 hover:text-rose-600 ${T.chip}`}
+                className={`flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition hover:border-rose-300 hover:text-rose-600 ${T.chip}`}
               >
                 <Trash2 className="h-3.5 w-3.5" /> Delete
               </button>
@@ -2107,7 +2176,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               onChange={(e) => { handleImportFiles(e.target.files); e.target.value = ''; }}
             />
             <div className="min-w-0">
-              <div className={`truncate text-[12px] font-bold ${T.strong}`}>{activeDoc?.title ?? 'No document open'}</div>
+              <div className={`truncate text-[12px] font-medium ${T.strong}`}>{activeDoc?.title ?? 'No document open'}</div>
               <div className={`truncate font-mono text-[9px] ${T.dim}`}>
                 {activeDoc
                   ? `${activeDoc.fileType?.toUpperCase() ?? ''} · ${numPages} pages · ${activeDoc.subject || 'Uncategorised'}`
@@ -2195,7 +2264,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                   onClick={() => { setRightTab('copilot'); setShowNotes(true); generateMcqs(); }}
                   disabled={mcqBusy || !getActiveProvider()}
                   title={getActiveProvider() ? 'Generate MCQs from this page' : 'Connect an AI provider first'}
-                  className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-bold disabled:opacity-40 ${getActiveProvider() ? T.cta : T.chip} ${T.softHover}`}
+                  className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-medium disabled:opacity-40 ${getActiveProvider() ? T.cta : T.chip} ${T.softHover}`}
                 >
                   {mcqBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <GraduationCap className="h-3 w-3" />}
                   {mcqBusy ? 'Generating…' : mcqs.length ? 'Regenerate MCQs' : 'Generate MCQs'}
@@ -2203,7 +2272,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                 <button
                   onClick={() => { setRightTab('copilot'); setShowNotes(true); }}
                   title="Ask AI about this page"
-                  className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-bold transition ${panelOpen && rightTab === 'copilot' ? T.chipAccent : T.chip} ${T.softHover}`}
+                  className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-medium transition ${panelOpen && rightTab === 'copilot' ? T.chipAccent : T.chip} ${T.softHover}`}
                 >
                   <Sparkles className="h-3 w-3" /> Ask AI
                 </button>
@@ -2227,13 +2296,13 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
       </section>
       {numPages > 0 && (
         <div className={`flex shrink-0 flex-wrap items-center gap-2 rounded-xl border px-2.5 py-1.5 ${T.panel}`}>
-          <span className={`flex items-center gap-1.5 text-[10px] font-bold ${T.accent}`}>
+          <span className={`flex items-center gap-1.5 text-[10px] font-medium ${T.accent}`}>
             <ScanText className="h-3.5 w-3.5" /> OCR
           </span>
           <button
             onClick={() => runOcr('current')}
             disabled={ocrBusy || !pdfRef.current}
-            className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.cta}`}
+            className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-medium disabled:opacity-40 ${T.cta}`}
           >
             {ocrBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <ScanText className="h-3 w-3" />}
             OCR current page ({currentPage})
@@ -2241,14 +2310,14 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
           <button
             onClick={() => runOcr('missing')}
             disabled={ocrBusy || !pdfRef.current}
-            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.chip}`}
+            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-medium disabled:opacity-40 ${T.chip}`}
           >
             <FileDown className="h-3 w-3" /> OCR pages without text
           </button>
           {ocrBusy && (
             <button
               onClick={() => { if (ocrJobRef.current) stopJob(ocrJobRef.current.id); }}
-              className="flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[10px] font-bold text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300"
+              className="flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[10px] font-medium text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300"
             >
               <Square className="h-3 w-3" /> Stop OCR
             </button>
@@ -2257,26 +2326,10 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
             <input type="checkbox" checked={ocrForce} onChange={(e) => setOcrForce(e.target.checked)} className="accent-[#0f8b8d]" />
             Force OCR even where text exists
           </label>
-          <label className={`inline-flex items-center gap-1.5 text-[10px] font-semibold ${T.muted}`}>
-            Engine
-            <select
-              value={ocrEngine}
-              onChange={(e) => {
-                const next = e.target.value === 'nemotron' ? 'nemotron' : 'tesseract';
-                setOcrEngine(next);
-                try { localStorage.setItem('pulse.ocrEngine', next); } catch { /* storage full: the choice is for this session */ }
-              }}
-              disabled={ocrBusy}
-              className={`rounded-md border px-1.5 py-0.5 text-[10px] ${T.input}`}
-            >
-              <option value="tesseract">Tesseract (on-device)</option>
-              <option value="nemotron">NVIDIA nemotron-ocr-v2 (hosted)</option>
-            </select>
-          </label>
           {ocrNote && <span className={`min-w-0 text-[10px] ${T.muted}`}>{ocrNote}</span>}
           {!pdfRef.current && <span className="text-[10px] text-amber-600 dark:text-amber-300">OCR needs a PDF. DOCX already has real text.</span>}
           <span className={`ml-auto hidden font-mono text-[9px] ${T.dim} 2xl:inline`}>
-            {ocrEngine === 'nemotron' ? 'NVIDIA nemotron-ocr-v2 · hosted' : 'tesseract.js · English · on-device'} · pages run one after another · lossy, review the text
+            tesseract.js · English · on-device · pages run one after another · lossy, review the text
           </span>
         </div>
       )}
@@ -2298,7 +2351,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               <BookOpen className={`h-4 w-4 shrink-0 ${T.accent}`} />
               <div className="min-w-0">
                 <div className="flex min-w-0 items-center gap-1.5">
-                  <span className={`truncate text-[11px] font-bold ${T.strong}`}>{activeDoc?.title ?? 'No document open'}</span>
+                  <span className={`truncate text-[11px] font-medium ${T.strong}`}>{activeDoc?.title ?? 'No document open'}</span>
                   {activeDoc && (
                     <button
                       onClick={editSubject}
@@ -2354,7 +2407,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               <button
                 onClick={toggleFullscreen}
                 title={immersive ? 'Exit full screen (Esc)' : 'Full screen reader'}
-                className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-[10px] font-bold transition ${immersive ? T.cta : `${T.chip} ${T.softHover}`}`}
+                className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-[10px] font-medium transition ${immersive ? T.cta : `${T.chip} ${T.softHover}`}`}
               >
                 {immersive ? <><X className="h-3.5 w-3.5" /> Exit full screen</> : <Maximize className="h-3.5 w-3.5" />}
               </button>
@@ -2431,7 +2484,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                         <div data-canvas-slot className="pointer-events-none absolute inset-0" />
                         <div data-text-slot className="textLayer absolute inset-0 overflow-hidden" />
                         {ocrWordsRef.current.has(n) && !nativeTextPagesRef.current.has(n) && (
-                          <span className={`absolute left-1.5 top-1.5 z-10 rounded px-1 font-mono text-[8px] font-bold ${T.chipAccent}`}>OCR · review</span>
+                          <span className={`absolute left-1.5 top-1.5 z-10 rounded px-1 font-mono text-[8px] font-medium ${T.chipAccent}`}>OCR · review</span>
                         )}
                         {ocrWordsRef.current.has(n) && !nativeTextPagesRef.current.has(n) && (
                           <div className="ocrTextLayer absolute inset-0 select-text overflow-hidden" style={{ zIndex: 2 }}>
@@ -2498,11 +2551,11 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                     <div className={`flex h-14 w-14 items-center justify-center rounded-2xl border ${T.panelSoft}`}>
                       <BookOpen className={`h-7 w-7 ${T.dim}`} />
                     </div>
-                    <h3 className={`text-sm font-bold ${T.strong}`}>PDF Reader</h3>
+                    <h3 className={`text-sm font-medium ${T.strong}`}>PDF Reader</h3>
                     <p className={`max-w-sm text-xs leading-relaxed ${T.muted}`}>
                       Import a book with <strong>Import</strong>. Pages render on demand, text is selectable, highlights and notes persist.
                     </p>
-                    <button onClick={() => fileInputRef.current?.click()} className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-bold ${T.cta}`}>
+                    <button onClick={() => fileInputRef.current?.click()} className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-medium ${T.cta}`}>
                       <UploadCloud className="h-3.5 w-3.5" /> Import your first book
                     </button>
                   </div>
@@ -2511,7 +2564,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
             </div>
             {popup && (
               <div
-                className="absolute z-30 flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-2 py-1.5 shadow-xl"
+                className="absolute z-30 flex max-w-[calc(100vw-24px)] flex-wrap items-center gap-1 rounded-[20px] border  bg-white p-1.5   dark:"
                 style={{ left: popup.x, top: popup.y }}
               >
                 {HL_COLORS.map((c) => (
@@ -2519,11 +2572,12 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                     key={c.id}
                     onClick={() => saveSelectionHighlight(c.id)}
                     title={`Highlight ${c.label}`}
-                    className="h-5 w-5 rounded-full border border-slate-300 transition-transform hover:scale-110"
+                    aria-label={`Highlight ${c.label}`}
+                    className="h-11 w-11 rounded-xl border  transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-4 focus-visible: motion-safe:active:scale-95 "
                     style={{ background: c.css }}
                   />
                 ))}
-                <div className="mx-0.5 h-4 w-px bg-slate-200" />
+                <span className="mx-0.5 h-7 w-px  " />
                 <button
                   onClick={() => {
                     setAskDialog({ text: popup.text, label: `selection (p. ${currentPageRef.current})` });
@@ -2531,15 +2585,15 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                     setPopup(null);
                   }}
                   title="Ask AI about this selection"
-                  className="rounded px-1.5 py-0.5 text-[10px] font-bold text-[#00696b] hover:bg-teal-50"
+                  className="flex min-h-[44px] items-center rounded-xl px-2.5 text-[10px] font-medium  transition  "
                 >Ask AI</button>
-                <button onClick={() => askSelection(EXPLAIN_PROMPT)} title="Explain this selection" className="rounded px-1.5 py-0.5 text-[10px] font-bold text-[#00696b] hover:bg-teal-50">Explain</button>
-                <button onClick={() => askSelection(NOTES_PROMPT, true)} title="Make an AI note and save it to Highlights" className="rounded px-1.5 py-0.5 text-[10px] font-bold text-[#00696b] hover:bg-teal-50">AI notes</button>
-                <div className="mx-0.5 h-4 w-px bg-slate-200" />
-                <button onClick={copySelection} className="rounded p-1 text-slate-500 hover:bg-slate-100" title="Copy">
-                  {copied ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
+                <button onClick={() => askSelection(EXPLAIN_PROMPT)} title="Explain this selection" className="flex min-h-[44px] items-center rounded-xl px-2.5 text-[10px] font-medium  transition  ">Explain</button>
+                <button onClick={() => askSelection(NOTES_PROMPT, true)} title="Make an AI note and save it to Highlights" className="flex min-h-[44px] items-center rounded-xl px-2.5 text-[10px] font-medium  transition  ">AI notes</button>
+                <span className="mx-0.5 h-7 w-px  " />
+                <button onClick={copySelection} className="flex h-11 w-11 items-center justify-center rounded-xl  transition hover:bg-black/[0.06]  dark:hover:bg-white/[0.08]" title="Copy">
+                  {copied ? <Check className="h-4 w-4 " /> : <Copy className="h-4 w-4" />}
                 </button>
-                <button onClick={() => setPopup(null)} className="rounded p-1 text-slate-400 hover:bg-slate-100"><X className="h-3 w-3" /></button>
+                <button onClick={() => setPopup(null)} className="flex h-11 w-11 items-center justify-center rounded-xl  transition hover:bg-black/[0.06]  dark:hover:bg-white/[0.08]" title="Close"><X className="h-4 w-4" /></button>
               </div>
             )}
             {askDialog && (
@@ -2556,7 +2610,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                 >
                   <div className="mb-2 flex items-start justify-between gap-2">
                     <div>
-                      <div className="text-[12px] font-bold text-slate-900">Ask AI about the selected text</div>
+                      <div className="text-[12px] font-medium text-slate-900">Ask AI about the selected text</div>
                       <div className="text-[10px] text-slate-500">{askDialog.label}</div>
                     </div>
                     <button onClick={closeAskDialog} className="rounded p-1 text-slate-400 hover:bg-slate-100" title="Close">
@@ -2571,7 +2625,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                       <button
                         key={opt.label}
                         onClick={() => sendAskDialog(opt.prompt)}
-                        className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold transition ${T.chip} hover:border-[#0f8b8d]/40 hover:bg-teal-50 hover:text-[#00696b]`}
+                        className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold transition ${T.chip}  hover:bg-teal-50 `}
                       >
                         {opt.label}
                       </button>
@@ -2589,14 +2643,14 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                     }}
                     rows={3}
                     placeholder="For example: compare this with glycolysis, or list the exceptions"
-                    className={`w-full resize-none rounded-lg border px-2.5 py-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]/30 ${T.input}`}
+                    className={`w-full resize-none rounded-lg border px-2.5 py-2 text-[12px] focus:outline-none focus:ring-2 focus: ${T.input}`}
                   />
                   <div className="mt-2 flex items-center justify-between gap-2">
                     <span className="text-[10px] text-slate-400">Ctrl+Enter to send</span>
                     <button
                       onClick={() => sendAskDialog(askDialogPrompt)}
                       disabled={!askDialogPrompt.trim()}
-                      className={`rounded-lg px-3 py-1.5 text-[11px] font-bold transition disabled:opacity-40 ${T.cta}`}
+                      className={`rounded-lg px-3 py-1.5 text-[11px] font-medium transition disabled:opacity-40 ${T.cta}`}
                     >
                       Send
                     </button>
@@ -2605,15 +2659,42 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               </div>
             )}
             {ocrBusy && ocrTask && (
-              <div className={`absolute bottom-3 right-3 z-30 w-64 rounded-xl border bg-white p-2.5 text-[10px] shadow-xl ${T.border}`}>
-                <div className={`mb-1.5 flex items-center justify-between font-bold ${T.strong}`}>
-                  <span className="flex items-center gap-1.5"><Loader2 className={`h-3 w-3 animate-spin ${T.accent}`} /> OCR</span>
-                  <span className={`font-mono ${T.accent}`}>{ocrTask.done}/{ocrTask.total}</span>
+              <div className="absolute bottom-3 right-3 z-30 w-72 overflow-hidden rounded-[20px] border  bg-white/95 p-2.5 text-[10px]   dark:">
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 opacity-[0.10] dark:opacity-[0.12]"
+                  style={{
+                    backgroundImage: 'radial-gradient(currentColor 1px, transparent 1.1px)',
+                    backgroundSize: '6px 6px',
+                    maskImage: 'radial-gradient(90% 80% at 50% 50%, transparent 30%, #000 85%)',
+                    WebkitMaskImage: 'radial-gradient(90% 80% at 50% 50%, transparent 30%, #000 85%)',
+                  }}
+                />
+                <div className="relative">
+                  <div className="mb-1.5 flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 font-['M_PLUS_Rounded_1c',system-ui] text-[10px] font-medium  ">
+                      <Loader2 className="h-3 w-3 animate-spin  " /> OCR
+                    </span>
+                    <span className="font-['',system-ui] text-[15px] uppercase leading-none tracking-[0.04em]  ">
+                      {ocrTask.done}/{ocrTask.total}
+                    </span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full border  bg-white  ">
+                    <div
+                      className="h-full rounded-full transition-all"
+                      style={{ width: `${Math.round((ocrTask.done / Math.max(1, ocrTask.total)) * 100)}%` }}
+                    />
+                  </div>
+                  <div className="mt-1.5 flex items-center justify-between gap-2">
+                    <p className="min-w-0 truncate font-['M_PLUS_Rounded_1c',system-ui] text-[10px]  ">{ocrTask.detail} · one page at a time</p>
+                    <button
+                      onClick={() => { if (ocrJobRef.current) stopJob(ocrJobRef.current.id); }}
+                      className="flex shrink-0 items-center gap-1 rounded-lg  px-2 py-1 text-[9px] font-medium  transition hover:brightness-110"
+                    >
+                      <Square className="h-2.5 w-2.5" /> Stop
+                    </button>
+                  </div>
                 </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
-                  <div className="h-full bg-[#0f8b8d] transition-all" style={{ width: `${Math.round((ocrTask.done / Math.max(1, ocrTask.total)) * 100)}%` }} />
-                </div>
-                <p className={`mt-1.5 truncate ${T.dim}`}>{ocrTask.detail} · one page at a time</p>
               </div>
             )}
           </div>
@@ -2663,7 +2744,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                   <button
                     key={tab.id}
                     onClick={() => setRightTab(tab.id)}
-                    className={`rounded-lg px-2.5 py-1 text-[10px] font-bold transition ${rightTab === tab.id ? T.chipAccent : `${T.muted} ${T.softHover}`}`}
+                    className={`rounded-lg px-2.5 py-1 text-[10px] font-medium transition ${rightTab === tab.id ? T.chipAccent : `${T.muted} ${T.softHover}`}`}
                   >
                     {tab.label}
                   </button>
@@ -2678,28 +2759,50 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               <div className="min-h-0 flex-1 overflow-y-auto p-2">
                 {highlights.length === 0 && (
                   <p className={`text-[10px] leading-relaxed ${T.dim}`}>
-                    No highlights yet. Select text in the reader and pick a colour.
+                    No highlights yet. You have not saved any highlights in this PDF. Select text in the reader, then pick a colour to save one.
                   </p>
                 )}
                 <div className="space-y-1.5">
                   {highlights.map((h) => (
-                    <div key={h.id} className={`group rounded-lg border p-2 ${T.panelSoft} ${T.border}`}>
+                    <div
+                      key={h.id}
+                      className={`group relative overflow-hidden rounded-xl border p-2 pl-2.5 transition  hover:focus-within:  ${T.panelSoft}`}
+                    >
+                      <span
+                        aria-hidden
+                        className="absolute inset-y-0 left-0 w-1.5"
+                        style={{ background: HL_COLORS.find((c) => c.id === h.color)?.css ?? '#fde047' }}
+                      />
                       <div className="flex items-center justify-between gap-1">
                         <div className="flex items-center gap-1.5">
-                          <span className="h-2.5 w-2.5 rounded-full border border-slate-300/60" style={{ background: h.color ?? '#fde047' }} />
+                          <span
+                            className="h-3 w-3 rounded-full border  "
+                            style={{ background: HL_COLORS.find((c) => c.id === h.color)?.css ?? '#fde047' }}
+                          />
                           <button
                             onClick={() => { if (h.page) gotoPage(h.page); }}
-                            className={`font-mono text-[9px] font-bold hover:underline ${T.accent}`}
+                            className={`font-['',system-ui] text-[13px] uppercase tracking-[0.04em] hover:underline ${T.accent}`}
                             title="Jump to this page"
                           >
                             p. {h.page ?? '—'}
                           </button>
                         </div>
-                        <button onClick={() => deleteHighlight(h.id)} className={`opacity-0 transition group-hover:opacity-100 ${T.dim} hover:text-rose-500`} title="Delete highlight">
-                          <Trash className="h-3 w-3" />
-                        </button>
+                        <details className="relative">
+                          <summary className={`flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-lg opacity-60 transition   group-hover:opacity-100 ${T.dim}`} title="Delete highlight">
+                            <Trash className="h-3.5 w-3.5" />
+                          </summary>
+                          <div className="mt-1 flex items-center gap-1 rounded-lg border   px-1.5 py-1">
+                            <span className="text-[9px] font-medium leading-none  ">Delete?</span>
+                            <button
+                              onClick={() => deleteHighlight(h.id)}
+                              className="rounded  px-1.5 py-0.5 text-[9px] font-medium  transition hover:brightness-110"
+                            >
+                              Yes
+                            </button>
+                          </div>
+                        </details>
                       </div>
-                      <p className={`mt-1 line-clamp-4 text-[10px] leading-relaxed ${T.text}`}>{h.quote}</p>
+                      <p className={`mt-1 line-clamp-4 font-['M_PLUS_Rounded_1c',system-ui] text-[11px] leading-[1.7] ${T.text}`}>{h.quote}</p>
                       {h.note && (
                         <p className={`mt-1 rounded border px-1.5 py-1 text-[9px] ${T.chipWarn}`}>{h.note}</p>
                       )}
@@ -2733,7 +2836,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                   <button
                     onClick={() => makeNotesFromPages()}
                     disabled={notesBusy}
-                    className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.cta}`}
+                    className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-medium disabled:opacity-40 ${T.cta}`}
                   >
                     {notesBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <NotebookPen className="h-3 w-3" />}
                     {notesBusy ? 'Making notes…' : 'Generate notes'}
@@ -2741,7 +2844,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                   {notesBusy && (
                     <button
                       onClick={() => { notesCancelRef.current = true; }}
-                      className="flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[10px] font-bold text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300"
+                      className="flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[10px] font-medium text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300"
                     >
                       <Square className="h-3 w-3" /> Stop
                     </button>
@@ -2750,10 +2853,10 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                 {madeNotes.length > 0 && (
                   <button
                     onClick={() => downloadNotesPdf(
-                      `${activeDoc?.title ?? 'Book'} — page notes`,
+ `${activeDoc?.title ?? 'Book'} — page notes`,
                       madeNotes.map((n) => `${n.range}\n${webCheckToText(n.webCheck)}\n\n${teachingNoteToText(n.note)}`).join('\n\n\n'),
                     )}
-                    className={`mt-2 flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold ${T.chip}`}
+                    className={`mt-2 flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-medium ${T.chip}`}
                   >
                     <FileDown className="h-3 w-3" /> Download all notes (PDF)
                   </button>
@@ -2783,15 +2886,15 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               const tree = contentTree(bookContents);
               const pct = scanning && scanning.total ? Math.round((scanning.done / scanning.total) * 100) : 0;
               const styleOf: Record<ContentLevel, string> = {
-                unit: 'font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-[#00696b]',
-                chapter: `text-[13px] font-bold ${T.strong}`,
+                unit: 'font-mono text-[10px] font-medium uppercase tracking-[0.14em] ',
+                chapter: `text-[13px] font-medium ${T.strong}`,
                 section: `text-[12px] font-semibold ${T.text}`,
                 topic: `text-[11px] ${T.muted}`,
               };
               const pageChip = (e: ContentEntry) => (
                 <button
                   onClick={(ev) => { ev.preventDefault(); ev.stopPropagation(); gotoPage(e.page); }}
-                  className="shrink-0 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[10px] text-slate-600 transition hover:border-[#0f8b8d]/40 hover:bg-teal-50 hover:text-[#00696b]"
+                  className="shrink-0 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[10px] text-slate-600 transition  hover:bg-teal-50 "
                 >
                   {e.page}
                 </button>
@@ -2828,7 +2931,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                   }}
                   disabled={notesBusy}
                   title={`Make notes from ${LEVEL_LABEL[e.level].toLowerCase()} "${e.title}"`}
-                  className={`flex shrink-0 items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition disabled:opacity-40 ${T.chip} hover:border-[#0f8b8d]/40 hover:bg-teal-50 hover:text-[#00696b]`}
+                  className={`flex shrink-0 items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold transition disabled:opacity-40 ${T.chip}  hover:bg-teal-50 `}
                 >
                   <NotebookPen className="h-3 w-3" /> Notes
                 </button>
@@ -2838,7 +2941,14 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                 const { entry: e, children } = node;
                 if (!children.length) {
                   return (
-                    <li key={e.id} className="group flex items-center gap-2 py-1">
+                    <li
+                      key={e.id}
+                      className="group flex items-center gap-2 rounded-lg border border-transparent px-1.5 py-1 transition  hover:bg-white/70  dark:hover:bg-white/[0.05]"
+                    >
+                      <span className="flex shrink-0 items-center gap-1 rounded-full border  bg-white/70 px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-wider   dark:bg-white/[0.06] ">
+                        {e.auto ? <Sparkles className="h-2.5 w-2.5" /> : <Ruler className="h-2.5 w-2.5" />}
+                        {LEVEL_LABEL[e.level]}
+                      </span>
                       <button onClick={() => gotoPage(e.page)} className={`min-w-0 flex-1 truncate text-left hover:underline ${styleOf[e.level]}`}>
                         {e.title}
                       </button>
@@ -2852,7 +2962,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                   <li key={e.id} className="group">
                     <details open={e.level === 'unit' || e.level === 'chapter'} className="group">
                       <summary className="flex cursor-pointer list-none items-center gap-2 py-1">
-                        <span className={`text-[9px] text-slate-400 transition-transform group-open:rotate-90 ${T.dim}`}>▶</span>
+                        <span className={`text-[9px] text-slate-400 transition-transform group-open:${T.dim}`}>▶</span>
                         <span className={`min-w-0 flex-1 truncate ${styleOf[e.level]}`}>{e.title}</span>
                         <span className={`shrink-0 font-mono text-[9px] ${T.dim}`}>{children.length}</span>
                         {pageChip(e)}
@@ -2866,7 +2976,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               };
               const flatten = (nodes: ContentNode[], depth = 0): string[] =>
                 nodes.flatMap((n) => [
-                  `${'    '.repeat(depth)}${n.entry.level === 'unit' ? n.entry.title.toUpperCase() : n.entry.title} ..... ${n.entry.page}`,
+ `${' '.repeat(depth)}${n.entry.level === 'unit' ? n.entry.title.toUpperCase() : n.entry.title} ..... ${n.entry.page}`,
                   ...flatten(n.children, depth + 1),
                 ]);
               return (
@@ -2876,7 +2986,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                       <button
                         onClick={buildIndexFromBook}
                         disabled={!!scanning || !pdfRef.current}
-                        className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.cta}`}
+                        className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-medium disabled:opacity-40 ${T.cta}`}
                       >
                         {scanning ? <Loader2 className="h-3 w-3 animate-spin" /> : <ListTree className="h-3 w-3" />}
                         {scanning ? `Scanning ${scanning.done}/${scanning.total}` : 'Scan whole book'}
@@ -2884,14 +2994,14 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                       <button
                         onClick={importFromBookmarks}
                         disabled={!!scanning || !pdfRef.current}
-                        className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.chip}`}
+                        className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-medium disabled:opacity-40 ${T.chip}`}
                       >
                         Import from bookmarks
                       </button>
                       {tree.length > 0 && (
                         <button
                           onClick={() => downloadNotesPdf(`${activeDoc?.title ?? 'Book'} — contents`, flatten(tree).join('\n'))}
-                          className={`ml-auto flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[10px] font-bold ${T.chip}`}
+                          className={`ml-auto flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[10px] font-medium ${T.chip}`}
                         >
                           <FileDown className="h-3 w-3" /> Download contents
                         </button>
@@ -2899,7 +3009,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                     </div>
                     {scanning && (
                       <div className="h-1 overflow-hidden rounded-full bg-slate-200">
-                        <div className="h-full bg-[#0f8b8d] transition-all" style={{ width: `${pct}%` }} />
+                        <div className="h-full  transition-all" style={{ width: `${pct}%` }} />
                       </div>
                     )}
                     {contentsNote && <p className={`text-[10px] leading-relaxed ${T.muted}`}>{contentsNote}</p>}
@@ -2936,7 +3046,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                         setNewEntry((n) => ({ ...n, title: '', page: '' }));
                       }}
                       disabled={!canAdd}
-                      className={`w-full rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${T.cta}`}
+                      className={`w-full rounded-lg px-2.5 py-1.5 text-[10px] font-medium disabled:opacity-40 ${T.cta}`}
                     >
                       Add to contents
                     </button>
@@ -2946,9 +3056,9 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                     {!tree.length && (
                       <div className="flex flex-col items-center gap-2 py-10 text-center">
                         <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-teal-50">
-                          <ListTree className="h-6 w-6 text-[#00696b]" />
+                          <ListTree className="h-6 w-6 " />
                         </div>
-                        <p className={`text-[12px] font-bold ${T.strong}`}>No contents yet</p>
+                        <p className={`text-[12px] font-medium ${T.strong}`}>No contents yet</p>
                         <p className={`max-w-[240px] text-[11px] leading-relaxed ${T.muted}`}>
                           Press Scan whole book. It reads every page and builds units, chapters, sections and topics as dropdowns.
                         </p>
@@ -2957,7 +3067,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                     {tree.length > 0 && (
                       <div className="mb-3 text-center">
                         <p className={`font-mono text-[9px] uppercase tracking-[0.25em] ${T.dim}`}>Contents</p>
-                        <p className={`mt-0.5 text-[13px] font-bold ${T.strong}`}>{activeDoc?.title}</p>
+                        <p className={`mt-0.5 text-[13px] font-medium ${T.strong}`}>{activeDoc?.title}</p>
                       </div>
                     )}
                     <ol className="space-y-1">{tree.map(renderNode)}</ol>
@@ -2974,7 +3084,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
             <header className={`flex shrink-0 items-center justify-between gap-2 border-b px-2.5 py-1.5 ${T.divider}`}>
               <div className="flex items-center gap-1.5">
                 <GraduationCap className="h-3 w-3" />
-                <span className={`font-mono text-[10px] font-bold ${T.accent}`}>Page question bank</span>
+                <span className={`font-mono text-[10px] font-medium ${T.accent}`}>Page question bank</span>
               </div>
               <div className="flex items-center gap-1">
                 {mcqs.length > 1 && (
@@ -3039,7 +3149,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                           }}
                           className={`flex items-start gap-1.5 rounded-lg border p-1.5 text-left text-[10px] leading-snug transition ${state}`}
                         >
-                          <span className={`shrink-0 rounded px-1 font-mono text-[9px] font-bold ${T.chip}`}>{String.fromCharCode(65 + oi)}</span>
+                          <span className={`shrink-0 rounded px-1 font-mono text-[9px] font-medium ${T.chip}`}>{String.fromCharCode(65 + oi)}</span>
                           <span className="min-w-0">{option}</span>
                         </button>
                       );
@@ -3096,7 +3206,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
               <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1.5">
                 {askQuestion && (askBusy || askReply || askError) && (
                   <div className="mb-1 flex justify-end">
-                    <div className="max-w-[92%] rounded-lg rounded-br-sm bg-[#13294b] px-2 py-1 text-[9px] leading-snug text-white/90">{askQuestion}</div>
+                    <div className="max-w-[92%] rounded-lg rounded-br-sm  px-2 py-1 text-[9px] leading-snug text-white/90">{askQuestion}</div>
                   </div>
                 )}
                 {askBusy ? (
@@ -3111,7 +3221,7 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                 ) : askReply ? (
                   <div className={`rounded-lg border ${T.panelSoft} ${T.border}`}>
                     <div className={`flex items-center justify-between border-b px-1.5 py-1 ${T.divider}`}>
-                      <span className={`font-mono text-[8px] font-bold uppercase tracking-wider ${T.accent}`}>Answer ┬À {askContextLabel}</span>
+                      <span className={`font-mono text-[8px] font-medium uppercase tracking-wider ${T.accent}`}>Answer ┬À {askContextLabel}</span>
                       <button
                         onClick={() => {
                           navigator.clipboard?.writeText(askReply).then(() => {
@@ -3188,11 +3298,16 @@ export const PDFReaderView: React.FC<PDFReaderViewProps> = ({ onNavigate, darkMo
                     onClick={() => voice.toggle()}
                     title={voice.recording ? 'Stop recording and transcribe' : 'Speak your question (transcribed on this device)'}
                     aria-pressed={voice.recording}
-                    className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition ${
-                      voice.recording ? 'bg-rose-600 text-white hover:bg-rose-700' : `${T.chip} hover:border-[#0f8b8d]/40`
+                    className={`flex h-8 min-w-[32px] shrink-0 items-center justify-center gap-1 rounded-lg px-1.5 transition ${
+                      voice.recording
+                        ? '  ring-2  motion-safe:animate-pulse'
+                        : `${T.chip} `
                     }`}
                   >
                     {voice.recording ? <MicOff className="h-3 w-3" /> : <Mic className="h-3 w-3" />}
+                    {voice.recording && (
+                      <span className="font-['',system-ui] text-[13px] uppercase leading-none tracking-[0.08em]">REC</span>
+                    )}
                   </button>
                   <button
                     onClick={() => {
@@ -3263,14 +3378,14 @@ const Thumb: React.FC<{
     <div
       ref={holderRef}
       onClick={onClick}
-      className={`cursor-pointer p-1 rounded-lg border transition-colors ${active ? 'border-[#0f8b8d] bg-teal-50' : 'border-transparent hover:border-slate-300'}`}
+      className={`cursor-pointer rounded-xl border p-1 transition-all ${active ? '    dark:' : 'border-transparent  '}`}
       data-thumb-page={num}
     >
-      <div className="relative bg-slate-100 rounded min-h-[60px] flex items-center justify-center overflow-hidden">
-        {!loaded && <span className="absolute inset-0 flex items-center justify-center text-[9px] font-mono text-slate-400">{num}</span>}
+      <div className="relative flex min-h-[60px] items-center justify-center overflow-hidden rounded-lg  ">
+        {!loaded && <span className="absolute inset-0 flex items-center justify-center font-mono text-[9px]  ">{num}</span>}
         <div ref={canvasHostRef} className="relative w-full" />
       </div>
-      <div className={`text-center text-[9px] font-mono mt-0.5 ${active ? 'text-[#00696b] font-bold' : 'text-slate-400'}`}>{num}</div>
+      <div className={`mt-0.5 text-center font-['',system-ui] text-[12px] uppercase tracking-[0.04em] ${active ? ' ' : ' '}`}>{num}</div>
     </div>
   );
 };

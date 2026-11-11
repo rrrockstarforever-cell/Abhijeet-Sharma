@@ -3,9 +3,9 @@
 // No silent fallbacks: every failure is thrown as a typed AiError and must be shown in the UI.
 import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } from '../types.ts';
 
-import { AMC_BLUEPRINT, getDifficultyDescription } from "./amcBlueprint";
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
+import { scopeInstruction } from './scopeRules.ts';
 import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, combinationListMissing, hasDuplicateOptions, inventedSource, explainsDistractors, explanationLeaks, leadInsFromChips, planSlots, spread, pointsAtMissingPicture, unpointDescribedPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
 
 /**
@@ -21,7 +21,7 @@ const KEY_FACT_SIMILARITY = 0.3;
 const SINGLE_BEST_ANSWER = 'Use a single best answer lead-in (diagnosis, next step, drug of choice or investigation). Do not use a numbered statements list.';
 
 function itemShape(idx: number, exam: ExamType): string {
-  // NEET-PG and AMC CAT papers are single-best-answer throughout (recall papers, sample items);
+  // NEET-PG papers are single-best-answer throughout (recall papers, sample items);
   // only INI-CET mixes in statement and incorrect-option items.
   if (exam !== 'INI_CET') return SINGLE_BEST_ANSWER;
   const slot = idx % 8;
@@ -33,14 +33,14 @@ function itemShape(idx: number, exam: ExamType): string {
 
 /** Patients rotated across a typed-topic set, so no two items share the same age, sex and setting. */
 const PATIENT_PROFILES = [
-  'a 68-year-old woman in a general medicine clinic',
-  'a 9-month-old infant on a paediatric ward',
-  'a 34-year-old man in the emergency department',
-  'a 14-year-old girl seen at a school health check',
-  'a 59-year-old farmer in a rural primary care centre',
-  'a 26-year-old pregnant woman at an antenatal visit',
-  'an 81-year-old man in a nursing home',
-  'a 45-year-old woman after a surgical procedure',
+ 'a 68-year-old woman in a general medicine clinic',
+ 'a 9-month-old infant on a paediatric ward',
+ 'a 34-year-old man in the emergency department',
+ 'a 14-year-old girl seen at a school health check',
+ 'a 59-year-old farmer in a rural primary care centre',
+ 'a 26-year-old pregnant woman at an antenatal visit',
+ 'an 81-year-old man in a nursing home',
+ 'a 45-year-old woman after a surgical procedure',
 ];
 
 /** Item types for a typed topic, rotated across the set. Case stems are only 2 in 8 (about a quarter), so the set is not mostly vignettes. */
@@ -80,9 +80,9 @@ function focusParts(subtopic: string): string[] {
   const after = subtopic.includes(':') ? subtopic.split(':').slice(1).join(':') : subtopic;
   return after.split(/,|&| and /).map((s) => s.trim()).filter(Boolean);
 }
-export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'opencode' | 'nvidia' | 'vyce' | 'deeprelay';
+export type AiProviderId = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'opencode' | 'deeprelay';
 
-export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia', 'vyce', 'deeprelay'];
+export const AI_PROVIDER_IDS: AiProviderId[] = ['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'deeprelay'];
 
 // Server defaults (mirrored in server.ts); models are user-selectable and persisted
 // in localStorage as `ai.model.<provider>` and sent with every request.
@@ -95,22 +95,18 @@ export const DEFAULT_MODELS: Record<string, string> = {
   opencode: 'deepseek-v4.1-flash',
   // Custom OpenAI-compatible endpoint — user supplies URL, model id and key.
   custom: 'gpt-4o-mini',
-  // NVIDIA NIM API — OpenAI-compatible endpoint at integrate.api.nvidia.com/v1.
-  nvidia: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
-  // VyceAI (https://vyceai.com/v1) — OpenAI-compatible, serves DeepSeek models.
-  vyce: 'deepseek-v4.1',
   deeprelay: 'deeprelay/deepseek-v4.1-flash',
 };
 
 // Console-only model ids a previous version of the app offered for OpenCode. They are not
 // included in the Go plan and return "Model is unavailable" — drop them on read.
 const NON_GO_OPENCODE_MODELS = new Set([
-  'claude-sonnet-5-5',
-  'gpt-6.1-sol',
-  'gemini-3.8-flash',
-  'kimi-k3',
-  'claude-opus-4-5',
-  'gpt-5.4',
+ 'claude-sonnet-5-5',
+ 'gpt-6.1-sol',
+ 'gemini-3.8-flash',
+ 'kimi-k3',
+ 'claude-opus-4-5',
+ 'gpt-5.4',
 ]);
 
 export const NOT_CONNECTED_MESSAGE = 'Connect an AI provider in Settings → AI Subscription Hub.';
@@ -131,7 +127,9 @@ export class AiError extends Error {
 // ---------- localStorage persistence ----------
 
 export function getActiveProvider(): AiProviderId | null {
-  const value = localStorage.getItem('ai.activeProvider');
+  const stored = localStorage.getItem('ai.activeProvider');
+  // VyceAI was removed: a saved 'vyce' choice now means Deep Relay (DeepSeek).
+  const value = stored === 'vyce' ? 'deeprelay' : stored;
   return value && (AI_PROVIDER_IDS as string[]).includes(value) ? (value as AiProviderId) : null;
 }
 
@@ -178,8 +176,8 @@ export function workBody(): { provider: AiProviderId | 'opencode'; model?: strin
 }
 
 /**
- * How many question requests run at once. NVIDIA alone rate-limits bursts, so it gets 3. When another
- * engine is in use (shared work, or an engine with no rate limit) the limit is wider.
+ * How many question requests run at once. When another engine is in use (shared work, or an engine
+ * with no rate limit) the limit is wider.
  */
 export function parallelRequestLimit(): number {
   // Test override: localStorage 'pulse.parallelLimit' sets how many questions run at once.
@@ -187,16 +185,13 @@ export function parallelRequestLimit(): number {
     const forced = Number(localStorage.getItem('pulse.parallelLimit'));
     if (Number.isFinite(forced) && forced >= 1) return forced;
   } catch { /* storage unavailable */ }
-  // Mixed mode: 4 DeepSeek lanes plus 1 NVIDIA lane, so 5 questions at once. NVIDIA alone gets 40 at a time; refused
-  // calls move to the next model in the spread, then wait 5 seconds and retry on the server. Other providers take 30.
-  if (isMixedMode()) return 5;
+  // Mixed mode (Deep Relay / DeepSeek): 10 lanes, so 10 questions at once. The service refuses more concurrent streams than about 10.
+  if (isMixedMode()) return 10;
   // OpenCode runs 20 questions at a time. Other paid providers get 5, so each call costs what it must and no more.
   if (getActiveProvider() === 'opencode') return 20;
-  // Nemotron Bolt E4B is small and fast, so it runs 20 questions at a time.
-  if (getActiveProvider() === 'nvidia' && /bolt/i.test(getEffectiveModel('nvidia'))) return 20;
-  // Claude (Haiku) and the other paid models take 15 at once; the rewrite lane below still runs one rewrite at a time.
+  // Claude and the other paid models take 15 at once; the rewrite lane below still runs one rewrite at a time.
   if (getActiveProvider() === 'claude') return 15;
-  return getActiveProvider() === 'nvidia' ? 5 : 5;
+  return 5;
 }
 
 // ---------- provider status ----------
@@ -248,7 +243,7 @@ function openCodeSessionId(): string {
     let id = sessionStorage.getItem('pulse.opencode.session');
     if (!id) {
       id = localStorage.getItem('pulse.opencode.session') ||
-        `pulsemed-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+ `pulsemed-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
       sessionStorage.setItem('pulse.opencode.session', id);
       try { localStorage.setItem('pulse.opencode.session', id); } catch { /* ignore */ }
     }
@@ -284,10 +279,10 @@ export async function splitTopic(topic: string, exam: string): Promise<{ subtopi
 }
 
 const FACT_PICK_SYSTEM =
-  'You pick one specific fact about the topic that one of the sources states. Prefer a fact about the focus if the sources have one. ' +
-  'Copy the supporting words exactly from that source. Reply with ONLY JSON: ' +
-  '{"fact":"one sentence stating the fact","quote":"exact words from that source","source":<source number>}. ' +
-  'Reply {"fact":"","quote":"","source":0} only if no source states any fact about the topic.';
+ 'You pick one specific fact about the topic that one of the sources states. Prefer a fact about the focus if the sources have one. ' +
+ 'Copy the supporting words exactly from that source. Reply with ONLY JSON: ' +
+ '{"fact":"one sentence stating the fact","quote":"exact words from that source","source":<source number>}. ' +
+ 'Reply {"fact":"","quote":"","source":0} only if no source states any fact about the topic.';
 
 const squeezeText = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
@@ -366,11 +361,12 @@ export function factKey(s: string): string {
 export interface AssignedFact { subtopic: string; fact: string; quote: string; source: string; /** Where the fact came from: the user's own library ('book') or the web and papers ('web'). */ origin?: 'book' | 'web'; /** The finding has a typical picture (X-ray, histology, ECG, smear, clinical photo). */ picturable?: boolean }
 
 const PLAN_FACTS_SYSTEM =
-  'You list distinct, high-yield, exam-testable facts about one subtopic that the sources state. Do not repeat a fact already planned. ' +
-  'Each fact must be a definite statement a student can be tested on (a cause, a feature, a number, a test, a drug effect, a warning), never an uncertain or open one ("may", "remains uncertain", "has been evaluated"). Prefer statements from an official drug label or textbook over research papers. ' +
-  'Copy the supporting words exactly from one source. Reply with ONLY JSON: ' +
-  '{"facts":[{"fact":"one sentence","quote":"exact words from that source","source":<source number>}]}. ' +
-  'Give at most the number of facts asked for; give fewer if the sources do not support that many.';
+ 'You list distinct, high-yield, exam-testable facts about one subtopic that the sources state. Do not repeat a fact already planned. ' +
+ 'Each fact must be a definite statement a student can be tested on (a cause, a feature, a number, a test, a drug effect, a warning), never an uncertain or open one ("may", "remains uncertain", "has been evaluated"). Prefer statements from an official drug label or textbook over research papers. ' +
+  scopeInstruction() + ' Every fact must sit inside that boundary. ' +
+ 'Copy the supporting words exactly from one source. Reply with ONLY JSON: ' +
+ '{"facts":[{"fact":"one sentence","quote":"exact words from that source","source":<source number>}]}. ' +
+ 'Give at most the number of facts asked for; give fewer if the sources do not support that many.';
 
 /**
  * Fact assignment: plans the set before any question is written. For each important subtopic, the sources give up to
@@ -452,9 +448,9 @@ export async function planTopicFacts(
  * One pass over the whole plan: a fact that makes the same point as an earlier fact (in different words) is removed.
  * Word matching cannot see that two sentences say the same thing, so the model decides.
  */
-/** The model for simple steps (subject, picture planning, explanation repair, duplicate check): Haiku on Claude, the active model otherwise. */
+/** The model for simple steps (subject, picture planning, explanation repair, duplicate check): the active model. */
 function cheapModel(provider: AiProviderId): string {
-  return provider === 'claude' ? 'claude-haiku-5-5' : getEffectiveModel(provider);
+  return getEffectiveModel(provider);
 }
 
 async function dedupePlan(plan: AssignedFact[], provider: AiProviderId): Promise<AssignedFact[]> {
@@ -462,7 +458,7 @@ async function dedupePlan(plan: AssignedFact[], provider: AiProviderId): Promise
   const list = plan.map((f, i) => `${i + 1}. ${f.fact}`).join('\n');
   const raw = await aiComplete({
     system: 'You check a numbered list of exam facts. Some facts make the same point as an earlier fact, in different words. ' +
-      'Reply with ONLY JSON: {"duplicates":[<numbers of the later facts that repeat an earlier one>]}. Reply {"duplicates":[]} if none.',
+ 'Reply with ONLY JSON: {"duplicates":[<numbers of the later facts that repeat an earlier one>]}. Reply {"duplicates":[]} if none.',
     messages: [{ role: 'user', content: list }],
     json: true,
     effort: 'low',
@@ -539,11 +535,11 @@ async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: Abor
   if (!provider) return null;
   const raw = await aiComplete({
     system:
-      'You are an examiner checking one MCQ before it is used. Mark ok=false only when you are sure of a problem: ' +
-      '(1) the marked answer is wrong by standard textbooks and guidelines; (2) more than one option is defensible; ' +
-      '(3) the answer only holds for one particular study, cohort, hospital, country or textbook layout, or it is a research detail no exam would ask; ' +
-      '(4) the stem or options are incomplete or contradict themselves. A NOT or EXCEPT question with a correct standard textbook key is ok=true. Otherwise ok=true. ' +
-      'Reply with ONLY JSON: {"ok":true,"problem":""} or {"ok":false,"problem":"one short sentence"}.',
+ 'You are an examiner checking one MCQ before it is used. Mark ok=false only when you are sure of a problem: ' +
+ '(1) the marked answer is wrong by standard textbooks and guidelines; (2) more than one option is defensible; ' +
+ '(3) the answer only holds for one particular study, cohort, hospital, country or textbook layout, or it is a research detail no exam would ask; ' +
+ '(4) the stem or options are incomplete or contradict themselves; (5) the question is out of scope: ' + scopeInstruction() + ' A NOT or EXCEPT question with a correct standard textbook key is ok=true. Otherwise ok=true. ' +
+ 'Reply with ONLY JSON: {"ok":true,"problem":""} or {"ok":false,"problem":"one short sentence"}.',
     messages: [{
       role: 'user',
       content: `Topic: ${topic}\n${q.stem}\n${q.questionText}\n` + q.options.map((o) => `${o.id}) ${o.text}`).join('\n') + `\nMarked answer: ${q.correctOption}\nExplanation: ${String(q.explanation ?? '').slice(0, 300)}`,
@@ -614,24 +610,24 @@ async function fetchPyqWeights(subtopics: string[], exam: string): Promise<Recor
 // A drop that only needs wording fixed keeps its draft (and its fact) and is repaired, which passes far more often than
 // a fresh rewrite. 'repeat-answer' is not here: the repair keeps the same answer, so it could never pass that check.
 const REPAIRABLE_DROPS = new Set([
-  'generic-lead-in', 'style-one-liner-too-long', 'examiner',
-  'hint-stem-words', 'hint-absolute', 'hint-length', 'similar-options',
-  'stem-incomplete', 'stem-thin', 'stem-repeats-question', 'missing-statements', 'combination-list-missing',
-  'refers-to-missing-picture', 'treatment-drift',
+ 'generic-lead-in', 'style-one-liner-too-long', 'examiner',
+ 'hint-stem-words', 'hint-absolute', 'hint-length', 'similar-options',
+ 'stem-incomplete', 'stem-thin', 'stem-repeats-question', 'missing-statements', 'combination-list-missing',
+ 'refers-to-missing-picture', 'treatment-drift',
 ]);
 
 /** What the writer is told when a question was dropped by the hint check, so the rewrite does not repeat the clue. */
 const HINT_REASONS: Record<string, string> = {
-  'hint-stem-words': 'the correct option repeated the words of the stem, which gives the answer away; reword the key so it does not echo the stem',
-  'hint-absolute': 'only the correct option used an absolute word (always, never, only, all, none); remove it or use such words evenly',
-  'hint-length': 'the correct option was much longer than the others; make all options about the same length',
+ 'hint-stem-words': 'the correct option repeated the words of the stem, which gives the answer away; reword the key so it does not echo the stem',
+ 'hint-absolute': 'only the correct option used an absolute word (always, never, only, all, none); remove it or use such words evenly',
+ 'hint-length': 'the correct option was much longer than the others; make all options about the same length',
 };
 
 /** Repairs one drafted question for the problem a check named. Returns the fixed item, or null when the repair fails. */
 async function repairDraft(draft: ClinicalQuestion, problem: string, provider: AiProviderId): Promise<BatchQuestionSpec | null> {
   const answer = draft.options.find((o) => o.id === draft.correctOption)?.text ?? '';
   const line = (draft as { questionText?: string }).questionText ?? '';
-  // The shape keeps the draft's option count: a 4-option template made every AMC (5-option) repair fail as 'invalid'.
+  // The shape keeps the draft's option count: a 4-option template made every 5-option repair fail as 'invalid'.
   const optionShape = draft.options.map((o) => `{"id":"${o.id}","text":""}`).join(',');
   const raw = await aiComplete({
     system: `You repair one exam MCQ. Fix ONLY the problem named. Keep the same fact, the same correct answer and exactly ${draft.options.length} options. Reply with ONLY JSON: {"stem":"","questionText":"","options":[${optionShape}],"correctOption":"A","explanation":""}.`,
@@ -653,9 +649,9 @@ async function planFigure(q: ClinicalQuestion, topic: string, signal?: AbortSign
   const answer = q.options.find((o) => o.id === q.correctOption)?.text ?? '';
   const raw = await aiComplete({
     system:
-      'You decide whether one exam question should carry a real medical picture. It qualifies only if its answer is a finding or condition that has a typical, recognisable picture: an X-ray, CT, MRI, ultrasound, ECG, histology slide, blood smear, fundus photo or clinical photo. ' +
-      'A question about a drug effect, a mechanism, a number or a management step does not qualify. The picture must not give the answer away. ' +
-      'Reply with ONLY JSON: {"modality":"ECG | X-ray | CT | MRI | ultrasound | histology | smear | fundus | clinical photo","query":"3-6 English words: the finding or diagnosis plus the modality"}, or {"modality":"","query":""} if it does not qualify.',
+ 'You decide whether one exam question should carry a real medical picture. It qualifies only if its answer is a finding or condition that has a typical, recognisable picture: an X-ray, CT, MRI, ultrasound, ECG, histology slide, blood smear, fundus photo or clinical photo. ' +
+ 'A question about a drug effect, a mechanism, a number or a management step does not qualify. The picture must not give the answer away. ' +
+ 'Reply with ONLY JSON: {"modality":"ECG | X-ray | CT | MRI | ultrasound | histology | smear | fundus | clinical photo","query":"3-6 English words: the finding or diagnosis plus the modality"}, or {"modality":"","query":""} if it does not qualify.',
     messages: [{ role: 'user', content: `Topic: ${topic}\n${q.stem} ${q.questionText}\nAnswer: ${answer}` }],
     json: true,
     effort: 'low',
@@ -710,20 +706,14 @@ function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: strin
 
 /** Counts a repair on the progress page: attempted (sent), accepted (kept after its checks) or failed (no repair returned). */
 export function reportRepair(outcome: 'attempted' | 'accepted' | 'failed'): void {
-  void fetch('/api/ai/nvidia-stats/repair', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ outcome }),
-  }).catch(() => {});
+  void outcome;
 }
 
 /** Tells the server whether a question was kept, so the progress page counts the same questions the app shows. */
 export function reportQuestion(outcome: 'accepted' | 'dropped', reason?: string, draft?: unknown): void {
-  void fetch('/api/ai/nvidia-stats/question', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ outcome, reason, draft }),
-  }).catch(() => {});
+  void outcome;
+  void reason;
+  void draft;
 }
 
 /** Runs one step and records how long it took. */
@@ -736,20 +726,19 @@ export async function timed<T>(stage: string, fn: () => Promise<T>, lane?: strin
   }
 }
 
-// Mixed mode (DeepSeek selected): writing and checking use two lanes at once. DeepSeek takes up to 4 calls,
-// NVIDIA takes one call at a time, so the NVIDIA lane never bursts past its limit.
-const laneCapacity: Record<'vyce' | 'nvidia', number> = { vyce: 4, nvidia: 3 };
-const laneBusy: Record<'vyce' | 'nvidia', number> = { vyce: 0, nvidia: 0 };
+// Mixed mode (DeepSeek selected): writing and checking share the DeepSeek lane pool.
+const laneCapacity: Record<'deeprelay', number> = { deeprelay: 10 };
+const laneBusy: Record<'deeprelay', number> = { deeprelay: 0 };
 const laneWaiters: (() => void)[] = [];
 
 export function isMixedMode(): boolean {
-  return getActiveProvider() === 'vyce';
+  return getActiveProvider() === 'deeprelay';
 }
 
 /** Waits for a free lane and returns it. Call release() when the call is finished. */
-export async function acquireLane(only?: 'vyce' | 'nvidia'): Promise<{ provider: AiProviderId; model: string; release: () => void }> {
+export async function acquireLane(only?: 'deeprelay'): Promise<{ provider: AiProviderId; model: string; release: () => void }> {
   for (;;) {
-    const order: ('vyce' | 'nvidia')[] = only ? [only] : ['vyce', 'nvidia'];
+    const order: Array<'deeprelay'> = only ? [only] : ['deeprelay'];
     for (const p of order) {
       if (laneBusy[p] < laneCapacity[p]) {
         laneBusy[p] += 1;
@@ -770,8 +759,8 @@ export async function acquireLane(only?: 'vyce' | 'nvidia'): Promise<{ provider:
 /** Calls the completion route. In mixed mode, writing calls take a free lane; otherwise the selected engine is used. */
 export async function aiComplete(options: AiCompleteOptions): Promise<string> {
   if (options.work && !options.provider && isMixedMode()) {
-    // Writing always goes to DeepSeek: NVIDIA refuses the large writing requests, and its lane is kept for checks.
-    const lane = await timed('lane-wait', () => acquireLane('vyce'));
+    // Writing always goes to DeepSeek in mixed mode.
+    const lane = await timed('lane-wait', () => acquireLane('deeprelay'));
     try {
       return await timed('write', () => completeOn(lane.provider, lane.model, options), lane.provider);
     } finally {
@@ -783,33 +772,11 @@ export async function aiComplete(options: AiCompleteOptions): Promise<string> {
   if (!provider) {
     throw new AiError(`No AI provider is active. ${NOT_CONNECTED_MESSAGE}`, 'not_connected');
   }
-  // When the OpenCode plan is used up, calls go to Claude Haiku 5.5 instead (if Claude is connected), and the plan
-  // is not tried again for ten minutes, so each call does not first fail on OpenCode.
-  const useHaiku = () => completeOn('claude', HAIKU_FALLBACK_MODEL, { ...options, provider: 'claude', model: HAIKU_FALLBACK_MODEL });
-  if (provider === 'opencode' && Date.now() < opencodeExhaustedUntil) {
-    try { return await timed('write', useHaiku, 'claude'); } catch { /* Claude is not available: try OpenCode anyway */ }
-  }
-  try {
-    return await timed('write', () => completeOn(provider, options.model ?? route?.model ?? getEffectiveModel(provider), options), provider);
-  } catch (err: any) {
-    if (provider !== 'opencode' || !/usage limit/i.test(String(err?.message || err))) throw err;
-    opencodeExhaustedUntil = Date.now() + 10 * 60 * 1000;
-    try {
-      return await timed('write', useHaiku, 'claude');
-    } catch {
-      opencodeExhaustedUntil = 0;
-      throw err;
-    }
-  }
+  return await timed('write', () => completeOn(provider, options.model ?? route?.model ?? getEffectiveModel(provider), options), provider);
 }
 
-/** The model used when the OpenCode plan has no usage left. */
-const HAIKU_FALLBACK_MODEL = 'claude-haiku-5-5';
-let opencodeExhaustedUntil = 0;
-
-/** The provider and model a call should use now: Claude Haiku 5.5 while the OpenCode plan is used up, else the active one. */
+/** The provider and model a call should use now: the active one. */
 function currentRoute(provider: AiProviderId): { provider: AiProviderId; model: string } {
-  if (provider === 'opencode' && Date.now() < opencodeExhaustedUntil) return { provider: 'claude', model: HAIKU_FALLBACK_MODEL };
   return { provider, model: getEffectiveModel(provider) };
 }
 
@@ -948,7 +915,7 @@ export function extractJson<T = any>(raw: string): T | null {
 
 // ---------- AI exam-question generation ----------
 
-const GENERATOR_SYSTEM = `You are a senior item writer for the Indian and Australian postgraduate medical entrance exams (NEET-PG, INI-CET, AMC CAT).
+const GENERATOR_SYSTEM = `You are a senior item writer for the Indian and Australian postgraduate medical entrance exams (NEET-PG, INI-CET).
 Your questions are written to DISCRIMINATE between well-prepared candidates, not to confirm what everyone already knows. An item that a candidate can answer from a single buzzword is a failed item.
 Every question has exactly one defensible best answer. Distractors are real, plausible entities that a half-prepared candidate would genuinely choose, never absurd or obviously wrong.
 Always respond with ONLY a single valid JSON object (no markdown fences, no commentary).`;
@@ -968,11 +935,6 @@ const EXAM_PATTERNS: Record<ExamType, { name: string; opts: number; pat: string 
     opts: 4,
     pat: "INI-CET (AIIMS) pattern. Exactly 4 options (A-D); +1 correct, -1/3 wrong. Most items (about seven in eight) are single-best-answer items: clinical vignettes, drug of choice, next step, or factual recall. About one item in five asks which option is INCORRECT, FALSE or NOT true (for example 'Which of the following is NOT a feature of ...?'). Numbered multiple-statement items ('Which of the following statements is/are correct? 1. ... 2. ... 3. ... 4. ...' with options such as '1 and 3 only', '2, 3 and 4 only') are rare, at most one item in eight. Match-the-following (List I with List II, options as code combinations like 'A-2, B-4, C-1, D-3'), assertion-reason (Assertion A / Reason R with the four standard options), arrange-in-correct-sequence, and recent-advances or guideline facts. Image-heavy topics describe the image in words. Distractors must be very close; elimination should be hard.",
   },
-  AMC_CAT: {
-    name: 'AMC CAT MCQ',
-    opts: 5,
-    pat: "AMC CAT MCQ pattern (Australia). Exactly 5 options (A-E), one best answer, no negative marking. Every item is a patient vignette set in Australian practice (general practice, emergency department, ward, rural or remote clinic) giving age, sex, history, examination and relevant results, ending with ONE lead-in such as 'What is the most appropriate next step in management?', 'What is the most likely diagnosis?', 'Which investigation is most appropriate?', 'What is the most appropriate advice?'. Test data gathering, data interpretation and management, favouring safe guideline-based next steps. Follow Australian sources: Therapeutic Guidelines (eTG), Australian Medicines Handbook, RACGP Red Book, John Murtagh's General Practice (safe diagnostic strategy: probability diagnosis, serious disorders not to be missed, pitfalls, masquerades, is the patient trying to tell me something), National Immunisation Program, state Mental Health Acts, consent and Gillick competence, mandatory reporting, Aboriginal and Torres Strait Islander health. Options must be homogeneous (all diagnoses, or all management steps).",
-  },
 };
 
 const TIER_BEHAVIOUR: Record<string, string> = {
@@ -982,16 +944,16 @@ const TIER_BEHAVIOUR: Record<string, string> = {
 };
 
 const GENERATION_RULES =
-  'Rules: medically accurate and current; do not invent doses or values; no two questions on the same fact; ' +
-  'the stem must not contain a clue that gives the answer away; options must be homogeneous and of similar length; ' +
-  'vary which option is correct across the batch (do not favour B or C). ' +
-  'No hints: the stem and lead-in must not name the drug class, drug, mechanism or diagnosis that the correct option names, ' +
-  'and must not repeat its distinctive words; the correct option must not be the only option with absolute wording ' +
-  '(absolutely, always, never, only, must, all, none) and must not be noticeably longer or more detailed than the others; ' +
-  'distractors must be as specific and as carefully worded as the key. ' +
-  'Use only real, named drugs, trials, guidelines and numbers that you are sure of: never invent a drug code, trial name, percentage or fold-change. ' +
-  'Any item about statements (1, 2, 3, 4) must list every statement inside the stem, and the options refer only to those statements. ' +
-  'The stem must contain the facts needed to answer the question, and the keyed option must be the one the sources support.';
+ 'Rules: medically accurate and current; do not invent doses or values; no two questions on the same fact; ' +
+ 'the stem must not contain a clue that gives the answer away; options must be homogeneous and of similar length; ' +
+ 'vary which option is correct across the batch (do not favour B or C). ' +
+ 'No hints: the stem and lead-in must not name the drug class, drug, mechanism or diagnosis that the correct option names, ' +
+ 'and must not repeat its distinctive words; the correct option must not be the only option with absolute wording ' +
+ '(absolutely, always, never, only, must, all, none) and must not be noticeably longer or more detailed than the others; ' +
+ 'distractors must be as specific and as carefully worded as the key. ' +
+ 'Use only real, named drugs, trials, guidelines and numbers that you are sure of: never invent a drug code, trial name, percentage or fold-change. ' +
+ 'Any item about statements (1, 2, 3, 4) must list every statement inside the stem, and the options refer only to those statements. ' +
+ 'The stem must contain the facts needed to answer the question, and the keyed option must be the one the sources support.';
 
 // A topic whose question failed or was dropped is written again this many times before it is given up.
 const MAX_TOPIC_RETRIES = 6;
@@ -1000,8 +962,6 @@ const MAX_VERIFY_ERRORS = 2;
 // Rewrites of one topic that may repair the previous draft instead of writing a new question.
 const MAX_REPAIRS = 2;
 
-// Copies of the same question request sent at once. The first copy that passes every check is kept.
-const QUESTION_COPIES = 2;
 
 
 // Words that carry no meaning for the hint check.
@@ -1047,7 +1007,7 @@ async function verifyItem(q: ClinicalQuestion, groundOn: { query: string; subjec
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           // The checker is a stronger model than the writer, so a weak writer cannot approve its own mistakes.
-      body: JSON.stringify({ ...(provider === 'nvidia' ? { provider, model: DEFAULT_MODELS.nvidia } : currentRoute(provider)), question: q, groundOn }),
+      body: JSON.stringify({ ...currentRoute(provider), question: q, groundOn }),
           signal,
         });
         if (res.ok) {
@@ -1440,8 +1400,6 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     }
   };
 
-  // The progress page counts one run, so the NVIDIA counts start again here.
-  void fetch('/api/ai/nvidia-stats/reset', { method: 'POST' }).catch(() => {});
   // A typed topic is spread evenly across its categories, so the priority weighting is skipped: the planner
   // would keep choosing the top-priority category, and one category would fill the whole set.
   // With a fact plan, each planned fact is one slot (facts already used in this module are skipped on later rounds).
@@ -1515,9 +1473,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     // those sources in the same call, so no separate check runs afterwards.
     const groundQuery = focus ?? focusParts(topic.subtopic)[0] ?? topic.subtopic;
     const prompt = [
-      `Write ONE exam-standard MCQ for ${pattern.name}.`,
-      `Subject: ${topic.subject}`,
-      `Subtopic: ${topic.subtopic}`,
+ `Write ONE exam-standard MCQ for ${pattern.name}.`,
+ `Subject: ${topic.subject}`,
+ `Subtopic: ${topic.subtopic}`,
       // Rotate the set across the subtopic's parts (drug classes, systems) so one regimen
       // is not written again and again.
       focus ? `Focus this item on: ${focus}. Use a different drug, regimen or scenario from the usual textbook example.` : '',
@@ -1537,7 +1495,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       requestedTopic && acceptedKeyFacts.length ? `Key facts already tested in this set. Do not test any of them again, not even in other words: ${acceptedKeyFacts.slice(-20).map((f) => f.slice(0, 120)).join(' | ')}` : '',
       shape ?? '',
       slot && STYLES[slot.style].codedOptions ? '' : `Make the ${pattern.opts} options similar in length and detail. The correct option must not be the longest or the most detailed.`,
-      `Difficulty: ${topic.difficultyTier}. ${slot ? tierText(slot.style, topic.difficultyTier) : TIER_BEHAVIOUR[topic.difficultyTier]}`,
+ `Difficulty: ${topic.difficultyTier}. ${slot ? tierText(slot.style, topic.difficultyTier) : TIER_BEHAVIOUR[topic.difficultyTier]}`,
       slot ? `${EXAM_RULES[exam]} ${COMMON_STYLE_RULES}` : pattern.pat,
       !slot && questionTypes?.length ? `Question type focus: ${questionTypes.join('; ')}.` : '',
       !slot && stemPatterns?.length ? `Stem pattern: ${stemPatterns.join('; ')}.` : '',
@@ -1545,22 +1503,21 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       patientGroup ? `Patient group: ${patientGroup}.` : '',
       presentingProblems?.length ? `Presenting problems: ${presentingProblems.join('; ')}.` : '',
       sourceMaterial ? `Base on these notes: """${sourceMaterial.slice(0, 6000)}""".` : '',
-      'Internet sources on this topic are attached after this request. Base the correct option on them where they apply, state the fact in keyFact, and do not copy their wording. Set "sourceCheck" to "supported" only if one of those sources directly backs the keyed option; otherwise set it to "not supported" and change the item to a fact that they do back. sourceCheck concerns only the keyed option and keyFact: patient details in a vignette and the reasons given for the wrong options may use standard textbook knowledge.',
+ 'Internet sources on this topic are attached after this request. Base the correct option on them where they apply, state the fact in keyFact, and do not copy their wording. Set "sourceCheck" to "supported" only if one of those sources directly backs the keyed option; otherwise set it to "not supported" and change the item to a fact that they do back. sourceCheck concerns only the keyed option and keyFact: patient details in a vignette and the reasons given for the wrong options may use standard textbook knowledge.',
       slot && slot.style !== 'image'
         ? 'This item is not image-based: set "figureModality" and "figureQuery" to empty strings, and never refer to a picture.'
         : includeImages
         ? 'If this item is image-based (about one in five items must be), describe the finding in the stem AND set "figureModality" and "figureQuery" so a real picture can be fetched: "figureModality" is one of ECG | X-ray | CT | MRI | ultrasound | histology | fundus | clinical photo, and "figureQuery" is a 3-6 word English search phrase naming the diagnosis + modality (e.g. "atrial fibrillation ECG", "lobar pneumonia chest X-ray", "membranous nephropathy histology"). For items that are NOT image-based, set both to an empty string — never invent a picture.'
         : '',
-      `JSON shape — return exactly one object: { "examType": "${exam}", "subject": "${topic.subject}", "subtopic": "${topic.subtopic}", "cognitiveTier": "Direct Recall | Clinical 2-Step | Multi-Step & IBQ", "difficultyTier": "${topic.difficultyTier}", "stem": "...", "questionText": "...", "options": {${'ABCDE'.slice(0, pattern.opts).split('').map(k => `"${k}": "text"`).join(', ')}}, "correctOption": "A|B|C|D|E", "explanation": "...", "keyFact": "one sentence: the textbook or guideline fact that makes the correct option right, stated so a student could look it up", "boardPearl": "...", "citations": [...], "trapType": "...", "trapExplanation": "...", "targetAccuracy": 0-100, "sourceCheck": "supported|not supported"${includeImages ? ', "figureModality": "", "figureQuery": ""' : ''} }`,
+ `JSON shape — return exactly one object: { "examType": "${exam}", "subject": "${topic.subject}", "subtopic": "${topic.subtopic}", "cognitiveTier": "Direct Recall | Clinical 2-Step | Multi-Step & IBQ", "difficultyTier": "${topic.difficultyTier}", "stem": "...", "questionText": "...", "options": {${'ABCDE'.slice(0, pattern.opts).split('').map(k => `"${k}": "text"`).join(', ')}}, "correctOption": "A|B|C|D|E", "explanation": "...", "keyFact": "one sentence: the textbook or guideline fact that makes the correct option right, stated so a student could look it up", "boardPearl": "...", "citations": [...], "trapType": "...", "trapExplanation": "...", "targetAccuracy": 0-100, "sourceCheck": "supported|not supported"${includeImages ? ', "figureModality": "", "figureQuery": ""' : ''} }`,
       learnerProfile ? `Learner instructions: """${learnerProfile}"""` : '',
-      'Output ONLY the JSON object.',
+ 'Output ONLY the JSON object.',
     ].join('\n');
 
     // Several copies of the same request run at once. The first copy that passes every check is kept, and the others are stopped.
     const outerSignal = signal;
-    // NVIDIA sends several copies and keeps the first that passes. Paid providers send one copy, to keep cost down.
-    const paid = getActiveProvider() !== 'nvidia';
-    const copies = Array.from({ length: paid ? 1 : QUESTION_COPIES }, () => new AbortController());
+    // One copy is sent per request.
+    const copies = [new AbortController()];
     let claimed = false;
     const runCopy = async (own: AbortController): Promise<ClinicalQuestion | null> => {
     const signal = outerSignal ? AbortSignal.any([outerSignal, own.signal]) : own.signal;
@@ -1578,7 +1535,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           purpose: 'write',
           // The thinking pass writes the item and checks its key against the internet sources in one call.
           // Paid providers reason less: the sources are already in the request, so long reasoning mostly adds cost.
-          effort: getActiveProvider() === 'nvidia' ? 'high' : 'low',
+          effort: 'low',
           groundOn: { query: groundQuery, subject: topic.subject },
           signal,
         });
@@ -1645,16 +1602,16 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // With a planned style mix the slots decide how many cases there are, so the case cap is off.
         const shape = structureReason(q) ?? (combinationListMissing(q) ? 'combination-list-missing' : null) ?? (inventedSource(q) ? 'invented-source' : null) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions && !codedOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases && !slot ? 'too-many-cases' : null) ?? (driftsIntoTreatment && !managesByDesign ? 'treatment-drift' : null);
         const SHAPE_HINTS: Record<string, string> = {
-          'generic-lead-in': 'the question line must name the fact or finding it asks about; do not end the stem with a question mark',
-          'invented-source': 'do not cite a guideline, survey, study or shortage; describe the case itself, with no source the stem does not give',
-          'combination-list-missing': 'the question asks for a combination or a match, so the stem must list the items: "A. ...", "B. ...", "C. ...", "D. ..." and "1. ...", "2. ...", "3. ...", "4. ..." each on its own line',
-          'stem-thin': 'the stem needs real context, not a label',
-          'similar-options': 'two options said nearly the same thing; make every option clearly different',
-          'repeat-patient': 'use a different patient (age and sex) from those already in the set',
-          'treatment-drift': 'stay on the requested content; do not turn it into a treatment question',
-          'stem-incomplete': 'the stem ended mid-sentence; finish it',
-          'stem-repeats-question': 'the stem repeated the question; give the case or context',
-          'missing-statements': 'list the numbered statements inside the stem',
+ 'generic-lead-in': 'the question line must name the fact or finding it asks about; do not end the stem with a question mark',
+ 'invented-source': 'do not cite a guideline, survey, study or shortage; describe the case itself, with no source the stem does not give',
+ 'combination-list-missing': 'the question asks for a combination or a match, so the stem must list the items: "A. ...", "B. ...", "C. ...", "D. ..." and "1. ...", "2. ...", "3. ...", "4. ..." each on its own line',
+ 'stem-thin': 'the stem needs real context, not a label',
+ 'similar-options': 'two options said nearly the same thing; make every option clearly different',
+ 'repeat-patient': 'use a different patient (age and sex) from those already in the set',
+ 'treatment-drift': 'stay on the requested content; do not turn it into a treatment question',
+ 'stem-incomplete': 'the stem ended mid-sentence; finish it',
+ 'stem-repeats-question': 'the stem repeated the question; give the case or context',
+ 'missing-statements': 'list the numbered statements inside the stem',
         };
         if (shape) { if (ctx) ctx.reason = SHAPE_HINTS[shape] ?? shape; dropQ(ctx, `${shape}`); return null; }
         // The style asked for must really be delivered (match lists, numbered statements, numbers, lead-in, and so on).
@@ -1916,7 +1873,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // The call failed or the question was dropped: the same topic goes back in the queue, so it is written again.
         // The last rewrite of a demanding style (match, statements, calculation, picture) falls back to a plain style, so the slot is not lost.
         const plain: StyleId[] = ['one-liner', 'short-case', 'vignette'];
-        const fallbackStyle: StyleId = exam === 'AMC_CAT' ? 'vignette' : exam === 'NEET_PG' ? 'one-liner' : 'short-case';
+        const fallbackStyle: StyleId = exam === 'NEET_PG' ? 'one-liner' : 'short-case';
         // A style the learner picked is never swapped for another: a calculation item that cannot be written is left out.
         const styleFallback = slot && !styleExplicit && retries + 1 >= MAX_TOPIC_RETRIES && !plain.includes(slot.style) ? { ...slot, style: fallbackStyle } : slotOverride;
         // A planned lead-in the fact does not fit ("treatment of choice" for a toxin fact) is dropped on the rewrite, unless
@@ -1927,7 +1884,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // Up to two repairs per topic: a second repair, told the new problem, still keeps the fact and is cheaper than a rewrite.
         const canRepair = retries < MAX_REPAIRS && Boolean(ctx.draft) && Boolean(ctx.dropKey) && REPAIRABLE_DROPS.has(ctx.dropKey!);
         const fixed = canRepair
-          ? await repairDraft(ctx.draft!, ctx.reason ?? ctx.dropKey!, getActiveProvider() ?? 'nvidia').catch(() => null)
+          ? await repairDraft(ctx.draft!, ctx.reason ?? ctx.dropKey!, getActiveProvider() ?? 'gemini').catch(() => null)
           : null;
         if (fixed === null && canRepair) reportRepair('failed');
         else if (fixed) reportRepair('attempted');
@@ -1960,7 +1917,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     // Process images sequentially to avoid rate limiting.
     for (const q of questions) {
       if (signal?.aborted || shouldStop?.()) { stopped = true; break; }
-      if (q.image) continue;      // already has an image
+      if (q.image) continue; // already has an image
       if (!q.figureQuery) continue; // not an image-based item — leave it text-only
 
       const live = await findLiveImage(q.figureQuery, usedImages);

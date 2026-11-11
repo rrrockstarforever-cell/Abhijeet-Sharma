@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { motion, useReducedMotion } from 'motion/react';
 import { 
   AlertTriangle, 
   RotateCcw, 
@@ -48,6 +49,7 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
   onStartSprint,
   currentExam = 'NEET_PG',
 }) => {
+  const reduceMotion = useReducedMotion();
   const [filterSubject, setFilterSubject] = useState<string>('ALL');
   const [filterStatus, setFilterStatus] = useState<'ALL' | 'UNRESOLVED' | 'REMEDIATED'>('ALL');
   const [capturedVersion, setCapturedVersion] = useState(0);
@@ -58,6 +60,10 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
   const [notesError, setNotesError] = useState<string | null>(null);
   const [sprintError, setSprintError] = useState<string | null>(null);
   const [revisionNotes, setRevisionNotes] = useState<{ text: string; topics: string } | null>(null);
+
+  React.useEffect(() => {
+    if (capturedVersion > 0) setSprintError(null);
+  }, [capturedVersion]);
 
   // REAL captured questions (localStorage) come first. Sample rows are only shown
   // when the notebook is empty, clearly labelled, so progress can never be faked.
@@ -148,15 +154,15 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
     try {
       const text = await aiComplete({
         system:
-          'You are a medical exam revision coach. Write concise, high-yield revision notes for the learner\'s weakest topics. ' +
-          'Use short headings and bullets, mark key takeaways with a line starting "High-yield:" and memory aids with "Mnemonic:". ' +
-          'End with 3 exam pearls. Plain text only.',
+ 'You are a medical exam revision coach. Write concise, high-yield revision notes for the learner\'s weakest topics. ' +
+ 'Use short headings and bullets, mark key takeaways with a line starting "High-yield:" and memory aids with "Mnemonic:". ' +
+ 'End with 3 exam pearls. Plain text only.',
         messages: [{
           role: 'user',
           content:
-            `Exam: ${currentExam.replace('_', '-')}\n\nMy weakest topics (from real attempt data):\n${topics.map((t) => `- ${t}`).join('\n')}\n\n` +
+ `Exam: ${currentExam.replace('_', '-')}\n\nMy weakest topics (from real attempt data):\n${topics.map((t) => `- ${t}`).join('\n')}\n\n` +
             (mistakeTopics.length ? `Mistakes I captured:\n${mistakeTopics.map((t) => `- ${t}`).join('\n')}\n\n` : '') +
-            'Write the revision notes, prioritising discriminators and classic traps.',
+ 'Write the revision notes, prioritising discriminators and classic traps.',
         }],
         provider,
         model: getEffectiveModel(provider),
@@ -177,111 +183,174 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
   };
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
-      {/* Header Banner */}
-      <div className="bg-[#001432] rounded-2xl p-6 text-white border border-[#13294b] shadow-md relative overflow-hidden">
-        <div className="absolute right-0 top-0 bottom-0 w-96 bg-gradient-to-l from-[#0f8b8d]/20 to-transparent pointer-events-none" />
-        
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
-          <div>
-            <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-[#0f8b8d]/20 text-[#8ff3f4] text-xs font-semibold uppercase tracking-wider mb-2 border border-[#0f8b8d]/30">
-              <RotateCcw className="w-3.5 h-3.5" />
-              SRS Engine · {dueCount()} card{dueCount() === 1 ? '' : 's'} due
+    <div className="relative isolate space-y-6 max-w-7xl mx-auto overflow-hidden rounded-[28px]  p-4   md:p-6 ">
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 z-0 opacity-[0.08] dark:opacity-[0.12]"
+        style={{ backgroundImage: 'radial-gradient(circle at 1px 1px, currentColor 1px, transparent 0)', backgroundSize: '18px 18px' }}
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 z-0 hidden opacity-[0.05] [mask-image:radial-gradient(circle_at_50%_20%,black,transparent_65%)] motion-safe:block "
+        style={{ backgroundImage: 'repeating-conic-gradient(from 0deg at 50% 20%, currentColor 0deg 1deg, transparent 1deg 8deg)' }}
+      />
+      <div className="relative z-10 space-y-6">
+      {/* Mistake Dossier Hero */}
+      <div className="relative overflow-hidden rounded-[20px] border border-line-strong bg-surface p-5 text-ink dark:md:p-6">
+        <div aria-hidden="true" className="pointer-events-none absolute -right-20 -top-20 h-72 w-72 rounded-full opacity-40 blur-2xl dark:dark:opacity-30" />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 opacity-[0.10] [mask-image:radial-gradient(circle_at_80%_20%,black,transparent_60%)] "
+          style={{ backgroundImage: 'radial-gradient(circle at 1px 1px, currentColor 1px, transparent 0)', backgroundSize: '16px 16px' }}
+        />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 opacity-[0.05] [mask-image:radial-gradient(circle_at_50%_30%,black,transparent_70%)] motion-safe:block "
+          style={{ backgroundImage: 'repeating-conic-gradient(from 0deg at 50% 30%, currentColor 0deg 1deg, transparent 1deg 9deg)' }}
+        />
+        {usingSamples && (
+          <div className="absolute right-0 top-0 z-20  px-3 py-1 text-[10px] font-medium uppercase tracking-[0.18em]  [clip-path:polygon(0_0,100%_0,100%_100%,12%_100%,0_70%)]">
+            Sample Rows
+          </div>
+        )}
+
+        <div className="relative z-10 flex flex-col gap-5">
+          <div className="flex flex-col justify-between gap-5 md:flex-row md:items-start">
+            <div className="max-w-2xl">
+              <div className="mb-2 inline-flex items-center gap-2 rounded-full border   px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.18em]  ">
+                <RotateCcw className="h-3.5 w-3.5" />
+                SRS Engine · {dueCount()} card{dueCount() === 1 ? '' : 's'} due
+              </div>
+              <h1 className="font-['M_PLUS_Rounded_1c'] text-2xl font-medium tracking-tight text-ink md:text-3xl">
+                Clinical Mistake Notebook & Cognitive Root-Cause Analysis
+              </h1>
+              <p className="mt-1 max-w-2xl font-['Cormorant'] text-base font-semibold leading-relaxed text-ink-soft">
+                Capture real mistakes from any mock test, mark them resolved as you master them, and review note cards on a real spaced schedule.
+              </p>
             </div>
-            <h1 className="text-2xl font-bold tracking-tight text-white">
-              Clinical Mistake Notebook & Cognitive Root-Cause Analysis
-            </h1>
-            <p className="text-slate-300 text-sm mt-1 max-w-2xl">
-              Capture real mistakes from any mock test, mark them resolved as you master them, and review note cards on a real spaced schedule.
-            </p>
+
+            <div className="flex w-full flex-col gap-2 md:w-auto md:min-w-56">
+              <button
+                onClick={() => setCaptureOpen(true)}
+                className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[16px] px-4 py-2.5 text-sm font-medium  transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 motion-safe:hover:-translate-y-[3px] motion-safe:hover:scale-[1.03] motion-reduce:transform-none md:w-auto"
+              >
+                <Plus className="h-4 w-4" />
+                Capture Question
+              </button>
+              <button
+                onClick={startSprint}
+                className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[16px] border border-line-strong bg-surface-2 px-4 py-2.5 text-sm font-medium text-ink transition-all hover:border-ink focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 motion-safe:hover:-translate-y-0.5 motion-reduce:transform-none md:w-auto"
+              >
+                <RotateCcw className="h-4 w-4" />
+                Start SRS Mistake Sprint
+              </button>
+            </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setCaptureOpen(true)}
-              className="inline-flex items-center gap-2 px-4 py-2.5 bg-white/10 hover:bg-white/20 border border-white/20 text-white text-sm font-semibold rounded-xl transition-all"
+          {sprintError && (
+            <div
+              role="alert"
+              className="flex items-start justify-between gap-3 rounded-[16px] border   p-3 text-xs font-semibold text-rose-800 ring-2 ring-[var(--error-ring)] dark:text-rose-200"
             >
-              <Plus className="w-4 h-4" />
-              Capture Question
-            </button>
-            <button
-              onClick={startSprint}
-              className="inline-flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-[#0f8b8d] to-[#00696b] hover:from-[#00696b] hover:to-[#0f8b8d] text-white text-sm font-semibold rounded-xl shadow-lg transition-all transform active:scale-95"
-            >
-              <RotateCcw className="w-4 h-4" />
-              Start SRS Mistake Sprint
-            </button>
-          </div>
-        </div>
+              <span>{sprintError}</span>
+              <button
+                onClick={() => setSprintError(null)}
+                className="shrink-0 rounded-lg border  px-2 py-0.5 text-[10px] font-medium text-rose-800 dark:text-rose-200"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
 
-        {/* 4 Stat Badges */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-6 pt-5 border-t border-slate-700/60">
-          <div className="bg-slate-900/50 backdrop-blur rounded-xl p-3 border border-slate-700/50">
-            <div className="text-xs text-slate-400 font-medium">Captured Questions</div>
-            <div className="text-2xl font-mono font-bold text-white mt-1">
-              {captured.length}
-              {usingSamples && <span className="text-[10px] text-amber-300 font-normal block">sample rows shown</span>}
+          <div className="grid grid-cols-2 gap-3 border-t-2 border-line pt-5 md:grid-cols-4">
+            <div className="rounded-[16px] border border-line-strong bg-surface-2 p-3 dark:">
+              <div className="text-xs font-semibold text-ink-soft">Captured Questions</div>
+              <div className="mt-1 font-[''] text-3xl tracking-wide text-ink">
+                {captured.length}
+                {usingSamples && <span className="block text-[10px] font-sans font-normal  ">sample rows shown</span>}
+              </div>
             </div>
-          </div>
-          <div className="bg-slate-900/50 backdrop-blur rounded-xl p-3 border border-slate-700/50">
-            <div className="text-xs text-slate-400 font-medium">Remediated & Retested</div>
-            <div className="text-2xl font-mono font-bold text-emerald-400 mt-1">
-              {stats.remediated}
-              <span className="text-xs text-emerald-400/80 font-normal">
-                {stats.total ? ` (${Math.round((stats.remediated / stats.total) * 100)}%)` : ''}
-              </span>
+            <div className="rounded-[16px] border border-line-strong bg-surface-2 p-3 dark:">
+              <div className="text-xs font-semibold text-ink-soft">Remediated & Retested</div>
+              <div className="mt-1 font-[''] text-3xl tracking-wide text-emerald-500">
+                {stats.remediated}
+                <span className="ml-1 font-sans text-xs font-semibold text-emerald-600 dark:text-emerald-300">
+                  {stats.total ? ` (${Math.round((stats.remediated / stats.total) * 100)}%)` : ''}
+                </span>
+              </div>
             </div>
-          </div>
-          <div className="bg-slate-900/50 backdrop-blur rounded-xl p-3 border border-slate-700/50">
-            <div className="text-xs text-slate-400 font-medium">Unresolved Misconceptions</div>
-            <div className="text-2xl font-mono font-bold text-rose-400 mt-1">
-              {stats.unresolved}
-              <span className="text-xs text-rose-300 font-normal"> {stats.unresolved ? 'Priority' : ''}</span>
+            <div className="rounded-[16px] border border-line-strong bg-surface-2 p-3 dark:">
+              <div className="text-xs font-semibold text-ink-soft">Unresolved Misconceptions</div>
+              <div className="mt-1 font-[''] text-3xl tracking-wide text-rose-500">
+                {stats.unresolved}
+                {stats.unresolved > 0 && <span className="ml-1 rounded-full bg-rose-500 px-1.5 py-0.5 font-sans text-[9px] font-medium uppercase tracking-wider text-white">Priority</span>}
+              </div>
             </div>
-          </div>
-          <div className="bg-slate-900/50 backdrop-blur rounded-xl p-3 border border-slate-700/50">
-            <div className="text-xs text-slate-400 font-medium">Due for Spaced Review Today</div>
-            <div className="text-2xl font-mono font-bold text-amber-400 mt-1">
-              {dueCount()} <span className="text-xs text-amber-200 font-normal">Cards</span>
+            <div className="rounded-[16px] border border-line-strong bg-surface-2 p-3 dark:">
+              <div className="text-xs font-semibold text-ink-soft">Due for Spaced Review Today</div>
+              <div className="mt-1 font-[''] text-3xl tracking-wide text-amber-500">
+                {dueCount()} <span className="ml-1 font-sans text-xs font-semibold text-amber-600 dark:text-amber-300">Cards</span>
+              </div>
             </div>
           </div>
         </div>
       </div>
-
-      {sprintError && (
-        <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-[11px] text-rose-800">{sprintError}</div>
-      )}
 
       {/* Main Grid: Left Questions List, Right Rails */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left Column: Filter + Questions */}
         <div className="lg:col-span-8 space-y-4">
           {/* Filter Bar */}
-          <div className="bg-white rounded-xl p-3.5 border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-xs font-semibold text-slate-500 mr-1 flex items-center gap-1">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-line-strong bg-surface p-3.5 dark:">
+            <div
+              role="group"
+              aria-label="Mistake status filter"
+              className="flex flex-wrap items-center gap-1.5"
+              onKeyDown={(e) => {
+                if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+                const buttons = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>('[data-status-pill]'));
+                const currentIndex = buttons.indexOf(document.activeElement as HTMLButtonElement);
+                if (currentIndex === -1) return;
+                e.preventDefault();
+                const nextIndex = e.key === 'ArrowRight'
+                  ? (currentIndex + 1) % buttons.length
+                  : (currentIndex - 1 + buttons.length) % buttons.length;
+                buttons[nextIndex]?.focus();
+              }}
+            >
+              <span className="mr-1 flex items-center gap-1 text-xs font-semibold text-ink-soft">
                 <Filter className="w-3.5 h-3.5" /> Filter:
               </span>
-              {(['ALL', 'UNRESOLVED', 'REMEDIATED'] as const).map(status => (
-                <button
-                  key={status}
-                  onClick={() => setFilterStatus(status)}
-                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                    filterStatus === status 
-                      ? 'bg-[#001432] text-white shadow-sm' 
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                  }`}
-                >
-                  {status === 'ALL' ? `All Mistakes (${stats.total})` : status === 'UNRESOLVED' ? `Unresolved (${stats.unresolved})` : `Remediated (${stats.remediated})`}
-                </button>
-              ))}
+              {(['ALL', 'UNRESOLVED', 'REMEDIATED'] as const).map(status => {
+                const count = status === 'ALL' ? stats.total : status === 'UNRESOLVED' ? stats.unresolved : stats.remediated;
+                const active = filterStatus === status;
+                return (
+                  <button
+                    key={status}
+                    data-status-pill
+                    tabIndex={active ? 0 : -1}
+                    aria-pressed={active}
+                    onClick={() => setFilterStatus(status)}
+                    className={`inline-flex items-center gap-2 rounded-[14px] px-3 py-1.5 text-xs font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 ${
+                      active
+                        ? 'border border-line-strong  '
+                        : 'border border-line bg-surface-2 text-ink-soft hover:border-line-strong hover:text-ink'
+                    }`}
+                  >
+                    {status === 'ALL' ? 'All Mistakes' : status === 'UNRESOLVED' ? 'Unresolved' : 'Remediated'}
+                    <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${active ? '' : 'bg-line/30'}`}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
 
             <div className="flex items-center gap-2">
               <select
                 value={filterSubject}
                 onChange={e => setFilterSubject(e.target.value)}
-                className="text-xs font-medium bg-slate-50 border border-slate-200 text-slate-700 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                className="min-h-10 rounded-[14px] border border-line bg-surface-2 px-3 py-2 text-sm font-medium text-ink focus:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2"
               >
                 <option value="ALL">All Disciplines</option>
                 {subjects.map((s) => (
@@ -292,24 +361,31 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
           </div>
 
           {captured.length === 0 && !showSample && (
-            <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-8 text-center space-y-3">
-              <ClipboardPaste className="w-8 h-8 text-slate-300 mx-auto" />
-              <h3 className="text-sm font-bold text-slate-800">No real mistakes captured yet</h3>
-              <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+            <div className="relative overflow-hidden rounded-[20px] border border-dashed border-line bg-surface-2 p-8 text-center dark:">
+              <div className="relative mx-auto mb-3 flex h-16 w-16 items-center justify-center">
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 rounded-full opacity-[0.08]"
+                  style={{ backgroundImage: 'radial-gradient(circle at 1px 1px, currentColor 1px, transparent 0)', backgroundSize: '10px 10px' }}
+                />
+                <ClipboardPaste className="relative h-8 w-8 text-ink-soft" />
+              </div>
+              <h3 className="text-sm font-medium text-ink">No real mistakes captured yet</h3>
+              <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-ink-soft">
                 Paste a screenshot from any mock test and structure it with your AI. Captured questions persist locally and feed the spaced-review deck.
               </p>
-              <div className="flex items-center justify-center gap-2">
+              <div className="mt-4 flex flex-col items-stretch justify-center gap-2 sm:flex-row sm:items-center">
                 <button
                   onClick={() => setCaptureOpen(true)}
-                  className="px-3 py-1.5 rounded-lg bg-[#001432] text-white text-xs font-bold flex items-center gap-1.5"
+                  className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[16px] px-4 py-2 text-xs font-medium  transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 motion-safe:hover:-translate-y-0.5"
                 >
                   <Plus className="w-3.5 h-3.5" /> Capture Question
                 </button>
                 <button
                   onClick={() => setShowSample(true)}
-                  className="px-3 py-1.5 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold"
+                  className="inline-flex min-h-11 items-center justify-center rounded-[16px] border border-line bg-surface px-4 py-2 text-xs font-medium text-ink-soft transition-colors hover:border-line-strong hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2"
                 >
-                  View sample rows
+                  Show sample rows
                 </button>
               </div>
             </div>
@@ -318,32 +394,38 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
           {usingSamples && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-800 flex items-center justify-between">
               <span>These are sample rows to show the layout — they are not your progress.</span>
-              <button onClick={() => setShowSample(false)} className="font-bold underline">Hide samples</button>
+              <button onClick={() => setShowSample(false)} className="font-medium underline">Hide samples</button>
             </div>
           )}
 
           {/* Questions Cards */}
           <div className="space-y-4">
-            {questions.map((q) => {
+            {questions.map((q, index) => {
               const isExpanded = expandedCards[q.id] ?? false;
 
               return (
+                <motion.div
+                  key={q.id}
+                  initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.22, ease: "easeOut", delay: reduceMotion ? 0 : Math.min(index * 0.03, 0.2) }}
+                >
                 <div 
                   key={q.id}
-                  className={`bg-white rounded-2xl border transition-all duration-200 shadow-sm overflow-hidden ${
+                  className={`overflow-hidden rounded-[20px] border bg-surface transition-all duration-200 dark:${
                     q.isRemediated 
-                      ? 'border-emerald-200/80 hover:border-emerald-400' 
-                      : 'border-slate-200 hover:border-slate-300'
-                  }`}
+                      ? 'border-emerald-400/80 hover:border-emerald-500' 
+                      : 'border-line-strong hover:border-ink'
+                  } ${reduceMotion ? '' : 'motion-safe:hover:-'}`}
                 >
                   {/* Card Header */}
                   <div className="p-5 pb-3">
                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
+                        <span className="text-[11px] font-mono font-medium px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
                           {q.id}
                         </span>
-                        <span className="text-xs font-semibold px-2 py-0.5 rounded bg-[#0f8b8d]/10 text-[#0f8b8d]">
+                        <span className="text-xs font-semibold px-2 py-0.5 rounded  ">
                           {q.subject}
                         </span>
                         <span className="text-xs text-slate-500 font-medium">
@@ -369,7 +451,7 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                             <button
                               onClick={() => markStatus(q.id, q.isRemediated ? 'unresolved' : 'remediated')}
                               title={q.isRemediated ? 'Mark as unresolved again' : 'Mark this mistake as resolved'}
-                              className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                              className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border ${
                                 q.isRemediated
                                   ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
                                   : 'bg-white border-slate-200 text-slate-600 hover:border-emerald-300'
@@ -377,13 +459,34 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                             >
                               <Check className="w-3 h-3" /> {q.isRemediated ? 'Resolved' : 'Mark resolved'}
                             </button>
-                            <button
-                              onClick={() => deleteCaptured(q.id)}
-                              title="Delete this captured question"
-                              className="text-slate-400 hover:text-rose-600"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            <details className="relative">
+                              <summary
+                                title="Delete this captured question"
+                                className="list-none cursor-pointer text-ink-soft hover:text-rose-600 focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </summary>
+                              <div className="absolute right-0 top-full z-20 mt-2 w-44 rounded-[14px] border border-line-strong bg-surface p-2 ">
+                                <p className="text-[10px] font-medium text-ink">Delete this capture?</p>
+                                <div className="mt-2 flex items-center gap-2">
+                                  <button
+                                    onClick={() => deleteCaptured(q.id)}
+                                    className="rounded-lg bg-rose-600 px-2 py-1 text-[10px] font-medium text-white"
+                                  >
+                                    Delete
+                                  </button>
+                                  <button
+                                    onClick={(e) => {
+                                      const details = e.currentTarget.closest('details') as HTMLDetailsElement | null;
+                                      if (details) details.open = false;
+                                    }}
+                                    className="rounded-lg border border-line px-2 py-1 text-[10px] font-medium text-ink-soft"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            </details>
                           </>
                         )}
                       </div>
@@ -408,7 +511,7 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                           caption={q.imageCaption || undefined}
                         />
                         <div className="flex-1 text-left">
-                          <span className="text-[11px] font-bold text-slate-800 block leading-snug">
+                          <span className="text-[11px] font-medium text-slate-800 block leading-snug">
                             {q.imageCaption || 'Clinical image'}
                           </span>
                           {q.imageSourceUrl && (
@@ -416,7 +519,7 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                               href={q.imageSourceUrl}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="inline-block mt-1 text-[10px] font-semibold text-[#0f8b8d] hover:underline"
+                              className="inline-block mt-1 text-[10px] font-semibold  hover:underline"
                             >
                               Source ↗
                             </a>
@@ -430,25 +533,23 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                   <div className="px-5 py-2.5 bg-slate-50/70 border-t border-slate-100 flex items-center justify-between">
                     <button
                       onClick={() => toggleExpand(q.id)}
-                      className="text-xs font-semibold text-[#0f8b8d] hover:text-[#00696b] flex items-center gap-1"
+                      aria-expanded={isExpanded}
+                      className="flex items-center gap-1 rounded-lg text-xs font-semibold   focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2"
                     >
-                      {isExpanded ? (
-                        <>Hide Cognitive Root Cause & Options <ChevronUp className="w-3.5 h-3.5" /></>
-                      ) : (
-                        <>View Board Distractor Analysis & Options <ChevronDown className="w-3.5 h-3.5" /></>
-                      )}
+                      {isExpanded ? 'Hide Cognitive Root Cause & Options' : 'View Board Distractor Analysis & Options'}
+                      <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${isExpanded ? '' : ''}`} />
                     </button>
 
                     <div className="flex items-center gap-3">
                       <button
                         onClick={() => onNavigate('ai-tutor', q.id)}
-                        className="text-xs font-semibold text-slate-600 hover:text-[#0f8b8d] flex items-center gap-1"
+                        className="text-xs font-semibold text-slate-600  flex items-center gap-1"
                       >
                         <Sparkles className="w-3.5 h-3.5 text-amber-500" /> Dissect with AI Tutor
                       </button>
                       <button
                         onClick={() => onNavigate('test-runner', q.id)}
-                        className="text-xs font-semibold text-[#001432] hover:text-[#0f8b8d] flex items-center gap-1"
+                        className="text-xs font-semibold   flex items-center gap-1"
                       >
                         Retest Now <ArrowRight className="w-3.5 h-3.5" />
                       </button>
@@ -464,7 +565,7 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                           <div className="flex items-start gap-2.5">
                             <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                             <div>
-                              <div className="text-xs font-bold text-amber-900 uppercase tracking-wider">
+                              <div className="text-xs font-medium text-amber-900 uppercase tracking-wider">
                                 Board Distractor Analysis: {q.trapType || 'COGNITIVE HEURISTIC ERROR'}
                               </div>
                               <p className="text-xs text-amber-800 mt-1 leading-relaxed">
@@ -494,7 +595,7 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                                       : 'bg-slate-50/60 border-slate-200 text-slate-700'
                                 }`}
                               >
-                                <span className={`w-5 h-5 rounded-full flex items-center justify-center font-bold text-[11px] shrink-0 mt-0.5 ${
+                                <span className={`w-5 h-5 rounded-full flex items-center justify-center font-medium text-[11px] shrink-0 mt-0.5 ${
                                   isCorrect 
                                     ? 'bg-emerald-600 text-white' 
                                     : isSelected 
@@ -506,12 +607,12 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                                 <div className="flex-1 leading-relaxed">
                                   {opt.text}
                                   {isSelected && !isCorrect && (
-                                    <span className="ml-2 font-bold text-rose-600 text-[10px] uppercase tracking-wide">
+                                    <span className="ml-2 font-medium text-rose-600 text-[10px] uppercase tracking-wide">
                                       [Your Selection — Trap]
                                     </span>
                                   )}
                                   {isCorrect && (
-                                    <span className="ml-2 font-bold text-emerald-700 text-[10px] uppercase tracking-wide">
+                                    <span className="ml-2 font-medium text-emerald-700 text-[10px] uppercase tracking-wide">
                                       [Correct Answer]
                                     </span>
                                   )}
@@ -523,8 +624,8 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                       </div>
 
                       {/* Board Pearl */}
-                      <div className="p-3.5 rounded-xl bg-[#001432] text-white">
-                        <div className="flex items-center gap-2 text-amber-400 text-xs font-bold uppercase tracking-wider mb-1">
+                      <div className="p-3.5 rounded-xl  text-white">
+                        <div className="flex items-center gap-2 text-amber-400 text-xs font-medium uppercase tracking-wider mb-1">
                           <Brain className="w-3.5 h-3.5" /> High-Yield Board Pearl
                         </div>
                         <p className="text-xs text-slate-200 leading-relaxed font-sans">
@@ -549,6 +650,7 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                     </div>
                   )}
                 </div>
+                </motion.div>
               );
             })}
           </div>
@@ -557,11 +659,11 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
         {/* Right Column: SRS Sprint, Root-Cause Breakdown, Due Today */}
         <div className="lg:col-span-4 space-y-6">
           {/* Quick Sprint Launcher */}
-          <div className="bg-gradient-to-br from-[#001432] to-[#13294b] text-white rounded-2xl p-5 border border-[#13294b] shadow-md">
-            <div className="flex items-center gap-2 text-[#8ff3f4] text-xs font-bold uppercase tracking-wider">
+          <div className="text-white rounded-2xl p-5 border  shadow-md">
+            <div className="flex items-center gap-2  text-xs font-medium uppercase tracking-wider">
               <Target className="w-4 h-4" /> Spaced Repetition Sprint
             </div>
-            <h3 className="text-base font-bold mt-1 text-white">
+            <h3 className="text-base font-medium mt-1 text-white">
               Fix 10 Recurring Traps
             </h3>
             <p className="text-xs text-slate-300 mt-1 leading-relaxed">
@@ -569,23 +671,21 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
             </p>
             <div className="mt-4 flex items-center justify-between text-xs font-mono text-slate-300 pb-3 border-b border-slate-700">
               <span>Time Target: 12 min</span>
-              <span className="text-[#8ff3f4]">Penalty: Board Rules</span>
+              <span className="">Penalty: Board Rules</span>
             </div>
             <button
               onClick={startSprint}
-              className="w-full mt-4 py-2.5 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2"
+              className="w-full mt-4 py-2.5   text-white text-xs font-medium rounded-xl transition-all flex items-center justify-center gap-2"
             >
               Launch Targeted Sprint <ArrowRight className="w-3.5 h-3.5" />
             </button>
-            {sprintError && (
-              <div className="mt-2 p-2 rounded-lg bg-rose-50 border border-rose-200 text-[10px] text-rose-800">{sprintError}</div>
-            )}
+            {/* Sprint errors are surfaced in the hero alert. */}
           </div>
 
           {/* Root Cause Attribution Breakdown — computed from real attempts & captures */}
           <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
-            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-              <Layers className="w-4 h-4 text-[#0f8b8d]" /> Mistake Attribution Breakdown
+            <h3 className="text-sm font-medium text-slate-900 flex items-center gap-2">
+              <Layers className="w-4 h-4 " /> Mistake Attribution Breakdown
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
               {attemptStats.questionsAnswered > 0
@@ -603,7 +703,7 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                 <div key={s.subject}>
                   <div className="flex justify-between text-xs font-medium mb-1">
                     <span className="text-slate-700 truncate mr-2">{s.subject}</span>
-                    <span className="font-mono font-bold text-rose-600">{s.accuracy}% ({s.correct}/{s.total})</span>
+                    <span className="font-mono font-medium text-rose-600">{s.accuracy}% ({s.correct}/{s.total})</span>
                   </div>
                   <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
                     <div className="h-full bg-rose-500 rounded-full" style={{ width: `${Math.max(2, s.accuracy)}%` }} />
@@ -633,7 +733,7 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
           {/* Revision notes from real weak topics / captured mistakes */}
           <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-2">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+              <h3 className="text-sm font-medium text-slate-900 flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-amber-500" /> Revision notes
               </h3>
               <span className="text-[9px] font-mono text-slate-400 truncate max-w-[55%]">
@@ -643,13 +743,14 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
             <p className="text-[11px] text-slate-500 leading-relaxed">
               Generated from your weakest subjects and captured mistakes — nothing preloaded.
             </p>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={generateRevisionNotes}
                 disabled={notesBusy}
-                className="px-3 py-1.5 rounded-lg bg-[#001432] text-white text-[10px] font-bold disabled:opacity-40 flex items-center gap-1"
+                aria-busy={notesBusy}
+                className="inline-flex min-h-10 items-center gap-1.5 rounded-[14px] border border-line-strong  px-3 py-2 text-[10px] font-medium text-white transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 motion-safe:hover:-translate-y-0.5"
               >
-                {notesBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-[#8ff3f4]" />}
+                {notesBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 " />}
                 {notesBusy ? 'Writing…' : 'Make my revision notes'}
               </button>
               {revisionNotes && (
@@ -657,7 +758,7 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                   onClick={() => {
                     try {
                       downloadNotesPdf(
-                        `Weak-topic revision — ${currentExam.replace('_', '-')}`,
+ `Weak-topic revision — ${currentExam.replace('_', '-')}`,
                         revisionNotes.text,
                         getActiveProvider() ? `${getActiveProvider()} · ${getEffectiveModel(getActiveProvider()!)}` : undefined,
                       );
@@ -665,14 +766,23 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
                       setNotesError(err?.message || 'Could not open the print window.');
                     }
                   }}
-                  className="text-[10px] font-bold text-[#0f8b8d] hover:underline"
+                  className="text-[10px] font-medium  hover:underline"
                 >
                   Download PDF
                 </button>
               )}
             </div>
             {notesError && (
-              <div className="p-2 rounded-lg bg-rose-50 border border-rose-200 text-[10px] text-rose-800">{notesError}</div>
+              <div role="alert" className="rounded-[14px] border   p-2.5 text-[10px] text-rose-800 ring-2 ring-[var(--error-ring)] dark:text-rose-200">
+                <p>{notesError}</p>
+                <button
+                  onClick={generateRevisionNotes}
+                  disabled={notesBusy}
+                  className="mt-2 rounded-lg border  px-2 py-1 text-[10px] font-medium text-rose-800 disabled:opacity-50 dark:text-rose-200"
+                >
+                  Retry
+                </button>
+              </div>
             )}
             {revisionNotes && (
               <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 max-h-64 overflow-y-auto">
@@ -687,9 +797,13 @@ export const MistakeNotebookView: React.FC<MistakeNotebookViewProps> = ({
         <QuestionCaptureModal
           exam={currentExam}
           onClose={() => setCaptureOpen(false)}
-          onSaved={() => setCapturedVersion((v) => v + 1)}
+          onSaved={() => {
+            setCapturedVersion((v) => v + 1);
+            setSprintError(null);
+          }}
         />
       )}
+      </div>
     </div>
   );
 };

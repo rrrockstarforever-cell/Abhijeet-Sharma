@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import { motion, useReducedMotion } from 'motion/react';
 import {
   RotateCcw,
   ShieldCheck,
@@ -34,12 +35,12 @@ interface SubjectRow {
 }
 
 const statusConfig = {
-  Mastered: { label: 'Mastered', color: 'bg-teal-50 text-teal-800 border-teal-200', bar: 'bg-[#0f8b8d]' },
-  Solid: { label: 'Solid', color: 'bg-emerald-50 text-emerald-700 border-emerald-200', bar: 'bg-[#1f9d55]' },
-  Steady: { label: 'Steady', color: 'bg-slate-100 text-slate-700 border-slate-200', bar: 'bg-[#0f8b8d]' },
-  Developing: { label: 'Developing', color: 'bg-amber-50 text-amber-700 border-amber-200', bar: 'bg-[#f2a541]' },
-  'Needs Focus': { label: 'Needs Focus', color: 'bg-amber-50 text-amber-700 border-amber-200', bar: 'bg-[#f2a541]' },
-  'Red Flag': { label: 'Red Flag', color: 'bg-red-50 text-red-700 border-red-200', bar: 'bg-[#d64545]' },
+  Mastered: { label: 'Mastered', color: 'bg-teal-50 text-teal-800 border-teal-200', bar: '' },
+  Solid: { label: 'Solid', color: 'bg-emerald-50 text-emerald-700 border-emerald-200', bar: '' },
+  Steady: { label: 'Steady', color: 'bg-slate-100 text-slate-700 border-slate-200', bar: '' },
+  Developing: { label: 'Developing', color: 'bg-amber-50 text-amber-700 border-amber-200', bar: '' },
+ 'Needs Focus': { label: 'Needs Focus', color: 'bg-amber-50 text-amber-700 border-amber-200', bar: '' },
+ 'Red Flag': { label: 'Red Flag', color: 'bg-red-50 text-red-700 border-red-200', bar: '' },
 };
 
 function getStatus(accuracy: number, solved: number): keyof typeof statusConfig {
@@ -69,11 +70,13 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
   onNavigate,
   onLaunchRemediation,
 }) => {
+  const reduceMotion = useReducedMotion();
+
   // Open on the exam the user practised last (the active test), not always NEET-PG, which is
   // often empty and makes the page look blank.
-  const [activeCohort, setActiveCohort] = useState<'NEET_PG' | 'INI_CET' | 'AMC_CAT'>(() => {
+  const [activeCohort, setActiveCohort] = useState<'NEET_PG' | 'INI_CET'>(() => {
     const last = loadActiveTest()?.exam;
-    return last === 'INI_CET' || last === 'AMC_CAT' || last === 'NEET_PG' ? last : 'NEET_PG';
+    return last === 'INI_CET' || last === 'NEET_PG' ? last : 'NEET_PG';
   });
   const [sortBy, setSortBy] = useState<'lowest' | 'highest' | 'solved'>('lowest');
   const [downloadSuccess, setDownloadSuccess] = useState(false);
@@ -128,12 +131,6 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
         else if (name.toLowerCase().includes('surgical special')) sub = 'ATLS, Operative Anatomy, Vascular Staging';
         else if (name.toLowerCase().includes('maternal') || name.toLowerCase().includes('child')) sub = 'Neonatal Sepsis, PPH, Eclampsia, IEM';
         else if (name.toLowerCase().includes('diagnostic') || name.toLowerCase().includes('imag')) sub = 'Silver Stains, IF Patterns, CT Signs';
-        else if (name.toLowerCase().includes('adult health') && name.toLowerCase().includes('medicine')) sub = 'Cardiology, Pulmonology, eTG Protocols (30%)';
-        else if (name.toLowerCase().includes('adult health') && name.toLowerCase().includes('surgery')) sub = 'Acute Abdomen, Trauma, Pre-Op (20%)';
-        else if (name.toLowerCase().includes('women') || name.toLowerCase().includes('o&g')) sub = 'Antenatal, Eclampsia, Contraception (12.5%)';
-        else if (name.toLowerCase().includes('child') || name.toLowerCase().includes('paediatr')) sub = 'Neonatal Sepsis, Milestones, Aus Schedule (12.5%)';
-        else if (name.toLowerCase().includes('mental') || name.toLowerCase().includes('psych')) sub = 'Self-Harm Triage, Psychosis, Mental Health Act (12.5%)';
-        else if (name.toLowerCase().includes('population') || name.toLowerCase().includes('ethic')) sub = 'RACGP Preventive, Notification, Legal (12.5%)';
         else sub = 'Core topics';
 
         return { name, sub, solved, incorrect, accuracy, status, statusColor: cfg.color, barColor: cfg.bar };
@@ -159,187 +156,242 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
 
   const hasData = summary.questionsAnswered > 0;
   const cohortHasData = cohortAttempts.length > 0;
+  const cohortQuestions = cohortAttempts.reduce((sum, a) => sum + a.attempted, 0);
+  const cohortCorrect = cohortAttempts.reduce((sum, a) => sum + a.correct, 0);
+  const cohortWrong = Math.max(cohortQuestions - cohortCorrect, 0);
+  const cohortAccuracy = cohortQuestions > 0 ? Math.round((cohortCorrect / cohortQuestions) * 100) : null;
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6">
+    <div className="p-6 max-w-7xl mx-auto space-y-6 font-['M_PLUS_Rounded_1c'] text-[16px] leading-[1.7]  ">
       {/* Top Header & Cohort Switcher */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 mb-1">
-            <span>Performance Analytics</span>
-            <span>›</span>
-            <span className="text-[#0f8b8d]">Accuracy & Subject Matrix</span>
+      <div className="relative overflow-hidden rounded-[24px] border   p-5   dark:">
+        <div className="pointer-events-none absolute inset-0 opacity-[0.08] dark:" />
+        <div className="relative flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="mb-1 flex flex-wrap items-center gap-2 text-xs font-semibold  ">
+              <span>Performance Analytics</span>
+              <span>›</span>
+              <span className="rounded-full border   px-2 py-0.5 font-[''] text-[11px] uppercase tracking-wider  ">
+                Accuracy Matrix
+              </span>
+            </div>
+            <div className="mb-1 inline-flex items-center rounded-lg border   px-2.5 py-1 font-[''] text-sm uppercase tracking-[0.18em]   dark:">
+              Training Arc
+            </div>
+            <h1 className="font-['Cormorant'] text-3xl font-medium leading-tight tracking-tight   md:text-4xl">
+              Comprehensive Learning Progress & Accuracy Matrix
+            </h1>
+            <p className="mt-1 max-w-2xl text-sm  ">
+              Cohort-scoped attempts, accuracy bands, and remediation targets from saved practice.
+            </p>
           </div>
-          <h1 className="text-2xl font-extrabold text-[#13294b] tracking-tight">
-            Comprehensive Learning Progress & Accuracy Matrix
-          </h1>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Detailed clinical performance across specialties, difficulty tiers, and multi-exam cohorts.
-          </p>
-        </div>
 
-        {/* Cohort Tabs */}
-        <div className="flex items-center p-1 bg-slate-200/80 rounded-lg text-xs font-semibold shrink-0">
-          <button
-            onClick={() => setActiveCohort('NEET_PG')}
-            className={`px-3 py-1.5 rounded-md transition-all ${
-              activeCohort === 'NEET_PG'
-                ? 'bg-white text-[#13294b] shadow-xs font-bold'
-                : 'text-slate-600 hover:text-[#13294b]'
-            }`}
-          >
-            NEET PG
-          </button>
-          <button
-            onClick={() => setActiveCohort('INI_CET')}
-            className={`px-3 py-1.5 rounded-md transition-all ${
-              activeCohort === 'INI_CET'
-                ? 'bg-white text-[#13294b] shadow-xs font-bold'
-                : 'text-slate-600 hover:text-[#13294b]'
-            }`}
-          >
-            INI-CET
-          </button>
-          <button
-            onClick={() => setActiveCohort('AMC_CAT')}
-            className={`px-3 py-1.5 rounded-md transition-all ${
-              activeCohort === 'AMC_CAT'
-                ? 'bg-white text-[#13294b] shadow-xs font-bold'
-                : 'text-slate-600 hover:text-[#13294b]'
-            }`}
-          >
-            AMC CAT MCQ
-          </button>
+          {/* Cohort Tabs */}
+          <div className="flex shrink-0 items-center gap-2 rounded-2xl border   p-1.5  ">
+            <button
+              onClick={() => setActiveCohort('NEET_PG')}
+              className={`min-h-[44px] rounded-xl px-4 py-2 text-xs font-medium uppercase tracking-wider transition-all ${
+                activeCohort === 'NEET_PG'
+                  ? 'border    dark:'
+                  : 'border border-transparent    '
+              }`}
+            >
+              NEET PG
+            </button>
+            <button
+              onClick={() => setActiveCohort('INI_CET')}
+              className={`min-h-[44px] rounded-xl px-4 py-2 text-xs font-medium uppercase tracking-wider transition-all ${
+                activeCohort === 'INI_CET'
+                  ? 'border    dark:'
+                  : 'border border-transparent    '
+              }`}
+            >
+              INI-CET
+            </button>
+          </div>
         </div>
       </div>
 
       {/* 4-Stat Metric Row */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {/* Coverage Velocity */}
-        <Card className="p-4 relative">
-          <div className="flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-            <span>COVERAGE VELOCITY</span>
-            <button className="text-slate-400 hover:text-[#0f8b8d] transition-colors" title="Sync">
-              <RotateCcw className="w-3.5 h-3.5" />
-            </button>
+        <Card className="relative min-h-[190px] overflow-hidden rounded-[20px] border   p-4   dark:">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-16 opacity-[0.08] dark:" />
+          <div className="relative flex items-center justify-between gap-2 text-[11px] font-medium uppercase tracking-wider  ">
+            <span>Coverage Velocity</span>
+            <span className="rounded-full border   px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal    ">
+              From saved attempts
+            </span>
           </div>
-          <div className="flex items-baseline gap-1.5">
-            <span className="text-3xl font-extrabold text-[#13294b] font-mono tabular-nums tracking-tight">
-              {hasData ? summary.questionsAnswered.toLocaleString() : '—'}
+          <div className="relative mt-4 flex items-baseline gap-1.5">
+            <span className="font-[''] text-5xl leading-none tracking-wide  ">
+              {cohortHasData ? cohortQuestions.toLocaleString() : '—'}
             </span>
-            <span className="text-xs text-slate-500 font-medium">questions answered</span>
+            <span className="text-xs font-semibold  ">
+              questions in {activeCohort}
+            </span>
           </div>
-          <div className="mt-3 flex items-center justify-between text-xs font-medium pt-2 border-t border-slate-100">
-            <span className={hasData ? 'text-emerald-700 font-semibold' : 'text-slate-500'}>
-              {hasData
-                ? `${summary.accuracyPercent}% accuracy`
-                : 'No marked questions yet'}
-            </span>
-            <span className="text-slate-500">
-              {hasData ? `${summary.correct.toLocaleString()} correct` : '—'}
-            </span>
+          <p className="relative mt-2 text-xs  ">
+            Saved answers from completed practice modules for the active cohort.
+          </p>
+          <div className="relative mt-3 border-t-2  pt-2 ">
+            <div className="flex items-center justify-between text-xs font-semibold">
+              <span className={cohortAccuracy !== null ? ' ' : ' '}>
+                {cohortAccuracy !== null ? `${cohortAccuracy}% accuracy` : 'No answers marked yet'}
+              </span>
+              <span className=" ">
+                {cohortHasData ? `${cohortCorrect.toLocaleString()} correct` : '—'}
+              </span>
+            </div>
+            {!cohortHasData && (
+              <div className="mt-2">
+                <p className="text-xs  ">
+                  Finish a practice set for {activeCohort} and your results will show here.
+                </p>
+                <button
+                  onClick={() => onNavigate('practice')}
+                  className="  mt-2 px-3 py-1.5 text-sm"
+                >
+                  Start practice
+                </button>
+              </div>
+            )}
           </div>
         </Card>
 
         {/* Cumulative Accuracy */}
-        <Card className="p-4">
-          <div className="flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-            <span>CUMULATIVE ACCURACY</span>
-            <ShieldCheck className="w-4 h-4 text-[#0f8b8d]" />
+        <Card className="relative min-h-[190px] overflow-hidden rounded-[20px] border   p-4   dark:">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-16 opacity-[0.08] dark:" />
+          <div className="relative flex items-center justify-between text-[11px] font-medium uppercase tracking-wider  ">
+            <span>Cumulative Accuracy</span>
+            <ShieldCheck className="h-4 w-4  " />
           </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-extrabold text-[#13294b] font-mono tabular-nums tracking-tight">
-              {hasData ? `${summary.accuracyPercent}%` : '—'}
+          <div className="relative mt-4 flex items-center gap-2">
+            <span className="font-[''] text-5xl leading-none tracking-wide  ">
+              {cohortAccuracy !== null ? `${cohortAccuracy}%` : '—'}
             </span>
-            {hasData && summary.accuracyPercent !== null && summary.accuracyPercent >= 70 && (
-              <span className="text-xs font-bold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded border border-teal-200">
-                ↗ On track
+            {cohortAccuracy !== null && cohortAccuracy >= 70 && (
+              <span className="rounded-md border   px-2 py-0.5 font-[''] text-xs uppercase tracking-wider   dark:">
+                On track
               </span>
             )}
           </div>
-          <p className="text-[11px] text-slate-500 mt-1">
-            {hasData
-              ? `Based on ${summary.questionsAnswered.toLocaleString()} real attempts across ${summary.modules} modules`
-              : 'Complete practice modules to see cumulative accuracy'}
+          <p className="relative mt-2 text-xs  ">
+            {cohortAccuracy !== null
+              ? `Based on ${cohortQuestions.toLocaleString()} saved answers for ${activeCohort}`
+              : `No saved answers yet for ${activeCohort}. Finish a practice set to see your overall accuracy.`}
           </p>
-          <div className="mt-2 flex items-center gap-3 text-xs font-medium pt-2 border-t border-slate-100">
-            {hasData && (
+          {cohortAccuracy === null && (
+            <button
+              onClick={() => onNavigate('practice')}
+              className="  relative mt-2 px-3 py-1.5 text-sm"
+            >
+              Start practice
+            </button>
+          )}
+          <div className="relative mt-3 flex items-center gap-3 border-t-2  pt-2 text-xs font-semibold ">
+            {cohortHasData ? (
               <>
-                <span className="flex items-center gap-1 text-slate-700">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                  <strong className="font-mono">{summary.correct.toLocaleString()}</strong> Correct
+                <span className="flex items-center gap-1  ">
+                  <span className="h-2 w-2 rounded-full "></span>
+                  <strong className="font-mono">{cohortCorrect.toLocaleString()}</strong> Correct
                 </span>
-                <span className="flex items-center gap-1 text-slate-700">
-                  <span className="w-2 h-2 rounded-full bg-red-500"></span>
-                  <strong className="font-mono">
-                    {(summary.questionsAnswered - summary.correct).toLocaleString()}
-                  </strong> Wrong
+                <span className="flex items-center gap-1  ">
+                  <span className="h-2 w-2 rounded-full "></span>
+                  <strong className="font-mono">{cohortWrong.toLocaleString()}</strong> Wrong
                 </span>
               </>
+            ) : (
+              <div className="flex w-full flex-wrap items-center gap-2">
+                <span className=" ">No answers marked yet for {activeCohort}.</span>
+                <button
+                  onClick={() => onNavigate('practice')}
+                  className="  px-3 py-1.5 text-sm"
+                >
+                  Practice now
+                </button>
+              </div>
             )}
           </div>
         </Card>
 
         {/* Response Partition */}
-        <Card className="p-4">
-          <div className="flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-            <span>RESPONSE PARTITION</span>
-            <PieChart className="w-4 h-4 text-slate-400" />
+        <Card className="relative min-h-[190px] overflow-hidden rounded-[20px] border   p-4   dark:">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-16 opacity-[0.08] dark:" />
+          <div className="relative flex items-center justify-between text-[11px] font-medium uppercase tracking-wider  ">
+            <span>Response Partition</span>
+            <PieChart className="h-4 w-4  " />
           </div>
-          <div className="grid grid-cols-3 gap-2 text-center mt-1">
+          <div className="relative mt-4 grid grid-cols-3 gap-2 text-center">
             <div>
-              <div className="text-[11px] text-slate-500 font-medium">Correct</div>
-              <div className="text-base font-bold text-emerald-700 font-mono">
-                {hasData ? summary.correct.toLocaleString() : '—'}
+              <div className="text-[11px] font-semibold  ">Correct</div>
+              <div className="font-[''] text-2xl  ">
+                {cohortHasData ? cohortCorrect.toLocaleString() : '—'}
               </div>
             </div>
             <div>
-              <div className="text-[11px] text-slate-500 font-medium">Incorrect</div>
-              <div className="text-base font-bold text-red-600 font-mono">
-                {hasData ? (summary.questionsAnswered - summary.correct).toLocaleString() : '—'}
+              <div className="text-[11px] font-semibold  ">Incorrect</div>
+              <div className="font-[''] text-2xl ">
+                {cohortHasData ? cohortWrong.toLocaleString() : '—'}
               </div>
             </div>
             <div>
-              <div className="text-[11px] text-slate-500 font-medium">Skipped</div>
-              <div className="text-base font-bold text-slate-600 font-mono">—</div>
+              <div className="text-[11px] font-semibold  ">Skipped</div>
+              <div className="font-[''] text-2xl ">—</div>
             </div>
           </div>
-          {/* Multi-segmented bar */}
-          <div className="mt-3 w-full h-2 rounded-full bg-slate-100 overflow-hidden flex">
-            {hasData && summary.accuracyPercent !== null && (
+          <div className="relative mt-4 flex h-3 w-full overflow-hidden rounded-full border    ">
+            {cohortAccuracy !== null && (
               <>
-                <div className="h-full bg-emerald-500" style={{ width: `${summary.accuracyPercent}%` }} title={`Correct: ${summary.accuracyPercent}%`}></div>
-                <div className="h-full bg-red-500" style={{ width: `${100 - summary.accuracyPercent}%` }} title={`Incorrect: ${100 - summary.accuracyPercent}%`}></div>
+                <div className="h-full " style={{ width: `${cohortAccuracy}%` }} title={`Correct: ${cohortAccuracy}%`}></div>
+                <div className="h-full " style={{ width: `${100 - cohortAccuracy}%` }} title={`Incorrect: ${100 - cohortAccuracy}%`}></div>
               </>
             )}
           </div>
+          <p className="relative mt-2 text-[11px] font-medium  ">
+            Skipped data is not tracked in saved attempts.
+          </p>
         </Card>
 
-        {/* National Standing / Exam Date Countdown */}
-        <Card className="p-4 bg-linear-to-br from-white to-slate-50/80">
-          <div className="flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-            <span>EXAM COUNTDOWN</span>
-            <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-teal-100 text-teal-800">
+        {/* Exam Countdown */}
+        <Card className="relative min-h-[190px] overflow-hidden rounded-[20px] border   p-4   dark:">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-16 opacity-[0.08] dark:" />
+          <div className="relative flex items-center justify-between gap-2 text-[11px] font-medium uppercase tracking-wider  ">
+            <span>Exam Countdown</span>
+            <span className="rounded-full border   px-2 py-0.5 text-[10px] font-medium tracking-normal  ">
               {activeCohort}
             </span>
           </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-extrabold text-[#13294b] font-mono tabular-nums tracking-tight">
+          <div className="relative mt-4 flex items-baseline gap-2">
+            <span className="font-[''] text-5xl leading-none tracking-wide  ">
               {daysToExam !== null && daysToExam > 0 ? `${daysToExam}d` : daysToExam !== null && daysToExam <= 0 ? 'TODAY' : '—'}
             </span>
           </div>
-          <p className="text-[11px] text-slate-600 font-medium mt-1">
+          <p className="relative mt-2 text-xs font-semibold  ">
             {examDate
               ? daysToExam !== null && daysToExam > 0
                 ? `${daysToExam} days until ${activeCohort} (${formatDateForCountdown(examDate)})`
                 : daysToExam !== null && daysToExam <= 0
                 ? `Exam date reached (${formatDateForCountdown(examDate)})`
-                : `Set exam date for ${activeCohort} in Sidebar`
-              : `Set exam date for ${activeCohort} in Sidebar`}
+                : `No exam date set for ${activeCohort}. Add it in Sidebar to see the countdown.`
+              : `No exam date set for ${activeCohort}. Add it in Sidebar to see the countdown.`}
           </p>
-          <div className="mt-2 pt-2 border-t border-slate-100 flex items-center gap-1.5 text-xs text-slate-700 font-semibold">
-            <Trophy className="w-3.5 h-3.5 text-[#f2a541]" />
-            {hasData ? `Accuracy: ${summary.accuracyPercent}%` : 'No data yet'}
+          <div className="relative mt-3 border-t-2  pt-2 text-xs font-semibold   ">
+            <div className="flex items-center gap-1.5">
+              <Trophy className="h-3.5 w-3.5 " />
+              {cohortAccuracy !== null ? `Cohort accuracy: ${cohortAccuracy}%` : 'No answers yet for this cohort'}
+            </div>
+            {cohortAccuracy === null && (
+              <div className="mt-2">
+                <p className="text-xs  ">Finish a practice set to see cohort accuracy.</p>
+                <button
+                  onClick={() => onNavigate('practice')}
+                  className="  mt-2 px-3 py-1.5 text-sm"
+                >
+                  Start practice
+                </button>
+              </div>
+            )}
           </div>
         </Card>
       </div>
@@ -347,20 +399,25 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
       {/* Main Split: Subject Accuracy Table (Left) + Difficulty & Synthesis Insights (Right) */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Column (2 Cols wide): Specialty & Subject Table */}
-        <div className="lg:col-span-2 bg-white border border-[#e3e7ee] rounded-xl p-5 shadow-xs">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-100 gap-2">
+        <div className="lg:col-span-2 overflow-hidden rounded-[20px] border   p-5   dark:">
+          <div className="flex flex-col gap-3 border-b-2  pb-4 sm:flex-row sm:items-center sm:justify-between ">
             <div>
-              <h2 className="text-base font-bold text-[#13294b]">Specialty & Subject Accuracy Table</h2>
-              <p className="text-xs text-slate-500">
-                Continuous mastery tracking from real attempts
+              <div className="mb-1 inline-flex rounded-md border   px-2 py-0.5 font-[''] text-xs uppercase tracking-[0.16em]   dark:">
+                Subject Matrix
+              </div>
+              <h2 className="font-['Cormorant'] text-2xl font-medium  ">
+                Specialty & Subject Accuracy Table
+              </h2>
+              <p className="text-sm  ">
+                Continuous mastery tracking from saved {activeCohort} attempts
               </p>
             </div>
             <div className="flex items-center gap-2 text-xs">
-              <span className="text-slate-500 font-medium">SORT BY:</span>
+              <span className="font-semibold  ">SORT BY:</span>
               <select
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value as any)}
-                className="bg-slate-50 border border-slate-200 rounded-md px-2.5 py-1 text-xs font-semibold text-slate-700 focus:outline-none focus:border-[#0f8b8d]"
+                className="min-h-[44px] rounded-xl border   px-3 py-2 text-xs font-medium  focus:outline-none focus:ring-4 focus:   "
               >
                 <option value="lowest">Lowest Accuracy</option>
                 <option value="highest">Highest Accuracy</option>
@@ -369,60 +426,66 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
             </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs mt-2">
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left text-[15px] leading-6">
               <thead>
-                <tr className="border-b border-slate-100 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                  <th className="py-2.5 px-3">Subject</th>
-                  <th className="py-2.5 px-3">Solved / Wrong</th>
-                  <th className="py-2.5 px-3">Accuracy Band</th>
-                  <th className="py-2.5 px-3">Evaluation</th>
-                  <th className="py-2.5 px-3 text-right">Action</th>
+                <tr className="border-b-2  text-[11px] font-medium uppercase tracking-wider   ">
+                  <th className="px-3 py-2.5">Subject</th>
+                  <th className="px-3 py-2.5">Solved / Wrong</th>
+                  <th className="px-3 py-2.5">Accuracy Band</th>
+                  <th className="px-3 py-2.5">Evaluation</th>
+                  <th className="px-3 py-2.5 text-right">Action</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className="divide-y-2 divide-[#543828]/10 dark:divide-[#A9A9C4]/20">
                 {cohortHasData && sortedSubjects.length > 0 ? (
                   sortedSubjects.map((sub) => (
-                    <tr key={sub.name} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="py-3 px-3">
-                        <div className="font-bold text-sm text-[#13294b]">{sub.name}</div>
-                        <div className="text-[11px] text-slate-500">{sub.sub}</div>
+                    <tr key={sub.name} className="transition-colors  ">
+                      <td className="px-3 py-3">
+                        <div className="text-sm font-medium  ">{sub.name}</div>
+                        <div className="text-[11px] font-medium  ">{sub.sub}</div>
                       </td>
-                      <td className="py-3 px-3">
-                        <div className="font-mono font-bold text-slate-800">{sub.solved} Qs</div>
-                        <div className="text-[11px] text-red-600 font-mono font-medium">
+                      <td className="px-3 py-3">
+                        <div className="font-mono text-sm font-medium  ">{sub.solved} Qs</div>
+                        <div className="font-mono text-[11px] font-semibold ">
                           {sub.incorrect} Incorrect
                         </div>
                       </td>
-                      <td className="py-3 px-3 min-w-36">
+                      <td className="min-w-36 px-3 py-3">
                         <div className="flex items-center gap-2">
-                          <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+                          <div className="h-3 flex-1 overflow-hidden rounded-full border    ">
                             <div
-                              className={`h-full ${sub.barColor} rounded-full`}
+                              className={`h-full rounded-full ${sub.barColor}`}
                               style={{ width: `${sub.accuracy}%` }}
                             ></div>
                           </div>
-                          <span className="font-mono font-bold text-slate-800 text-xs w-8 text-right">
+                          <span className="w-9 text-right font-mono text-xs font-medium  ">
                             {sub.accuracy}%
                           </span>
                         </div>
                       </td>
-                      <td className="py-3 px-3">
+                      <td className="px-3 py-3">
                         <span
-                          className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold border ${sub.statusColor}`}
+                          className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium ${
+                            sub.status === 'Red Flag' || sub.status === 'Needs Focus'
+                              ? '   '
+                              : sub.status === 'Developing'
+                              ? '   '
+                              : '   '
+                          }`}
                         >
                           {sub.status === 'Red Flag' && '● '}
                           {sub.status}
                         </span>
                       </td>
-                      <td className="py-3 px-3 text-right">
+                      <td className="px-3 py-3 text-right">
                         <button
                           onClick={() => onLaunchRemediation(sub.name)}
                           title="Opens the Question Bank filtered to this subject"
-                          className={`px-3 py-1 rounded-md text-xs font-semibold transition-all shadow-xs ${
+                          className={`min-h-[40px] rounded-xl border px-3 py-1.5 text-xs font-medium transition-all ${
                             sub.accuracy < 65
-                              ? 'bg-[#d64545] hover:bg-red-700 text-white'
-                              : 'bg-[#0f8b8d] hover:bg-[#00696b] text-white'
+                              ? '     dark:'
+                              : '  hover:brightness-105  dark:'
                           }`}
                         >
                           Remediate
@@ -432,8 +495,21 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={5} className="py-8 text-center text-slate-500 text-sm">
-                      No marked questions yet for {activeCohort}
+                    <td colSpan={5} className="px-3 py-8">
+                      <div className="mx-auto max-w-md rounded-[20px] border   p-4 text-center   dark:">
+                        <div className="font-[''] text-lg uppercase tracking-wider  ">
+                          No marked questions yet
+                        </div>
+                        <p className="mt-1 text-sm  ">
+                          You have not finished a practice set for {activeCohort} yet. Finish one to fill this table.
+                        </p>
+                        <button
+                          onClick={() => onNavigate('practice')}
+                          className="  mt-3 px-3 py-1.5 text-sm"
+                        >
+                          Start practice
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )}
@@ -445,59 +521,87 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
         {/* Right Column (1 Col wide): Weak Subjects & Synthesis Cards */}
         <div className="space-y-4">
           {/* Weak Subjects Card (from summarizeAttempts) */}
-          <div className="bg-white border border-[#e3e7ee] rounded-xl p-5 shadow-xs">
-            <h3 className="text-sm font-bold text-[#13294b]">Weak Subjects (Focus Areas)</h3>
-            <p className="text-[11px] text-slate-500 mb-4">
-              Subjects with accuracy below 70% (minimum 3 questions)
-            </p>
+          <div className="relative overflow-hidden rounded-[20px] border   p-5   dark:">
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-16 opacity-[0.08] dark:" />
+            <div className="relative">
+              <h3 className="font-['Cormorant'] text-xl font-medium  ">Weak Subjects (All-time Focus Areas)</h3>
+              <p className="mb-4 text-xs font-medium  ">
+                Subjects with accuracy below 70% (minimum 3 questions)
+              </p>
 
-            {weakSubjects.length > 0 ? (
-              <div className="space-y-3">
-                {weakSubjects.map((w, idx) => (
-                  <div key={`${w.subject}-${idx}`}>
-                    <div className="flex items-center justify-between text-xs font-bold text-slate-800 mb-1">
-                      <span className="flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-[#d64545]"></span>
-                        {w.subject}
-                      </span>
-                      <span className="font-mono text-red-600 font-bold">{w.accuracy}%</span>
+              {weakSubjects.length > 0 ? (
+                <div className="space-y-3">
+                  {weakSubjects.map((w, idx) => (
+                    <div key={`${w.subject}-${idx}`} className="rounded-xl border   p-3  ">
+                      <div className="mb-1 flex items-center justify-between text-xs font-medium  ">
+                        <span className="flex items-center gap-1.5">
+                          <span className="h-2 w-2 rounded-full "></span>
+                          {w.subject}
+                        </span>
+                        <span className="font-mono font-medium ">{w.accuracy}%</span>
+                      </div>
+                      <div className="h-3 w-full overflow-hidden rounded-full border    ">
+                        <div className="h-full rounded-full " style={{ width: `${w.accuracy}%` }}></div>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between text-[11px] font-medium  ">
+                        <span>{w.correct} / {w.total} correct</span>
+                        <button
+                          onClick={() => onLaunchRemediation(w.subject)}
+                          title="Opens the Question Bank filtered to this subject"
+                          className="text-xs font-medium  hover:underline "
+                        >
+                          Remediate
+                        </button>
+                      </div>
                     </div>
-                    <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-[#d64545] rounded-full" style={{ width: `${w.accuracy}%` }}></div>
-                    </div>
-                    <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
-                      <span>{w.correct} / {w.total} correct</span>
-                      <button
-                        onClick={() => onLaunchRemediation(w.subject)}
-                        title="Opens the Question Bank filtered to this subject"
-                        className="text-xs font-semibold text-[#d64545] hover:underline"
-                      >
-                        Remediate
-                      </button>
-                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mx-auto max-w-xs rounded-[20px] border   p-4 text-center   dark:">
+                  <div className="font-[''] text-lg uppercase tracking-wider  ">
+                    {hasData ? 'No weak subjects detected' : 'No practice results yet'}
                   </div>
-                ))}
-              </div>
-            ) : (
-              <div className="text-center py-4 text-slate-500 text-sm">
-                {hasData ? 'No weak subjects detected (all ≥ 70%)' : 'Complete practice modules to identify weak areas'}
-              </div>
-            )}
+                  <p className="mt-1 text-sm  ">
+                    {hasData
+                      ? 'All tracked subjects are at or above 70%. Keep going to stay on track.'
+                      : 'You have not finished a practice set yet. Finish one to find weak areas.'}
+                  </p>
+                  {!hasData && (
+                    <button
+                      onClick={() => onNavigate('practice')}
+                      className="  mt-3 px-3 py-1.5 text-sm"
+                    >
+                      Start practice
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Cognitive Synthesis Insight Callout */}
-          <div className="bg-[#f8f9ff] border border-[#e3e7ee] rounded-xl p-4 shadow-xs">
+          <div className="rounded-[20px] border   p-4   dark:">
             <div className="flex items-start gap-2.5">
-              <Lightbulb className="w-4 h-4 text-[#0f8b8d] shrink-0 mt-0.5" />
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border    ">
+                <Lightbulb className="h-4 w-4" />
+              </div>
               <div>
-                <h4 className="text-xs font-bold text-[#13294b]">Cognitive Synthesis Insight</h4>
-                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                <h4 className="font-['Cormorant'] text-lg font-medium  ">Cognitive Synthesis Insight</h4>
+                <p className="mt-1 text-sm leading-relaxed  ">
                   {hasData && weakSubjects.length > 0
-                    ? `Your weakest area is <strong>${weakSubjects[0].subject}</strong> at ${weakSubjects[0].accuracy}%. Prioritize remediation before the next mock test.`
+                    ? `Your weakest area is ${weakSubjects[0].subject} at ${weakSubjects[0].accuracy}%. Prioritize remediation before the next mock test.`
                     : hasData
                     ? 'All subjects are above 70% accuracy. Maintain consistency across all topics.'
-                    : 'Complete practice modules to generate personalized insights.'}
+                    : 'No practice results yet. Finish a practice set to get a personal insight.'}
                 </p>
+                {!hasData && (
+                  <button
+                    onClick={() => onNavigate('practice')}
+                    className="  mt-2 px-3 py-1.5 text-sm"
+                  >
+                    Start practice
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -505,89 +609,136 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
           {/* Mistake Notebook Sync Action Card */}
           <div
             onClick={() => onNavigate('mistakes')}
-            className="p-4 rounded-xl bg-white border border-[#e3e7ee] hover:border-[#0f8b8d] shadow-xs cursor-pointer transition-all flex items-center justify-between group"
+            className="group flex cursor-pointer items-center justify-between rounded-[20px] border   p-4 transition-all hover:-translate-y-0.5   dark:"
           >
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-lg bg-teal-50 flex items-center justify-center text-[#0f8b8d] group-hover:scale-105 transition-transform">
-                <FileCheck className="w-5 h-5" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl border    transition-transform group-hover:scale-105 ">
+                <FileCheck className="h-5 w-5" />
               </div>
               <div>
-                <div className="text-xs font-bold text-[#13294b]">Mistake Notebook Sync</div>
-                <div className="text-[11px] text-slate-500">
+                <div className="text-sm font-medium  ">Mistake Notebook Sync</div>
+                <div className="text-xs  ">
                   {hasData
                     ? `${summary.questionsAnswered - summary.correct} questions queued for spaced review`
-                    : 'No mistakes recorded yet'}
+                    : 'No mistakes saved yet. Finish a practice set and wrong answers will appear here.'}
                 </div>
+                {!hasData && (
+                  <button
+                    onClick={() => onNavigate('mistakes')}
+                    className="  mt-2 px-3 py-1.5 text-sm"
+                  >
+                    Open mistakes
+                  </button>
+                )}
               </div>
             </div>
-            <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-[#0f8b8d] group-hover:translate-x-1 transition-all" />
+            <ArrowRight className="h-4 w-4  transition-all group-hover:translate-x-1 group-hover:  dark:group-hover:" />
           </div>
         </div>
       </div>
 
       {/* Bottom Section: Recent Completed Modules History (from real attempts) */}
-      <div className="bg-white border border-[#e3e7ee] rounded-xl p-5 shadow-xs">
-        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+      <div className="overflow-hidden rounded-[20px] border   p-5   dark:">
+        <div className="flex flex-col gap-3 border-b-2  pb-3 sm:flex-row sm:items-center sm:justify-between ">
           <div>
-            <h3 className="text-base font-bold text-[#13294b]">Recent Completed Modules History</h3>
-            <p className="text-xs text-slate-500">Log of recently completed mock tests, timed blocks, and tutor sessions</p>
+            <div className="mb-1 inline-flex rounded-md border   px-2 py-0.5 font-[''] text-xs uppercase tracking-[0.16em]   dark:">
+              History
+            </div>
+            <h3 className="font-['Cormorant'] text-2xl font-medium  ">Recent Completed Modules History</h3>
+            <p className="text-sm  ">Log of recently completed mock tests, timed blocks, and tutor sessions</p>
           </div>
           <button
             onClick={handleExportPDF}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors"
+            className="flex min-h-[44px] items-center justify-center gap-1.5 rounded-2xl border  px-4 py-2 text-sm font-medium  transition-all hover:brightness-105 focus:outline-none focus:ring-4 focus:  dark:"
           >
-            <Download className="w-3.5 h-3.5 text-slate-500" />
-            <span>{downloadSuccess ? 'Report Downloaded!' : 'Export Report (PDF)'}</span>
+            <Download className="h-4 w-4" />
+            <span>{downloadSuccess ? 'Export ready' : 'Export summary'}</span>
           </button>
         </div>
 
-        <div className="divide-y divide-slate-100 text-xs">
+        <div className="divide-y-2 divide-[#543828]/10 text-sm dark:divide-[#A9A9C4]/20">
           {cohortAttempts.length > 0 ? (
             cohortAttempts.slice(0, 10).map((a, idx) => (
-              <div key={`${a.id}-${idx}`} className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div>
-                  <div className="text-[11px] text-slate-400 font-mono">
-                    {new Date(a.at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+              <motion.div
+                key={`${a.id}-${idx}`}
+                initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.22, ease: "easeOut", delay: reduceMotion ? 0 : Math.min(idx * 0.03, 0.2) }}
+              >
+                <div className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="font-mono text-[11px] font-semibold  ">
+                      {new Date(a.at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-sm font-medium  ">
+                      <span>{a.exam}: {a.mode} ({a.total} Qs)</span>
+                      <span className={`rounded-md border px-2 py-0.5 text-[10px] font-medium ${
+                        a.mode === 'EXAM'
+                          ? '   '
+                          : '     '
+                      }`}>
+                        {a.mode}
+                      </span>
+                    </div>
+                    <div className="text-xs  ">
+                      {Object.entries(a.subjects)
+                        .map(([s, v]) => `${s}: ${v.correct}/${v.total}`)
+                        .join(', ')}
+                    </div>
                   </div>
-                  <div className="font-bold text-sm text-[#13294b] flex items-center gap-2">
-                    <span>{a.exam}: {a.mode} ({a.total} Qs)</span>
-                    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
-                      a.mode === 'EXAM' ? 'bg-blue-50 text-blue-800' : 'bg-slate-100 text-slate-800'
-                    }`}>
-                      {a.mode}
-                    </span>
-                  </div>
-                  <div className="text-xs text-slate-500">
-                    {Object.entries(a.subjects)
-                      .map(([s, v]) => `${s}: ${v.correct}/${v.total}`)
-                      .join(', ')}
+                  <div className="flex items-center gap-4">
+                    <div className="text-right">
+                      <span className="font-mono text-sm font-medium  ">
+                        {a.correct} / {a.attempted}
+                      </span>
+                      <span className="ml-1.5 font-medium  ">
+                        ({a.attempted > 0 ? Math.round((a.correct / a.attempted) * 100) : 0}%)
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => onNavigate('test-runner')}
+                      className="flex items-center gap-1 text-xs font-medium  hover:underline "
+                    >
+                      Review Answers →
+                    </button>
                   </div>
                 </div>
-                <div className="flex items-center gap-4">
-                  <div className="text-right">
-                    <span className="font-mono font-bold text-sm text-[#13294b]">
-                      {a.correct} / {a.attempted}
-                    </span>
-                    <span className="ml-1.5 font-bold text-emerald-700">
-                      ({a.attempted > 0 ? Math.round((a.correct / a.attempted) * 100) : 0}%)
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => onNavigate('test-runner')}
-                    className="text-xs font-semibold text-[#0f8b8d] hover:underline flex items-center gap-1"
-                  >
-                    Review Answers →
-                  </button>
-                </div>
-              </div>
+              </motion.div>
             ))
           ) : (
-            <div className="py-8 text-center text-slate-500 text-sm">
-              No completed modules for {activeCohort} yet
+            <div className="py-8">
+              <div className="mx-auto max-w-md rounded-[20px] border   p-4 text-center   dark:">
+                <div className="font-[''] text-lg uppercase tracking-wider  ">
+                  No completed modules yet
+                </div>
+                <p className="mt-1 text-sm  ">
+                  You have not finished a practice set for {activeCohort} yet. Finish one to start this history.
+                </p>
+                <button
+                  onClick={() => onNavigate('practice')}
+                  className="  mt-3 px-3 py-1.5 text-sm"
+                >
+                  Start practice
+                </button>
+              </div>
             </div>
           )}
         </div>
       </div>
+
+      {downloadSuccess && (
+        <div
+          role="status"
+          className="fixed bottom-6 right-6 z-50 max-w-xs rounded-[20px] border   p-4 backdrop-blur-[14px]  "
+        >
+          <div className="font-[''] text-lg uppercase tracking-wider  ">
+            Export ready
+          </div>
+          <p className="mt-1 text-sm  ">
+            Saved attempt summary prepared. No PDF download is triggered in this demo.
+          </p>
+        </div>
+      )}
     </div>
   );
 };

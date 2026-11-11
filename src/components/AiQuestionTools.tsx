@@ -75,18 +75,18 @@ function patchToolState(questionId: string, patch: Partial<ToolState>): void {
 const buildExplanationPrompt = (q: ClinicalQuestion, userChoice: string | undefined, length: AiToolLength): string => {
   const optionLines = q.options.map((o) => `${o.id}. ${o.text}`).join('\n');
   return [
-    `Question (subject: ${q.subject}, subtopic: ${q.subtopic}):`,
+ `Question (subject: ${q.subject}, subtopic: ${q.subtopic}):`,
     q.stem ? `Stem: ${q.stem}` : '',
-    `Task: ${q.questionText}`,
-    `Options:`,
+ `Task: ${q.questionText}`,
+ `Options:`,
     optionLines,
-    `Correct answer: ${q.correctOption}`,
+ `Correct answer: ${q.correctOption}`,
     userChoice && userChoice !== q.correctOption ? `The student selected ${userChoice} (a trap).` : '',
     q.trapType ? `Known trap: ${q.trapType} — ${q.trapExplanation ?? ''}` : '',
-    '',
+ '',
     length === 'Brief' ? 'Answer in 3-4 short sentences total: the key discriminator and one line per decisive option.' :
     length === 'Detailed' ? 'Answer thoroughly: first principles, then a dedicated 1-3 sentence verdict on EVERY option (why right or why wrong, with the classic mistake each distractor catches), then one board pearl. Include 1-2 textbook citations.' :
-    'Answer in two parts: (1) the core reasoning leading to the correct option; (2) a one-line verdict on every option. Include one textbook citation.',
+ 'Answer in two parts: (1) the core reasoning leading to the correct option; (2) a one-line verdict on every option. Include one textbook citation.',
   ].filter(Boolean).join('\n');
 };
 
@@ -112,7 +112,7 @@ async function runTool(question: ClinicalQuestion, kind: ToolKind, length: AiToo
       prompt = buildExplanationPrompt(question, undefined, 'Brief') + '\n\nDistill this into a revision NOTE CARD (not an explanation).';
     } else {
       system = 'You are a high-yield medical educator. Write a revision summary of the given exam topic. Plain readable text, bold headers, short bullets, mark the key takeaway with a line beginning "High-yield:" and any memory device with "Mnemonic:", end with 2-3 exam pearls and a citation. No JSON.';
-      prompt = `Topic: ${question.subject} — ${question.subtopic}\n\nWrite a revision summary of this topic oriented to postgraduate medical exams (NEET-PG / INI-CET / AMC CAT): core concepts, must-know facts, classic traps, 2-3 pearls, one citation.`;
+      prompt = `Topic: ${question.subject} — ${question.subtopic}\n\nWrite a revision summary of this topic oriented to postgraduate medical exams (NEET-PG / INI-CET): core concepts, must-know facts, classic traps, 2-3 pearls, one citation.`;
     }
 
     const text = await aiComplete({
@@ -195,11 +195,11 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
   };
 
   const lengthChip = (val: AiToolLength) =>
-    `px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+ `px-2 py-0.5 rounded-full text-[10px] font-medium border ${
       length === val
         ? dark
           ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300'
-          : 'bg-[#0f8b8d]/10 border-[#0f8b8d]/40 text-[#00696b]'
+          : '  '
         : dark
           ? 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-600'
           : 'bg-slate-50 border-slate-200 text-slate-500 hover:border-slate-300'
@@ -207,11 +207,11 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
 
   return (
     <div className={`space-y-2.5 rounded-xl border p-3.5 ${
-      dark ? 'border-slate-700/80 bg-[#151F30]' : 'border-[#0f8b8d]/25 bg-teal-50/30'
+      dark ? 'border-slate-700/80 ' : ' bg-teal-50/30'
     } ${className ?? ''}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className={`flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider ${
-          dark ? 'text-teal-300' : 'text-[#0f8b8d]'
+        <span className={`flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider ${
+          dark ? 'text-teal-300' : ''
         }`}>
           <Sparkles className="h-3 w-3" /> AI tools
         </span>
@@ -229,17 +229,17 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
         <button
           onClick={() => run('explain')}
           disabled={!!busy || !provider}
-          className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${
-            dark ? 'bg-teal-600 text-white hover:bg-teal-500' : 'bg-[#001432] text-white'
+          className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-medium disabled:opacity-40 ${
+            dark ? 'bg-teal-600 text-white hover:bg-teal-500' : ' text-white'
           }`}
         >
-          {busy === 'explain' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Brain className="w-3 h-3 text-[#8ff3f4]" />}
+          {busy === 'explain' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Brain className="w-3 h-3 " />}
           Explain every option
         </button>
         <button
           onClick={() => run('note')}
           disabled={!!busy || !provider}
-          className="flex items-center gap-1 rounded-lg bg-amber-500/90 px-2.5 py-1.5 text-[10px] font-bold text-white hover:bg-amber-500 disabled:opacity-40"
+          className="flex items-center gap-1 rounded-lg bg-amber-500/90 px-2.5 py-1.5 text-[10px] font-medium text-white hover:bg-amber-500 disabled:opacity-40"
         >
           {busy === 'note' ? <Loader2 className="w-3 h-3 animate-spin" /> : <NotebookPen className="w-3 h-3" />}
           {savedFlags.note ? <><CheckCircle2 className="w-3 h-3" /> Note saved</> : 'Note for this question'}
@@ -247,24 +247,24 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
         <button
           onClick={() => run('topic')}
           disabled={!!busy || !provider}
-          className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-bold disabled:opacity-40 ${
+          className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-medium disabled:opacity-40 ${
             dark
               ? 'border border-slate-700 bg-slate-900 text-slate-200 hover:border-teal-500/50'
-              : 'border border-slate-200 bg-white text-slate-700 hover:border-[#0f8b8d]/40'
+              : 'border border-slate-200 bg-white text-slate-700 '
           }`}
         >
           {busy === 'topic' ? <Loader2 className="w-3 h-3 animate-spin" /> : <NotebookPen className="w-3 h-3" />}
           {savedFlags.topic ? <><CheckCircle2 className="w-3 h-3 text-emerald-600" /> Saved</> : 'Notes for the whole topic'}
         </button>
         {output?.kind === 'topic' && !savedFlags.topic && (
-          <button onClick={saveTopicNote} className={`text-[10px] font-bold underline ${dark ? 'text-teal-300' : 'text-[#0f8b8d]'}`}>
+          <button onClick={saveTopicNote} className={`text-[10px] font-medium underline ${dark ? 'text-teal-300' : ''}`}>
             Save to Highlights
           </button>
         )}
       </div>
 
       {busy && (
-        <p className={`text-[10px] ${dark ? 'text-teal-300' : 'text-[#00696b]'}`}>
+        <p className={`text-[10px] ${dark ? 'text-teal-300' : ''}`}>
           Generating… you can move to another question; the result will be here when you come back.
         </p>
       )}
@@ -302,7 +302,7 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
               onClick={() => {
                 try {
                   downloadNotesPdf(
-                    `${question.subject} — ${question.subtopic}`,
+ `${question.subject} — ${question.subtopic}`,
                     output.text,
                     providerLabel,
                   );
@@ -310,7 +310,7 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
                   setError(err?.message || 'Could not open the print window.');
                 }
               }}
-              className="inline-flex items-center gap-1 text-[10px] font-bold text-[#0f8b8d] hover:underline"
+              className="inline-flex items-center gap-1 text-[10px] font-medium  hover:underline"
             >
               <Download className="w-3 h-3" /> Download PDF
             </button>

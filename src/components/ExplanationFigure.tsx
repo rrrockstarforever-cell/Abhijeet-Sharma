@@ -49,14 +49,14 @@ export const ExplanationFigure: React.FC<ExplanationFigureProps> = ({
     <figure className={`mt-2.5 overflow-hidden rounded-lg border ${dark ? 'border-slate-700 bg-slate-900' : 'border-slate-200 bg-white'}`}>
       <button
         onClick={() => setOpen((v) => !v)}
-        className={`flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider ${
-          dark ? 'bg-slate-900 text-teal-300 hover:text-teal-200' : 'bg-slate-50 text-[#0f8b8d] hover:text-[#00696b]'
+        className={`flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-wider ${
+          dark ? 'bg-slate-900 text-teal-300 hover:text-teal-200' : 'bg-slate-50  '
         }`}
       >
         <span className="flex items-center gap-1.5">
           <ImageIcon className="h-3 w-3" />
           Illustration
-          <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1 py-0.5 text-[9px] font-bold text-emerald-600 dark:text-emerald-400">
+          <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1 py-0.5 text-[9px] font-medium text-emerald-600 dark:text-emerald-400">
             ✓ Verified
           </span>
         </span>

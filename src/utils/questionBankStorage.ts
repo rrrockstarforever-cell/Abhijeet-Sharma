@@ -200,7 +200,6 @@ export function classifyQuestion(input: {
   const examId = input.examType;
   // Default bank per exam
   const defaultBank: Record<string, string> = {
-    AMC_CAT: 'amc_general',
     NEET_PG: 'neet_medicine',
     INI_CET: 'ini_integrated',
   };
@@ -459,58 +458,6 @@ export async function updateQuestionStatus(questionId: string, status: string): 
       store.put(record);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
-    };
-    req.onerror = () => reject(req.error);
-  });
-}
-
-export async function migrateLegacyBanks(): Promise<{ migrated: number; skipped: number }> {
-  // Reads the existing question_banks store and copies records into the new questions store
-  // without overwriting anything. Ambiguous records are flagged for review.
-  const db = await openDB();
-  let migrated = 0, skipped = 0;
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('question_banks', 'readonly');
-    const req = tx.objectStore('question_banks').getAll();
-    req.onsuccess = async () => {
-      const rows = (req.result as any[]) || [];
-      for (const row of rows) {
-        if (!Array.isArray(row)) { skipped++; continue; }
-        for (const q of row) {
-          if (!q || !q.question) { skipped++; continue; }
-          const id = q.id || `legacy_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-          const existing = await get(STORES.questions, id);
-          if (existing) { skipped++; continue; }
-          const now = new Date().toISOString();
-          await put(STORES.questions, {
-            id,
-            version: 1,
-            examId: 'AMC_CAT',
-            bankId: q.bank || 'amc',
-            subjectId: (q.subject || 'general').toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-            topicId: (q.topic || q.group || 'general').toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-            subtopicId: (q.topic || q.group || 'general').toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-            questionType: 'single-best-answer',
-            difficulty: q.difficulty || 'MEDIUM',
-            stem: q.question,
-            questionText: q.question,
-            options: (q.options || []).map((o: string, i: number) => ({ id: String.fromCharCode(65 + i), text: o })),
-            correctOption: String.fromCharCode(65 + (q.answerIndex || 0)),
-            explanation: q.explanation,
-            image: q.image,
-            sourceType: 'imported',
-            tags: [],
-            contentFingerprint: fingerprint(q),
-            createdAt: now,
-            updatedAt: now,
-            status: 'GENERATED',
-            publicationEligible: false,
-            auditLog: [{ at: now, event: 'MIGRATED', detail: 'Imported from legacy question_banks store.' }],
-          });
-          migrated++;
-        }
-      }
-      resolve({ migrated, skipped });
     };
     req.onerror = () => reject(req.error);
   });

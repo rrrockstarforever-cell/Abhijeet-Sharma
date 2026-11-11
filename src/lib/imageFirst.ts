@@ -146,7 +146,7 @@ function bankImageCaption(image: BankImage): string {
 /** Map a non-OK response to a typed AiError, matching aiComplete's behaviour. */
 function toAiError(status: number, serverMsg: string): AiError {
   if (status === 401) {
-    const err = new AiError(`NVIDIA is not connected. Connect a vision provider in Settings → AI Subscription Hub.`, 'not_connected');
+    const err = new AiError(`A vision provider is not available. Connect a vision provider in Settings → AI Subscription Hub.`, 'not_connected');
     err.status = 401;
     return err;
   }
@@ -313,6 +313,8 @@ export async function generateImageFirstQuestion(opts: {
         correctAnswer: question.options.find((option) => option.id === question.correctOption)?.text || '',
         explanation: question.explanation || '',
         boardPearl: question.boardPearl || '',
+        provider,
+        model,
       }),
       signal: controller.signal,
     });

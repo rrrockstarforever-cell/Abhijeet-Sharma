@@ -19,8 +19,7 @@ import { ExamType, AppView, DifficultyTier, DifficultySubLevel, INISyllabusMode,
 import GenerationProgress from './GenerationProgress';
 import {
   NEET_PG_SUBJECTS,
-  INI_CET_DOMAINS_6,
-  AMC_CAT_DOMAINS_6
+  INI_CET_DOMAINS_6
 } from '../data/mockClinicalData.ts';
 import { SUBTOPICS } from '../data/subtopics.ts';
 import { generateExamQuestions, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel, aiComplete, splitTopic, planTopicFacts, type AssignedFact, type GenerateQuestionsOptions } from '../lib/ai.ts';
@@ -69,56 +68,54 @@ interface PracticeModuleBuilderViewProps {
 
 // ---- writing options offered as Tags ----
 const QUESTION_TYPE_CHIPS = [
-  'Clinical vignette',
-  'One-liner recall',
-  'Match the following',
-  'Multiple statements ("1 and 3 only")',
-  'ECG / X-ray interpretation',
-  'Identify the structure',
-  'NOT / EXCEPT',
-  'Assertion-reason',
-  'Calculation',
-  'Mechanism',
+ 'Clinical vignette',
+ 'One-liner recall',
+ 'Match the following',
+ 'Multiple statements ("1 and 3 only")',
+ 'ECG / X-ray interpretation',
+ 'Identify the structure',
+ 'NOT / EXCEPT',
+ 'Assertion-reason',
+ 'Calculation',
+ 'Mechanism',
 ];
 const STEM_PATTERN_CHIPS = [
-  'Most likely diagnosis',
-  'Next best step',
-  'Drug of choice',
-  'Investigation of choice',
-  'Treatment of choice',
-  'Most appropriate advice',
+ 'Most likely diagnosis',
+ 'Next best step',
+ 'Drug of choice',
+ 'Investigation of choice',
+ 'Treatment of choice',
+ 'Most appropriate advice',
 ];
 const EVIDENCE_SOURCE_CHIPS = [
-  'Australian eTG',
-  'RACGP Red Book',
-  'National Immunisation Program (NIP)',
-  'Good Medical Practice (Ahpra/Medical Board)',
+ 'Australian eTG',
+ 'RACGP Red Book',
+ 'National Immunisation Program (NIP)',
+ 'Good Medical Practice (Ahpra/Medical Board)',
 ];
 const PATIENT_GROUP_CHIPS = [
-  "Women's health",
-  "Men's health",
-  'Children & adolescents',
-  'Older adults',
-  'Aboriginal & Torres Strait Islander health',
-  'Culturally & linguistically diverse patients',
-  'Mental health presentations',
+ "Women's health",
+ "Men's health",
+ 'Children & adolescents',
+ 'Older adults',
+ 'Aboriginal & Torres Strait Islander health',
+ 'Culturally & linguistically diverse patients',
+ 'Mental health presentations',
 ];
 const PRESENTING_PROBLEM_CHIPS = [
-  'Chest pain', 'Dyspnoea', 'Fever', 'Abdominal pain', 'Headache', 'Dizziness/vertigo',
-  'Cough', 'Fatigue', 'Back pain', 'Joint pain', 'Palpitations', 'Weight loss',
-  'Anaemia', 'Jaundice', 'Confusion', 'Syncope', 'Dysuria', 'Rash', 'Sleep problems', 'Low mood',
+ 'Chest pain', 'Dyspnoea', 'Fever', 'Abdominal pain', 'Headache', 'Dizziness/vertigo',
+ 'Cough', 'Fatigue', 'Back pain', 'Joint pain', 'Palpitations', 'Weight loss',
+ 'Anaemia', 'Jaundice', 'Confusion', 'Syncope', 'Dysuria', 'Rash', 'Sleep problems', 'Low mood',
 ];
 
 const EXAM_SCORING: Record<ExamType, string> = {
   NEET_PG: '+4 / -1',
   INI_CET: '+1 / -0.33',
-  AMC_CAT: 'Adaptive 0-500',
 };
 
 const EXAM_LABEL: Record<ExamType, string> = {
   NEET_PG: 'NEET-PG',
   INI_CET: 'INI-CET',
-  AMC_CAT: 'AMC CAT',
 };
 
 const QUESTION_COUNTS = [10, 20, 25, 30, 40, 50, 75, 100];
@@ -132,10 +129,10 @@ const MAX_FILL_ROUNDS = 60;
 const Row: React.FC<{ label: string; hint?: string; children: React.ReactNode; last?: boolean }> = ({
   label, hint, children, last,
 }) => (
-  <div className={`py-5 ${last ? '' : 'border-b border-slate-100'}`}>
+  <div className={`py-5 ${last ? '' : 'border-b  '}`}>
     <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 mb-3">
-      <h3 className="text-sm font-bold text-slate-900">{label}</h3>
-      {hint && <span className="text-[11px] text-slate-500">{hint}</span>}
+      <h3 className="text-sm font-medium tracking-wide  ">{label}</h3>
+      {hint && <span className="text-[11px]  ">{hint}</span>}
     </div>
     {children}
   </div>
@@ -147,17 +144,17 @@ const Radio: React.FC<{
   label: string;
   hint?: string;
 }> = ({ checked, onClick, label, hint }) => (
-  <button type="button" onClick={onClick} className="flex items-start gap-2 text-left cursor-pointer">
+  <button type="button" onClick={onClick} className="group flex items-start gap-2 rounded-xl -mx-2 px-2 py-1 text-left cursor-pointer  transition-colors">
     <span
-      className={`mt-0.5 h-4 w-4 shrink-0 rounded-full border-2 flex items-center justify-center transition-colors ${
-        checked ? 'border-[#0f8b8d]' : 'border-slate-300'
+      className={`mt-0.5 h-4 w-4 shrink-0 rounded-full border flex items-center justify-center transition-colors ${
+        checked ? ' ' : ' '
       }`}
     >
-      {checked && <span className="h-2 w-2 rounded-full bg-[#0f8b8d]" />}
+      {checked && <span className="h-2 w-2 rounded-full " />}
     </span>
     <span>
-      <span className={`block text-xs font-semibold ${checked ? 'text-slate-900' : 'text-slate-700'}`}>{label}</span>
-      {hint && <span className="block text-[10px] text-slate-500 leading-snug mt-0.5 max-w-[230px]">{hint}</span>}
+      <span className={`block text-xs font-semibold ${checked ? ' ' : ' '}`}>{label}</span>
+      {hint && <span className="block text-[10px]   leading-snug mt-0.5 max-w-[230px]">{hint}</span>}
     </span>
   </button>
 );
@@ -171,8 +168,8 @@ const Chip: React.FC<{ active: boolean; onClick: () => void; children: React.Rea
     title={title}
     className={`px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-colors ${
       active
-        ? 'bg-[#0f8b8d] border-[#0f8b8d] text-white'
-        : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+        ? '  '
+        : '       '
     }`}
   >
     {children}
@@ -182,10 +179,10 @@ const Chip: React.FC<{ active: boolean; onClick: () => void; children: React.Rea
 const SubjectTick: React.FC<{ checked: boolean }> = ({ checked }) => (
   <span
     className={`h-4 w-4 shrink-0 rounded border flex items-center justify-center ${
-      checked ? 'bg-[#0f8b8d] border-[#0f8b8d]' : 'bg-white border-slate-300'
+      checked ? '' : '   '
     }`}
   >
-    {checked && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
+    {checked && <Check className="w-3 h-3 " strokeWidth={3} />}
   </span>
 );
 
@@ -199,7 +196,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
 }) => {
   const [selectedExam, setSelectedExam] = useState<ExamType>(currentExam);
   // The builder used to keep its own exam forever: switching the exam chip in the top bar
-  // left this screen on the old exam, so an INI-CET run could be built from AMC domains.
+  // left this screen on the old exam, so an INI-CET run could be built from another exam's domains.
   useEffect(() => { setSelectedExam(currentExam); }, [currentExam]);
 
   const [iniSyllabusMode, setIniSyllabusMode] = useState<INISyllabusMode>('19_SUBJECTS');
@@ -222,7 +219,6 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   const [selectedNeetSubjects, setSelectedNeetSubjects] = useState<string[]>([]);
   const [selectedIniSubjects, setSelectedIniSubjects] = useState<string[]>([]);
   const [selectedIniDomains, setSelectedIniDomains] = useState<string[]>([]);
-  const [selectedAmcDomains, setSelectedAmcDomains] = useState<string[]>([]);
 
   // Absent entry = every topic of that subject; only an explicit subset is stored.
   const [selectedSubtopics, setSelectedSubtopics] = useState<Record<string, string[]>>({});
@@ -307,7 +303,6 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   const [evidenceSources, setEvidenceSources] = useState<string[]>([]);
   const [patientGroup, setPatientGroup] = useState<string>('');
   const [presentingProblems, setPresentingProblems] = useState<string[]>([]);
-  const [showAmcOptions, setShowAmcOptions] = useState(false);
 
   const [sourceMode, setSourceMode] = useState<'AI' | 'MY_NOTES'>('AI');
 
@@ -340,28 +335,19 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         key: d.id, label: d.name, meta: d.weightage, topics: topical(d.id, d.name), desc: d.desc,
       }));
     }
-    return AMC_CAT_DOMAINS_6.map((d) => ({
-      key: d.id,
-      label: d.name,
-      meta: `${d.officialWeight} · ${d.questionRatio}`,
-      topics: topical(d.id, d.name),
-      desc: d.desc,
-      highYield: d.highYield,
-    }));
+    return [];
   }, [selectedExam, iniSyllabusMode]);
 
   const chosenKeys: string[] = selectedExam === 'NEET_PG'
     ? selectedNeetSubjects
-    : selectedExam === 'INI_CET'
-      ? (iniSyllabusMode === '19_SUBJECTS' ? selectedIniSubjects : selectedIniDomains)
-      : selectedAmcDomains;
+    : (iniSyllabusMode === '19_SUBJECTS' ? selectedIniSubjects : selectedIniDomains);
 
   const setChosenKeys = (updater: (prev: string[]) => string[]) => {
     if (selectedExam === 'NEET_PG') setSelectedNeetSubjects(updater);
     else if (selectedExam === 'INI_CET') {
       if (iniSyllabusMode === '19_SUBJECTS') setSelectedIniSubjects(updater);
       else setSelectedIniDomains(updater);
-    } else setSelectedAmcDomains(updater);
+    }
   };
 
   const effectiveKeys = specialtyAll ? subjectList.map((s) => s.key) : chosenKeys;
@@ -544,7 +530,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
           const batch: GenerationBatch = {
             id: batchId,
             examType: selectedExam,
-            bankId: selectedExam === 'AMC_CAT' ? 'amc_general' : selectedExam === 'NEET_PG' ? 'neet_medicine' : 'ini_integrated',
+            bankId: selectedExam === 'NEET_PG' ? 'neet_medicine' : 'ini_integrated',
             requestedCount: batchQuestions.length,
             createdCount: 0,
             failedCount: 0,
@@ -563,7 +549,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 bankId: batch.bankId,
                 batchId,
                 index: i,
-                generationModel: imageMode === 'only' ? 'nvidia' : getActiveProvider() ?? undefined,
+                generationModel: getActiveProvider() ?? undefined,
               });
               stored += 1;
             }
@@ -579,8 +565,8 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       if (imageMode === 'only') {
         const statusResponse = await fetch('/api/oauth/status');
         const status = statusResponse.ok ? await statusResponse.json() : null;
-        if (!status?.providers?.nvidia?.connected) {
-          throw new AiError('Image-only generation requires a connected NVIDIA vision provider for image question writing and verification.', 'not_connected');
+        if (getActiveProvider() !== 'gemini' || !status?.providers?.gemini?.connected) {
+          throw new AiError('Image questions need Gemini as the active AI provider, because the model that writes each question also checks its picture.', 'not_connected');
         }
 
         setProgressDetail((d) => ({ ...d, imageFirst: customTopic ? `finding curated images matching “${customTopic}”…` : 'finding curated image-bank candidates…' }));
@@ -607,7 +593,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         }
 
         setProgressDetail((d) => ({ ...d, imageFirst: `0 verified · ${candidates.length} candidate images` }));
-        const optionCount = selectedExam === 'AMC_CAT' ? 5 : 4;
+        const optionCount = 4;
         let cursor = 0;
         let completed = 0;
         let failures = 0;
@@ -710,9 +696,6 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         includeImages: imageMode === 'mixed',
         questionTypes,
         stemPatterns,
-        evidenceSources: selectedExam === 'AMC_CAT' ? evidenceSources : undefined,
-        patientGroup: selectedExam === 'AMC_CAT' && patientGroup ? patientGroup : undefined,
-        presentingProblems: selectedExam === 'AMC_CAT' ? presentingProblems : undefined,
         sourceMaterial,
         // One set for the whole module, so a later round never writes the same drug or topic again.
         usedUnits: moduleUnits,
@@ -753,7 +736,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
           const pickedLabels = new Set(labels.map((l) => l.toLowerCase()));
           const subjects = ['Radiology', 'Dermatology', 'Ophthalmology', 'Pathology', 'Cardiology', 'Orthopaedics']
             .filter((s) => pickedLabels.has(s.toLowerCase()));
-          const optionCount = selectedExam === 'AMC_CAT' ? 5 : 4;
+          const optionCount = 4;
           setProgressDetail((d) => ({ ...d, imageFirst: 'choosing bank images…' }));
 
           // Each image-first question costs one slow vision call (~30–75s on the
@@ -789,7 +772,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             }
           }
 
-          const CONCURRENCY = 3; // NVIDIA tolerates a few concurrent vision calls
+          const CONCURRENCY = 3; // a few image checks at once are safe
           let done = 0;
           let cursor = 0;
           const results: (ClinicalQuestion | null)[] = new Array(candidates.length).fill(null);
@@ -979,7 +962,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   };
 
   const defaultProfileName = () =>
-    `${selectedExam.replace('_', '-')} · ${difficultyTier === 'ALL' ? 'mixed' : difficultyTier.toLowerCase()} · ${new Date().toLocaleDateString()}`;
+ `${selectedExam.replace('_', '-')} · ${difficultyTier === 'ALL' ? 'mixed' : difficultyTier.toLowerCase()} · ${new Date().toLocaleDateString()}`;
 
   const handleSaveProfile = () => {
     const text = profileDraft.trim();
@@ -1033,22 +1016,22 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         provider,
         model: getEffectiveModel(provider),
         system:
-          'You write compact, reusable instruction profiles for an exam-question generator. ' +
-          'Return ONLY the instruction text — no preamble, no markdown fences, no explanation. ' +
-          'Write second-person instructions to the generator (e.g. "Write …", "Avoid …"). ' +
-          'Cover: stem style and length, option design, distractor strategy, reasoning steps, and exam-specific conventions. ' +
-          'If the user names a subject, topic or drug class, the profile must restrict the questions to it and say so explicitly. ' +
-          'Keep it under 700 characters and make it specific enough to change the output.',
+ 'You write compact, reusable instruction profiles for an exam-question generator. ' +
+ 'Return ONLY the instruction text — no preamble, no markdown fences, no explanation. ' +
+ 'Write second-person instructions to the generator (e.g. "Write …", "Avoid …"). ' +
+ 'Cover: stem style and length, option design, distractor strategy, reasoning steps, and exam-specific conventions. ' +
+ 'If the user names a subject, topic or drug class, the profile must restrict the questions to it and say so explicitly. ' +
+ 'Keep it under 700 characters and make it specific enough to change the output.',
         messages: [{
           role: 'user',
           content:
-            `Exam: ${selectedExam.replace('_', '-')}\n` +
-            `Difficulty: ${difficultyTier}${difficultySubLevel ? ` (${difficultySubLevel})` : ''}\n` +
-            `Subjects: ${subjects.slice(0, 8).join(', ') || 'mixed'}\n` +
-            `Writing options: ${[...questionTypes, ...stemPatterns].join('; ') || 'standard'}\n` +
+ `Exam: ${selectedExam.replace('_', '-')}\n` +
+ `Difficulty: ${difficultyTier}${difficultySubLevel ? ` (${difficultySubLevel})` : ''}\n` +
+ `Subjects: ${subjects.slice(0, 8).join(', ') || 'mixed'}\n` +
+ `Writing options: ${[...questionTypes, ...stemPatterns].join('; ') || 'standard'}\n` +
             (profileDraft.trim() ? `The user's request, which the profile must follow exactly:\n"""\n${profileDraft.trim().slice(0, 600)}\n"""\n` : '') +
             (appliedProfile ? `Build on this existing profile where it does not conflict with the request:\n"""\n${appliedProfile.slice(0, 600)}\n"""\n` : '') +
-            'Write the reusable instruction profile now.',
+ 'Write the reusable instruction profile now.',
         }],
       });
       const clean = text.trim().replace(/^```[a-z]*\s*/i, '').replace(/```$/, '').trim().slice(0, 1400);
@@ -1107,37 +1090,69 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
   const durationMin = Math.max(1, Math.round(questionCount * 1.1));
 
   return (
-    <div className="max-w-6xl mx-auto">
-      {/* Page header */}
-      <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+    <div className="relative isolate max-w-6xl mx-auto overflow-hidden rounded-[24px] px-4 sm:px-6 py-6   dark:">
+      {/* Decorative  layers stay behind content */}
+      <div aria-hidden className="pointer-events-none absolute inset-0 bg-[length:18px_18px] opacity-80 dark:" />
+      <div aria-hidden className="pointer-events-none absolute inset-0 opacity-40 motion-safe:animate-[spin_45s_linear_infinite] dark:" />
+      {/* Mission header + step rail */}
+      <div className="relative z-10 mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-slate-800">Create a custom module</h1>
-          <p className="text-sm text-slate-500 mt-1">Customise an MCQ set by adding your own parameters</p>
+          <div className="inline-flex items-center gap-2 rounded-full border   px-3 py-1 text-[10px] font-medium uppercase tracking-[0.22em]  ">
+            <Target className="w-3.5 h-3.5" /> Mission
+          </div>
+          <h1 className="mt-2 text-3xl font-medium tracking-tight   font-['Cormorant']">Build Your Module</h1>
+          <p className="mt-1 max-w-xl text-sm  ">Pick the exam, focus the blueprint, then launch your custom MCQ set.</p>
         </div>
-        <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 border border-slate-200">
-          {(['NEET_PG', 'INI_CET', 'AMC_CAT'] as ExamType[]).map((examKey) => (
-            <button
-              key={examKey}
-              onClick={() => { setSelectedExam(examKey); onExamChange?.(examKey); setSpecialtyAll(false); }}
-              className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all ${
-                selectedExam === examKey ? 'bg-white text-[#00696b] shadow-sm' : 'text-slate-500 hover:text-slate-800'
-              }`}
-            >
-              {EXAM_LABEL[examKey]}
-            </button>
-          ))}
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex items-center gap-1 p-1 rounded-xl   border   dark:">
+            {(['NEET_PG', 'INI_CET'] as ExamType[]).map((examKey) => (
+              <button
+                key={examKey}
+                onClick={() => { setSelectedExam(examKey); onExamChange?.(examKey); setSpecialtyAll(false); }}
+                className={`min-h-[36px] px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
+                  selectedExam === examKey
+                    ? ' '
+                    : '   '
+                }`}
+              >
+                {EXAM_LABEL[examKey]}
+              </button>
+            ))}
+          </div>
+          <div className="hidden sm:flex items-center gap-1.5 rounded-full border     px-2 py-1 text-[10px] font-semibold  ">
+            <span className="h-1.5 w-1.5 rounded-full " /> Step rail
+          </div>
         </div>
+      </div>
+
+      <div className="relative z-10 mb-5 grid grid-cols-3 gap-2 rounded-2xl border     p-2 dark:">
+        {[
+          ['01', 'Exam & Mode', 'Set the arena'],
+          ['02', 'Focus & Difficulty', 'Aim the blueprint'],
+          ['03', 'Style & Launch', 'Load the run'],
+        ].map(([num, title, sub]) => (
+          <div key={num} className="rounded-xl border     px-2.5 py-2">
+            <div className="text-[10px] font-mono font-medium  ">{num}</div>
+            <div className="text-xs font-medium   leading-tight">{title}</div>
+            <div className="hidden sm:block text-[10px]   mt-0.5">{sub}</div>
+          </div>
+        ))}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* ------------------------------------------------ form */}
-        <div className="lg:col-span-8 bg-white rounded-2xl border border-slate-200 shadow-sm px-6">
+        <div className="lg:col-span-8   rounded-[20px] border   dark:px-4 sm:px-6">
+          <div className="pt-5">
+            <div className="inline-flex items-center gap-2 rounded-full border   px-3 py-1 text-[10px] font-medium uppercase tracking-[0.2em]  ">
+              Step 1 · Exam & Mode
+            </div>
+          </div>
           <Row label="Number of questions" hint={`${EXAM_SCORING[selectedExam]} marking · ~${durationMin} min`}>
             <div className="flex flex-wrap items-center gap-2">
               <select
                 value={questionCount}
                 onChange={(e) => setQuestionCount(Number(e.target.value))}
-                className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-bold text-slate-800 focus:outline-none focus:border-[#0f8b8d]"
+                className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-800 focus:outline-none focus:"
               >
                 {QUESTION_COUNTS.map((c) => (
                   <option key={c} value={c}>{c}</option>
@@ -1149,6 +1164,11 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             </div>
           </Row>
 
+          <div className="pt-4">
+            <div className="inline-flex items-center gap-2 rounded-full border   px-3 py-1 text-[10px] font-medium uppercase tracking-[0.2em]  ">
+              Step 2 · Focus & Difficulty
+            </div>
+          </div>
           <Row label="Difficulty Level">
             <div className="flex flex-wrap items-start gap-6">
               <Radio
@@ -1217,7 +1237,6 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               <Chip active={false} onClick={() => onNavigate('mistakes')} title="Open the Mistake Notebook">My mistakes ↗</Chip>
               <Chip active={false} onClick={() => onNavigate('question-bank')} title="Open the Question Bank">Recall bank ↗</Chip>
               <Chip active={false} onClick={() => onNavigate('question-bank')} title="Open the Question Bank">eMedici ↗</Chip>
-              <Chip active={false} onClick={() => onNavigate('question-bank')} title="Open the Question Bank">AMC SUCCESS ↗</Chip>
             </div>
             {sourceMode === 'MY_NOTES' && (
               <p className="text-[11px] text-slate-500 leading-relaxed mt-2">
@@ -1227,42 +1246,63 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             )}
           </Row>
 
-          <Row label="Request a topic" hint={customTopic ? 'overrides the speciality pick' : 'optional'}>
-            <input
-              type="text"
-              value={topicRequest}
-              onChange={(e) => { setTopicRequest(e.target.value); setGenState((st) => ({ ...st, error: null })); }}
-              disabled={genState.busy}
-              maxLength={120}
-              placeholder='e.g. "lung carcinoma", "lung chapter", "diabetic ketoacidosis"'
-              className="w-full rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-[#0f8b8d] disabled:opacity-50"
-            />
-            <p className="mt-1 text-[10px] text-slate-500">
-              Type any topic, chapter or condition and get MCQs on it without choosing a speciality. Clear the box to go back to speciality choices.
-            </p>
+          <Row label="Target topic" hint={customTopic ? 'overrides the speciality pick' : 'optional'}>
+            <div className={`rounded-2xl border p-3 transition-colors ${customTopic ? '  ' : '   '}`}>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-[11px] font-medium  ">
+                  <Target className="w-3.5 h-3.5  " />
+                  {customTopic ? 'Target locked' : 'Free-text focus'}
+                </div>
+                <span className="text-[10px] font-mono  ">{topicRequest.length}/120</span>
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <input
+                  type="text"
+                  value={topicRequest}
+                  onChange={(e) => { setTopicRequest(e.target.value); setGenState((st) => ({ ...st, error: null })); }}
+                  disabled={genState.busy}
+                  maxLength={120}
+                  placeholder='e.g. "lung carcinoma", "lung chapter", "diabetic ketoacidosis"'
+                  className="min-h-[44px] flex-1 rounded-xl   border   px-3 py-2 text-xs   placeholder: dark:placeholder: focus:outline-none focus: focus:ring-2 focus: disabled:opacity-50"
+                />
+                {topicRequest && (
+                  <button
+                    type="button"
+                    onClick={() => { setTopicRequest(''); setGenState((st) => ({ ...st, error: null })); }}
+                    disabled={genState.busy}
+                    className="min-h-[44px] rounded-xl border     px-3 text-[11px] font-medium    disabled:opacity-40"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              <p className="mt-2 text-[10px] leading-relaxed  ">
+                Type any topic, chapter or condition and get MCQs on it without choosing a speciality. Clear the box to go back to speciality choices.
+              </p>
+            </div>
           </Row>
 
-          <div id="speciality-picker">
+          <div id="speciality-picker" className={customTopic ? 'opacity-60 saturate-50 transition-opacity' : 'transition-opacity'}>
           <Row label="Speciality" hint={`${subjectsChosen} of ${subjectList.length} selected`}>
             <div className="flex flex-wrap items-center gap-x-6 gap-y-3 mb-3">
               <Radio
                 checked={specialtyAll}
                 onClick={() => setSpecialtyAll(true)}
                 label="All"
-                hint={`Every ${selectedExam === 'AMC_CAT' ? 'domain' : 'subject'} (${subjectList.length})`}
+                hint={`Every subject (${subjectList.length})`}
               />
               <Radio checked={!specialtyAll} onClick={() => setSpecialtyAll(false)} label="Choose" hint="Pick the subjects yourself" />
               {selectedExam === 'INI_CET' && (
                 <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-slate-100 ml-auto">
                   <button
                     onClick={() => setIniSyllabusMode('19_SUBJECTS')}
-                    className={`px-2 py-1 rounded-md text-[10px] font-bold ${iniSyllabusMode === '19_SUBJECTS' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}
+                    className={`px-2 py-1 rounded-md text-[10px] font-medium ${iniSyllabusMode === '19_SUBJECTS' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}
                   >
                     19 subjects
                   </button>
                   <button
                     onClick={() => setIniSyllabusMode('6_INTEGRATED_DOMAINS')}
-                    className={`px-2 py-1 rounded-md text-[10px] font-bold ${iniSyllabusMode === '6_INTEGRATED_DOMAINS' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}
+                    className={`px-2 py-1 rounded-md text-[10px] font-medium ${iniSyllabusMode === '6_INTEGRATED_DOMAINS' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}
                   >
                     6 AIIMS domains
                   </button>
@@ -1301,7 +1341,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                     </button>
                     <button
                       onClick={() => setTopicModal({ key: row.key, label: row.label })}
-                      className="shrink-0 mt-0.5 px-2 py-1 rounded-md text-[10px] font-bold text-[#0f8b8d] hover:bg-teal-50 flex items-center gap-1"
+                      className="shrink-0 mt-0.5 px-2 py-1 rounded-md text-[10px] font-medium  hover:bg-teal-50 flex items-center gap-1"
                       title="Choose topics"
                     >
                       Topics <ChevronsUpDown className="w-3 h-3" />
@@ -1313,10 +1353,15 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
           </Row>
           </div>
 
+          <div className="pt-4">
+            <div className="inline-flex items-center gap-2 rounded-full border   px-3 py-1 text-[10px] font-medium uppercase tracking-[0.2em]  ">
+              Step 3 · Style & Launch
+            </div>
+          </div>
           <Row label="Tags" hint="style hints sent to the AI writer">
             <div className="space-y-3">
               <div>
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Question style</div>
+                <div className="text-[10px] font-medium uppercase tracking-wider text-slate-500 mb-1.5">Question style</div>
                 <div className="flex flex-wrap gap-1.5">
                   {QUESTION_TYPE_CHIPS.map((q) => (
                     <Chip key={q} active={questionTypes.includes(q)} onClick={() => toggleFromList(questionTypes, setQuestionTypes, q)}>
@@ -1326,7 +1371,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 </div>
               </div>
               <div>
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Stem focus</div>
+                <div className="text-[10px] font-medium uppercase tracking-wider text-slate-500 mb-1.5">Stem focus</div>
                 <div className="flex flex-wrap gap-1.5">
                   {STEM_PATTERN_CHIPS.map((p) => (
                     <Chip key={p} active={stemPatterns.includes(p)} onClick={() => toggleFromList(stemPatterns, setStemPatterns, p)}>
@@ -1337,7 +1382,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               </div>
 
               <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
-                <div className="text-[11px] font-bold text-slate-800">Question image mode</div>
+                <div className="text-[11px] font-medium text-slate-800">Question image mode</div>
                 <div className="flex flex-wrap gap-1.5">
                   {([
                     ['text', 'Text only'],
@@ -1349,7 +1394,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                       type="button"
                       onClick={() => setImageMode(value)}
                       aria-pressed={imageMode === value}
-                      className={`px-2.5 py-1.5 rounded-lg border text-[10px] font-semibold transition-colors ${imageMode === value ? 'bg-[#0f8b8d] border-[#0f8b8d] text-white' : 'bg-white border-slate-200 text-slate-600 hover:border-[#0f8b8d]/50'}`}
+                      className={`px-2.5 py-1.5 rounded-lg border text-[10px] font-semibold transition-colors ${imageMode === value ? '  text-white' : 'bg-white border-slate-200 text-slate-600 '}`}
                     >
                       {label}
                     </button>
@@ -1358,55 +1403,15 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 <p className="text-[10px] text-slate-500 leading-snug">
                   {imageMode === 'only'
                     ? customTopic
-                      ? 'Every question must use a curated image matching this topic and pass vision verification. Requires NVIDIA vision access; unmatched or unverifiable images are not replaced with text questions.'
-                      : 'Every question must use a curated image and pass vision verification. Requires NVIDIA vision access and a supported imaging specialty; unavailable images are not replaced with text questions.'
+                      ? 'Every question must use a curated image matching this topic and pass vision verification. Requires the active model (Gemini) to write and check each image; unmatched or unverifiable images are not replaced with text questions.'
+                      : 'Every question must use a curated image and pass vision verification. Requires the active model (Gemini) to write and check each image and a supported imaging specialty; unavailable images are not replaced with text questions.'
                     : imageMode === 'mixed'
                       ? 'Image-appropriate questions may use a verified figure from Wikimedia Commons or Open-i/NLM. Other questions remain text-only.'
                       : 'No images will be requested for this set.'}
                 </p>
               </div>
 
-              {selectedExam === 'AMC_CAT' && (
-                <>
-                  <button onClick={() => setShowAmcOptions((v) => !v)} className="text-[11px] font-bold text-[#0f8b8d] hover:underline">
-                    {showAmcOptions ? 'Hide' : 'Show'} AMC blueprint tags (evidence, patient group, presenting problem)
-                  </button>
-                  {showAmcOptions && (
-                    <div className="space-y-3 pt-1">
-                      <div>
-                        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Evidence sources</div>
-                        <div className="flex flex-wrap gap-1.5">
-                          {EVIDENCE_SOURCE_CHIPS.map((src) => (
-                            <Chip key={src} active={evidenceSources.includes(src)} onClick={() => toggleFromList(evidenceSources, setEvidenceSources, src)}>
-                              {src}
-                            </Chip>
-                          ))}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Patient group</div>
-                        <div className="flex flex-wrap gap-1.5">
-                          {PATIENT_GROUP_CHIPS.map((g) => (
-                            <Chip key={g} active={patientGroup === g} onClick={() => setPatientGroup(patientGroup === g ? '' : g)}>
-                              {g}
-                            </Chip>
-                          ))}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Presenting problems</div>
-                        <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
-                          {PRESENTING_PROBLEM_CHIPS.map((pp) => (
-                            <Chip key={pp} active={presentingProblems.includes(pp)} onClick={() => toggleFromList(presentingProblems, setPresentingProblems, pp)}>
-                              {pp}
-                            </Chip>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
+
             </div>
           </Row>
 
@@ -1429,43 +1434,55 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         </div>
         {/* ------------------------------------------------ right rail */}
         <div className="lg:col-span-4 space-y-5">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
+          <div className="lg:sticky lg:top-4   rounded-[20px] border   dark:p-5 space-y-3">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-slate-900">Module summary</h3>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-100 text-slate-600">{EXAM_LABEL[selectedExam]}</span>
+              <h3 className="text-sm font-medium  ">Launch summary</h3>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full  font-medium">{EXAM_LABEL[selectedExam]}</span>
             </div>
-            <p className="text-[11px] text-slate-500 leading-relaxed">
+            <p className="text-[11px]   leading-relaxed">
               {EXAM_LABEL[selectedExam]} pattern · {EXAM_SCORING[selectedExam]} · {mode === 'EXAM' ? 'strict exam timing' : 'regular practice'}
             </p>
-            <div className="rounded-xl bg-slate-50 border border-slate-200 divide-y divide-slate-200 text-[11px]">
+            <div className="rounded-xl   border   divide-y divide-[#E4E0D6] dark:divide-[#203138] text-[11px] overflow-hidden">
               {[
                 ['Questions', `${questionCount}`],
+                ['Mode', mode === 'EXAM' ? 'EXAM' : 'TUTOR'],
+                ['Scoring', EXAM_SCORING[selectedExam]],
                 ['Difficulty', difficultyTier === 'ALL' ? 'All levels' : `${difficultyTier}${difficultySubLevel ? ` · ${difficultySubLevel}` : ''}`],
-                ['Specialities', `${subjectsChosen} of ${subjectList.length}`],
+                ['Focus', customTopic ? `Target: ${customTopic}` : specialtyAll ? 'All specialities' : subjectsChosen > 0 ? `${subjectsChosen} specialities` : 'No focus yet'],
                 ['Topics', `${totalChosenSubtopicsCount}`],
                 ['Est. duration', `~${durationMin} min`],
               ].map(([label, value]) => (
-                <div key={label} className="flex justify-between px-3 py-2">
-                  <span className="text-slate-600">{label}</span>
-                  <span className="font-bold text-slate-800 font-mono">{value}</span>
+                <div key={label} className="flex justify-between gap-3 px-3 py-2">
+                  <span className=" ">{label}</span>
+                  <span className="font-medium   font-mono text-right">{value}</span>
                 </div>
               ))}
             </div>
+            <div className="flex flex-wrap gap-1.5">
+              <span className="rounded-full border   px-2 py-0.5 text-[10px] font-medium  ">
+                {specialtyAll ? 'All specialities' : customTopic ? 'Target topic' : subjectsChosen > 0 ? `${subjectsChosen} specialities` : 'Pick a focus'}
+              </span>
+              {appliedProfile && (
+                <span className="rounded-full border   px-2 py-0.5 text-[10px] font-medium  ">
+                  Instruction scroll active
+                </span>
+              )}
+            </div>
             <div className="grid grid-cols-2 gap-2">
               <div className="rounded-lg bg-slate-50 border border-slate-200 px-2.5 py-2">
-                <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500">Modules today</div>
-                <div className="text-sm font-mono font-bold text-slate-900">{progressStats.todayCount}</div>
+                <div className="text-[9px] font-medium uppercase tracking-wider text-slate-500">Modules today</div>
+                <div className="text-sm font-mono font-medium text-slate-900">{progressStats.todayCount}</div>
               </div>
               <div className="rounded-lg bg-slate-50 border border-slate-200 px-2.5 py-2">
-                <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500">Accuracy</div>
-                <div className="text-sm font-mono font-bold text-[#0f8b8d]">
+                <div className="text-[9px] font-medium uppercase tracking-wider text-slate-500">Accuracy</div>
+                <div className="text-sm font-mono font-medium ">
                   {progressStats.summary.accuracyPercent === null ? '—' : `${progressStats.summary.accuracyPercent}%`}
                 </div>
               </div>
             </div>
             {progressStats.summary.modules > 0 && weakForDrill.length > 0 && (
               <div className="pt-1 space-y-1.5">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Weakest real topics</div>
+                <div className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Weakest real topics</div>
                 <div className="flex flex-wrap gap-1.5">
                   {weakForDrill.slice(0, 4).map((w) => (
                     <span key={w.subject} className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-50 border border-rose-200 text-rose-800">
@@ -1474,7 +1491,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                   ))}
                 </div>
                 {(selectedExam === 'NEET_PG' || (selectedExam === 'INI_CET' && iniSyllabusMode === '19_SUBJECTS')) && (
-                  <button onClick={applyWeakDrill} className="text-[10px] font-bold text-[#0f8b8d] hover:underline">
+                  <button onClick={applyWeakDrill} className="text-[10px] font-medium  hover:underline">
                     Select these {weakForDrill.length} subjects
                   </button>
                 )}
@@ -1483,10 +1500,10 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
           </div>
 
           {/* AI instruction profiles — saved, reusable, and generated on demand */}
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-2.5">
+          <div className="   rounded-[20px] border   dark:p-5 space-y-2.5">
             <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
-                <MessageSquarePlus className="w-4 h-4 text-[#0f8b8d]" /> AI instructions
+              <h3 className="text-sm font-medium   flex items-center gap-1.5">
+                <MessageSquarePlus className="w-4 h-4  " /> Instruction Scroll
               </h3>
               <span className="text-[9px] font-mono text-slate-400">
                 {profiles.length} saved profile{profiles.length === 1 ? '' : 's'}
@@ -1503,7 +1520,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                   value={activeProfileId ?? ''}
                   onChange={(e) => loadProfile(e.target.value)}
                   disabled={genState.busy}
-                  className="flex-1 min-w-0 text-[11px] px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-700 focus:outline-none focus:border-[#0f8b8d] disabled:opacity-50"
+                  className="flex-1 min-w-0 text-[11px] px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-700 focus:outline-none focus: disabled:opacity-50"
                 >
                   <option value="">Load a saved profile…</option>
                   {profiles.map((p) => (
@@ -1530,14 +1547,14 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               disabled={genState.busy}
               rows={3}
               placeholder={'e.g. "closer distractors, shorter stems, more next-best-step items, use Indian guidelines, drop classic one-liners"'}
-              className="w-full resize-y rounded-lg bg-slate-50 border border-slate-200 px-2.5 py-2 text-[11px] text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-[#0f8b8d] disabled:opacity-50"
+              className="w-full resize-y rounded-lg bg-slate-50 border border-slate-200 px-2.5 py-2 text-[11px] text-slate-800 placeholder:text-slate-400 focus:outline-none focus: disabled:opacity-50"
             />
 
             <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={() => setAppliedProfile(profileDraft.trim() || null)}
                 disabled={genState.busy || !profileDraft.trim() || (appliedProfile ?? '') === profileDraft.trim()}
-                className="flex-1 min-w-[110px] py-1.5 rounded-lg bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 disabled:cursor-not-allowed text-white text-[10px] font-bold transition-colors"
+                className="flex-1 min-w-[110px] py-1.5 rounded-lg   disabled:opacity-40 disabled:cursor-not-allowed text-white text-[10px] font-medium transition-colors"
               >
                 {appliedProfile && appliedProfile === profileDraft.trim() ? 'Profile applied' : 'Apply to next run'}
               </button>
@@ -1555,7 +1572,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 onClick={handleGenerateProfile}
                 disabled={genState.busy || generatingProfile}
                 title="Ask the active AI to draft a reusable instruction profile from these settings, then save it"
-                className="px-2.5 py-1.5 rounded-lg border border-[#0f8b8d]/30 bg-teal-50 text-[#00696b] hover:bg-[#0f8b8d]/10 disabled:opacity-40 text-[10px] font-bold flex items-center gap-1.5 transition-colors"
+                className="px-2.5 py-1.5 rounded-lg border  bg-teal-50   disabled:opacity-40 text-[10px] font-medium flex items-center gap-1.5 transition-colors"
               >
                 <Wand2 className="w-3.5 h-3.5" />
                 {generatingProfile ? 'Generating…' : 'Generate profile'}
@@ -1563,7 +1580,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               <button
                 onClick={() => setShowSaveRow((v) => !v)}
                 disabled={genState.busy || !profileDraft.trim()}
-                className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 hover:border-[#0f8b8d]/40 hover:text-[#0f8b8d] disabled:opacity-40 text-[10px] font-bold flex items-center gap-1.5 transition-colors"
+                className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700   disabled:opacity-40 text-[10px] font-medium flex items-center gap-1.5 transition-colors"
               >
                 <Save className="w-3.5 h-3.5" />
                 {activeProfileId ? 'Save changes' : 'Save profile'}
@@ -1578,11 +1595,11 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                   onChange={(e) => setProfileName(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') handleSaveProfile(); }}
                   placeholder={defaultProfileName()}
-                  className="flex-1 min-w-0 text-[11px] px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:border-[#0f8b8d]"
+                  className="flex-1 min-w-0 text-[11px] px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:"
                 />
                 <button
                   onClick={handleSaveProfile}
-                  className="px-2.5 py-1.5 rounded-lg bg-[#001432] hover:bg-[#13294b] text-white text-[10px] font-bold"
+                  className="px-2.5 py-1.5 rounded-lg   text-white text-[10px] font-medium"
                 >
                   Save
                 </button>
@@ -1602,34 +1619,40 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               <p className="text-[10px] text-amber-600">Unapplied changes — press Apply to use the edited text.</p>
             )}
             {appliedProfile && appliedProfile === profileDraft.trim() && (
-              <p className="text-[10px] text-[#0f8b8d]">Active for the next generation{activeProfileId ? ' · saved profile' : ''}.</p>
+              <p className="text-[10px] ">Active for the next generation{activeProfileId ? ' · saved profile' : ''}.</p>
             )}
           </div>
 
           {/* Generator + launch */}
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
+          <div className="  rounded-[20px] border   dark:p-5 space-y-3">
             <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
-                <Sparkles className="w-4 h-4 text-[#0f8b8d]" /> {imageMode === 'only' ? 'Image-only generation' : 'AI generator'}
+              <h3 className="text-sm font-medium   flex items-center gap-1.5">
+                <Sparkles className="w-4 h-4  " /> {imageMode === 'only' ? 'Image-only launch' : 'Launch console'}
               </h3>
-              <span className="text-[10px] font-mono text-slate-500 truncate max-w-[55%]">
+              <span className="text-[10px] font-mono   truncate max-w-[55%]">
                 {imageMode === 'only'
-                  ? 'NVIDIA vision · writer + verifier'
+                  ? 'Active model (Gemini) · writes + checks images'
                   : activeProvider
                     ? `${activeProvider} · ${providerKnownDown ? 'not connected' : getEffectiveModel(activeProvider)}`
                     : 'no provider'}
               </span>
             </div>
+            {activeProfileId && (
+              <div className="flex items-center justify-between gap-2 rounded-xl border   px-3 py-2 text-[10px]  ">
+                <span className="font-medium">Instruction scroll active</span>
+                <span className="truncate max-w-[55%] text-right">{profileName || 'Saved profile'}</span>
+              </div>
+            )}
 
             {!activeProvider && imageMode !== 'only' && (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10px] leading-relaxed text-amber-900 flex items-start gap-2">
-                <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-600" />
+              <div className=" rounded-2xl border   px-3 py-2.5 text-[11px] leading-relaxed  flex items-start gap-2 [clip-path:polygon(0_6%,100%_0,98%_94%,2%_100%)]   ">
+                <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5  " />
                 <span>
                   No AI engine is connected, so questions cannot be written. Connect Claude, ChatGPT, Grok, Gemini or
                   OpenCode in Settings — the questions come from your own subscription.
                   <button
                     onClick={() => onNavigate('settings')}
-                    className="ml-1 font-bold underline decoration-dotted hover:text-amber-950"
+                    className="ml-1 font-medium underline decoration-dotted  "
                   >
                     Open Settings
                   </button>
@@ -1638,14 +1661,14 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             )}
 
             {providerKnownDown && imageMode !== 'only' && (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10px] leading-relaxed text-amber-900 flex items-start gap-2">
-                <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-600" />
+              <div className=" rounded-2xl border   px-3 py-2.5 text-[11px] leading-relaxed  flex items-start gap-2 [clip-path:polygon(0_6%,100%_0,98%_94%,2%_100%)]   ">
+                <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5  " />
                 <span>
                   <strong className="capitalize">{activeProvider}</strong> is set as your engine but is not connected
                   on this machine, so generation would fail. Reconnect it or choose another provider in Settings.
                   <button
                     onClick={() => onNavigate('settings')}
-                    className="ml-1 font-bold underline decoration-dotted hover:text-amber-950"
+                    className="ml-1 font-medium underline decoration-dotted  "
                   >
                     Open Settings
                   </button>
@@ -1654,28 +1677,47 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
             )}
 
             {genState.busy ? (
-              <div className="space-y-1.5">
-                <div className="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
+              <div className=" space-y-2 rounded-2xl border     p-3 dark:">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-[''] text-lg tracking-wide  ">BATTLE PROGRESS</span>
+                  <span className="rounded-full  px-2 py-0.5 text-[10px] font-mono font-medium  ">
+                    Batch {genState.batch} / {genState.totalBatches || '—'}
+                  </span>
+                </div>
+                <div className="h-2.5 w-full overflow-hidden rounded-full  ">
                   <div
-                    className="h-full bg-[#0f8b8d] transition-all"
+                    className="h-full rounded-full transition-all"
                     style={{ width: `${genState.total > 0 ? Math.min(100, Math.round((genState.generated / genState.total) * 100)) : 0}%` }}
                   />
                 </div>
-                <div className="text-[10px] font-mono text-slate-600">
-                  Questions {genState.generated} / {genState.total}
-                  {genState.dropped > 0 ? ` · ${genState.dropped} dropped` : ''}
-                  {elapsedSec > 0 ? ` · ${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, '0')} elapsed` : ''}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px]">
+                  <div className="rounded-lg   px-2 py-1.5">
+                    <div className=" ">Questions</div>
+                    <div className="font-mono font-medium  ">{genState.generated} / {genState.total}</div>
+                  </div>
+                  <div className="rounded-lg   px-2 py-1.5">
+                    <div className=" ">Dropped</div>
+                    <div className="font-mono font-medium  ">{genState.dropped}</div>
+                  </div>
+                  <div className="rounded-lg   px-2 py-1.5">
+                    <div className=" ">Elapsed</div>
+                    <div className="font-mono font-medium  ">{Math.floor(elapsedSec / 60)}:{String(elapsedSec % 60).padStart(2, '0')}</div>
+                  </div>
+                  <div className="rounded-lg   px-2 py-1.5">
+                    <div className=" ">Status</div>
+                    <div className="font-mono font-medium  ">{retrying ? 'Retrying' : 'Writing'}</div>
+                  </div>
                 </div>
                 {progressDetail.imageFirst && (
-                  <div className="text-[10px] font-mono text-slate-500 leading-snug">{progressDetail.imageFirst}</div>
+                  <div className="text-[10px] font-mono   leading-snug">{progressDetail.imageFirst}</div>
                 )}
                 {elapsedSec >= 25 && imageMode !== 'only' && (
-                  <div className="text-[9px] text-slate-400 leading-snug">
+                  <div className="text-[10px]   leading-snug">
                     Generating questions in parallel — each question runs independently through the active provider.
                   </div>
                 )}
                 {retrying && (
-                  <div className="text-[10px] font-mono text-amber-700 leading-snug">
+                  <div className="rounded-xl border     px-2.5 py-1.5 text-[10px] font-mono   leading-snug">
                     {retrying}
                   </div>
                 )}
@@ -1684,16 +1726,16 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               <p className="text-[10px] text-slate-500 leading-relaxed">
                 {imageMode === 'only'
                   ? customTopic
-                    ? `Image-only searches curated bank images matching “${customTopic}” and requires NVIDIA vision access. Unmatched or unverifiable images are not replaced with text questions.`
+                    ? `Image-only searches curated bank images matching “${customTopic}” and requires the active model (Gemini) to write and check each image. Unmatched or unverifiable images are not replaced with text questions.`
                     : imageOnlySubjects.length > 0
-                      ? `Image-only uses curated ${imageOnlySubjects.join(', ')} bank images and requires NVIDIA vision access. It never adds text-only questions.`
+                      ? `Image-only uses curated ${imageOnlySubjects.join(', ')} bank images and requires the active model (Gemini) to write and check each image. It never adds text-only questions.`
                       : 'Image-only mode requires selecting Radiodiagnosis, Dermatology, Ophthalmology, or Pathology.'
                   : !activeProvider
                     ? 'Connect a provider first — then this button builds the module.'
                     : providerKnownDown
                       ? `${activeProvider} is signed out — reconnect it to generate.`
                       : canLaunch
-                        ? `${questionCount} questions across ${subjectsChosen} ${selectedExam === 'AMC_CAT' ? 'domains' : 'specialities'} and ${totalChosenSubtopicsCount} topics. Expect about ${Math.max(1, Math.round(questionCount * 0.15))} min (estimate: about 9 s per question, written in parallel).`
+                        ? `${questionCount} questions across ${subjectsChosen} specialities and ${totalChosenSubtopicsCount} topics. Expect about ${Math.max(1, Math.round(questionCount * 0.15))} min (estimate: about 9 s per question, written in parallel).`
                         : 'Select at least one speciality (or choose All) to build a module.'}
               </p>
             )}
@@ -1711,57 +1753,59 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
               </div>
             )}
 
-            <button
-              onClick={() => {
-                if (imageMode !== 'only' && (!activeProvider || providerKnownDown)) {
-                  onNavigate('settings');
-                  return;
-                }
-                if (!canLaunch) {
-                  setGenState({
-                    busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0,
-                    error: 'Pick at least one speciality (or choose All) before building a module.',
-                  });
-                  document.getElementById('speciality-picker')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                  return;
-                }
-                handleLaunch();
-              }}
-              disabled={genState.busy}
-              className="w-full py-2.5 bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl transition-all shadow-sm flex items-center justify-center gap-2"
-            >
-              {genState.busy ? (
-                <>
-                  <Sparkles className="w-4 h-4 animate-spin" />
-                  <span>Generating… {genState.generated}/{genState.total}</span>
-                </>
-              ) : imageMode !== 'only' && !activeProvider ? (
-                <>
-                  <ShieldAlert className="w-4 h-4" />
-                  <span>Connect an AI provider in Settings</span>
-                </>
-              ) : imageMode !== 'only' && providerKnownDown ? (
-                <>
-                  <ShieldAlert className="w-4 h-4" />
-                  <span>Reconnect {activeProvider} in Settings</span>
-                </>
-              ) : !canLaunch ? (
-                <>
-                  <Target className="w-4 h-4" />
-                  <span>Select at least one speciality</span>
-                </>
-              ) : (
-                <>
-                  <Play className="w-4 h-4 fill-current" /> Launch Clinical Module
-                </>
-              )}
-            </button>
+            <div className="sticky bottom-0 z-20 -mx-5 mt-2 border-t     px-5 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur lg:static lg:mx-0 lg:border-0 lg:bg-transparent lg:p-0 lg:backdrop-blur-none">
+              <button
+                onClick={() => {
+                  if (imageMode !== 'only' && (!activeProvider || providerKnownDown)) {
+                    onNavigate('settings');
+                    return;
+                  }
+                  if (!canLaunch) {
+                    setGenState({
+                      busy: false, generated: 0, total: 0, batch: 0, totalBatches: 0, dropped: 0,
+                      error: 'Pick at least one speciality (or choose All) before building a module.',
+                    });
+                    document.getElementById('speciality-picker')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    return;
+                  }
+                  handleLaunch();
+                }}
+                disabled={genState.busy}
+                className="min-h-[44px] w-full rounded-2xl px-4 py-3 text-sm font-medium  transition-all hover:brightness-105 focus:outline-none focus:ring-2 focus: focus:ring-offset-2 focus:ring-offset-[#FFF8E1] dark:focus:ring-offset-[#030409] disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center gap-2"
+              >
+                {genState.busy ? (
+                  <>
+                    <Sparkles className="w-4 h-4 animate-spin" />
+                    <span>Generating… {genState.generated}/{genState.total}</span>
+                  </>
+                ) : imageMode !== 'only' && !activeProvider ? (
+                  <>
+                    <ShieldAlert className="w-4 h-4" />
+                    <span>Connect an AI provider in Settings</span>
+                  </>
+                ) : imageMode !== 'only' && providerKnownDown ? (
+                  <>
+                    <ShieldAlert className="w-4 h-4" />
+                    <span>Reconnect {activeProvider} in Settings</span>
+                  </>
+                ) : !canLaunch ? (
+                  <>
+                    <Target className="w-4 h-4" />
+                    <span>Select at least one speciality</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-4 h-4 fill-current" /> Launch Module
+                  </>
+                )}
+              </button>
+            </div>
 
             {genState.busy && (
               <button
                 onClick={handleStop}
                 disabled={stopping}
-                className="w-full py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-60 disabled:cursor-wait text-white text-[11px] font-bold transition-colors flex items-center justify-center gap-2"
+                className="w-full py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-60 disabled:cursor-wait text-white text-[11px] font-medium transition-colors flex items-center justify-center gap-2"
               >
                 <Square className="w-3 h-3 fill-current" />
                 {stopping ? 'Stopping…' : genState.generated > 0 ? `Stop generating · keep ${genState.generated} ready` : 'Stop generating'}
@@ -1783,7 +1827,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                   <button
                     onClick={handleStop}
                     disabled={stopping}
-                    className="mt-2 w-full py-1.5 rounded-lg bg-rose-100 hover:bg-rose-200 disabled:opacity-60 text-rose-700 text-[10px] font-bold transition-colors flex items-center justify-center gap-1.5"
+                    className="mt-2 w-full py-1.5 rounded-lg bg-rose-100 hover:bg-rose-200 disabled:opacity-60 text-rose-700 text-[10px] font-medium transition-colors flex items-center justify-center gap-1.5"
                     title="Stop refinement / QA"
                   >
                     <Square className="w-2.5 h-2.5 fill-current" />
@@ -1791,9 +1835,9 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                   </button>
                 )}
               </div>
-            ) : null}            {partial && partial.length > 0 && !genState.busy && (
-              <div className="space-y-2">
-                <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[10px] leading-relaxed">
+            ) : null} {partial && partial.length > 0 && !genState.busy && (
+              <div className="space-y-2 rounded-2xl border    p-2.5 ">
+                <div className=" rounded-xl   px-3 py-2 text-[11px] leading-relaxed   [clip-path:polygon(0_8%,100%_0,98%_92%,2%_100%)]">
                   {partialReason
                     ? imageMode === 'only'
                       ? partialReason
@@ -1804,7 +1848,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 {imageMode !== 'only' && partial.length < questionCount && (
                   <button
                     onClick={handleContinue}
-                    className="w-full py-2 rounded-xl bg-[#001432] hover:bg-[#13294b] text-white text-[11px] font-bold transition-colors flex items-center justify-center gap-2"
+                    className="w-full py-2 rounded-xl   text-white text-[11px] font-medium transition-colors flex items-center justify-center gap-2"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
                     Continue generating the remaining {questionCount - partial.length}
@@ -1812,7 +1856,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 )}
                 <button
                   onClick={handleLaunchPartial}
-                  className="w-full py-2.5 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2"
+                  className="w-full py-2.5   text-white text-xs font-medium rounded-xl transition-all flex items-center justify-center gap-2"
                 >
                   <Play className="w-4 h-4 fill-current" /> Launch with {partial.length} ready
                 </button>

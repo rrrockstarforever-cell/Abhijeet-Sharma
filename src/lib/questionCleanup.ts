@@ -16,6 +16,8 @@ export function cleanQuestion(q: ClinicalQuestion): ClinicalQuestion {
 
   // Options written out again inside the stem or the question line: keep the text before them.
   const cut = (text: string) => {
+    // A match-the-following or list stem carries its lists ("A. ..." then "1. ...") in the stem itself: keep them.
+    if (/\bmatch list i\b|\bmatch the following\b/i.test(text) || /\n\s*1[.)]\s/.test(text)) return text;
     const at = text.search(OPTION_BLOCK);
     return at > 0 ? text.slice(0, at).trim() : text;
   };

@@ -25,10 +25,10 @@ const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace
 
 /** What a lead-in asks, and how to recognise it in the question line. */
 const LEAD_INS: Record<LeadIn, { ask: string; test: RegExp }> = {
-  'next-step': { ask: 'The question line asks for the next best step in management ("What is the most appropriate next step in management?").', test: /next (best |appropriate )?step|next step|most appropriate (next )?(step|management|action|initial)|best next|initial management/i },
-  'drug-of-choice': { ask: 'The question line asks for the drug of choice or the most appropriate drug ("Which drug is the drug of choice?").', test: /drug of choice|most appropriate (?:\w+ )?(drug|medication|treatment|therapy|agent|antibiotic|antimicrobial|regimen|prophylaxis|dose|choice)|first[- ]line|best (drug|treatment|agent|regimen|choice)|treatment of choice|regimen of choice|which (?:\w+ ){0,2}(?:drug|agent|antibiotic|antimicrobial|medication|regimen|cephalosporin|penicillin|macrolide|aminoglycoside|fluoroquinolone|carbapenem|tetracycline)s?\b[^?]{0,40}\b(?:most appropriate|preferred|best|indicated|of choice)/i },
-  'investigation-of-choice': { ask: 'The question line asks for the investigation of choice or the most appropriate test ("Which investigation is most appropriate?").', test: /investigation|test|imaging|scan|biopsy|gold standard|most (appropriate|useful|sensitive|specific)|best (initial )?(test|investigation)/i },
-  'treatment-of-choice': { ask: 'The question line asks for the treatment of choice ("What is the treatment of choice?").', test: /treatment|management|therapy|drug|manage|intervention|procedure/i },
+ 'next-step': { ask: 'The question line asks for the next best step in management ("What is the most appropriate next step in management?").', test: /next (best |appropriate )?step|next step|most appropriate (next )?(step|management|action|initial)|best next|initial management/i },
+ 'drug-of-choice': { ask: 'The question line asks for the drug of choice or the most appropriate drug ("Which drug is the drug of choice?").', test: /drug of choice|most appropriate (?:\w+ )?(drug|medication|treatment|therapy|agent|antibiotic|antimicrobial|regimen|prophylaxis|dose|choice)|first[- ]line|best (drug|treatment|agent|regimen|choice)|treatment of choice|regimen of choice|which (?:\w+ ){0,2}(?:drug|agent|antibiotic|antimicrobial|medication|regimen|cephalosporin|penicillin|macrolide|aminoglycoside|fluoroquinolone|carbapenem|tetracycline)s?\b[^?]{0,40}\b(?:most appropriate|preferred|best|indicated|of choice)/i },
+ 'investigation-of-choice': { ask: 'The question line asks for the investigation of choice or the most appropriate test ("Which investigation is most appropriate?").', test: /investigation|test|imaging|scan|biopsy|gold standard|most (appropriate|useful|sensitive|specific)|best (initial )?(test|investigation)/i },
+ 'treatment-of-choice': { ask: 'The question line asks for the treatment of choice ("What is the treatment of choice?").', test: /treatment|management|therapy|drug|manage|intervention|procedure/i },
   diagnosis: { ask: 'The question line asks for the most likely diagnosis ("What is the most likely diagnosis?"). The stem must carry enough findings to settle it.', test: /diagnosis|condition|disorder|disease|most likely/i },
   finding: { ask: 'The question line asks for a finding, feature, cause, complication or association of the stated condition ("Which of the following is the most likely finding?", "... is associated with?").', test: /./ },
   advice: { ask: 'The question line asks for the most appropriate advice or counselling ("What is the most appropriate advice to give this patient?").', test: /advice|counsel|inform|explain|tell|reassur|educat|recommend/i },
@@ -97,7 +97,7 @@ export const STYLES: Record<StyleId, StyleSpec> = {
       return null;
     },
   },
-  'short-case': {
+ 'short-case': {
     id: 'short-case', chips: ['Clinical vignette'], needsRelated: false, codedOptions: false,
     judge: 'a short patient case of at most three sentences ending in one question',
     instruction: (slot) => `Style: short case. At most three sentences: age and sex, the presentation, then ONE question. The answer is the named fact itself. ${slot.leadIn ? LEAD_INS[slot.leadIn].ask : ''}`,
@@ -107,7 +107,7 @@ export const STYLES: Record<StyleId, StyleSpec> = {
       return null;
     },
   },
-  'one-liner': {
+ 'one-liner': {
     id: 'one-liner', chips: ['One-liner recall'], needsRelated: false, codedOptions: false,
     judge: 'a one-line factual recall question with no patient',
     instruction: () => 'Style: one-liner recall. One short line (under 25 words) about the fact, for example "Which of the following is ...?" or "... is caused by?". No patient: the stem has no age, no sex and no "a patient" or "a child". The stem must still give a subject (a drug, condition, structure or finding), not just a topic label.',
@@ -137,7 +137,7 @@ export const STYLES: Record<StyleId, StyleSpec> = {
       return null;
     },
   },
-  'multi-statement': {
+ 'multi-statement': {
     id: 'multi-statement', chips: ['Multiple statements ("1 and 3 only")'], needsRelated: true, codedOptions: true,
     judge: 'a numbered-statements item: statements 1-4 in the stem, options such as "1 and 3 only", exactly one correct combination',
     instruction: (slot, n) => `Style: multiple statements. The stem is "Consider the following statements about ...:" then statements 1., 2., 3. and 4., each on its own line and each a complete claim. The question line is "Which of the statements is/are correct?" The ${n} options are combinations such as "1 and 3 only", "2, 3 and 4 only", "1, 2 and 4 only", "1 and 4 only"; exactly one combination is correct.${relatedLine(slot)}`,
@@ -150,7 +150,7 @@ export const STYLES: Record<StyleId, StyleSpec> = {
       return null;
     },
   },
-  'assertion-reason': {
+ 'assertion-reason': {
     id: 'assertion-reason', chips: ['Assertion-reason'], needsRelated: false, codedOptions: true,
     judge: 'an assertion-reason item with the four standard options, exactly one correct',
     instruction: () => 'Style: assertion-reason. The stem is "Assertion (A): ..." on one line and "Reason (R): ..." on the next. The four options are exactly: "Both A and R are true and R is the correct explanation of A", "Both A and R are true but R is not the correct explanation of A", "A is true but R is false", "A is false but R is true". The question line is "Choose the correct option." Exactly one option is correct.',
@@ -265,11 +265,11 @@ export function styleProblem(q: ClinicalQuestion, slot: Slot | undefined, option
 // ---------------------------------------------------------------------------------------------------------------
 // Planning: which style each question gets.
 
-/** The exam's own mix, as weights. NEET-PG's pattern forbids NOT, match and statement items; AMC is all vignettes. */
+/** The exam's own mix, as weights. NEET-PG's pattern forbids NOT, match and statement items. */
 // Mixes follow the previous-year papers (see pyqProfile.ts): since 2022 NEET-PG is about a third long vignettes and
 // two fifths picture items, INI-CET about two fifths one-liners and one in six NOT items, and the mix differs a lot by
 // subject (Anatomy and Radiology are mostly pictures, Medicine and OBG mostly vignettes, Physiology mostly one-liners).
-// Match, statement and assertion-reason items are almost absent (under 3%). AMC CAT is all vignettes by its own pattern.
+// Match, statement and assertion-reason items are almost absent (under 3%).
 const SUBJECT_ALIASES: [RegExp, string][] = [
   [/obstet|gynae|gynec|pre-?eclampsia|pregnan|antenatal|labou?r/i, 'OBG'], [/communit|preventive|epidemiolog|biostat|screening|vaccin|immunis/i, 'PSM'],
   [/forensic|toxicolog|poison|postmortem|autopsy|medicolegal/i, 'Forensic'], [/paediatric|pediatric|neonat|child/i, 'Paediatrics'],
@@ -288,7 +288,6 @@ export function subjectFromTopic(topic: string): string | undefined {
 
 /** The style mix of an exam, adjusted to a subject when one is known. */
 export function mixFor(exam: ExamType, subject?: string): [StyleId, number][] {
-  if (exam === 'AMC_CAT') return [['vignette', 100]];
   const profile = PYQ_PROFILE[exam];
   const known = subject && Object.keys(profile.subjects).find((k) => k.toLowerCase() === subject.toLowerCase());
   const sh: StyleShares = known ? profile.subjects[known] : profile.all;
@@ -306,7 +305,6 @@ export function mixFor(exam: ExamType, subject?: string): [StyleId, number][] {
 const EXAM_LEAD_INS: Record<ExamType, [LeadIn, number][]> = {
   NEET_PG: [['diagnosis', 35], ['finding', 30], ['next-step', 12], ['drug-of-choice', 10], ['investigation-of-choice', 8], ['treatment-of-choice', 5]],
   INI_CET: [['diagnosis', 35], ['finding', 30], ['next-step', 12], ['drug-of-choice', 10], ['investigation-of-choice', 8], ['treatment-of-choice', 5]],
-  AMC_CAT: [['next-step', 35], ['diagnosis', 25], ['investigation-of-choice', 20], ['advice', 20]],
 };
 
 /** Spreads `n` picks over weighted entries so equal kinds are interleaved, not clustered (largest remainder). */
@@ -390,7 +388,7 @@ export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], 
   const fallback: StyleId = 'one-liner';
   // A style the learner picked is never swapped for another: facts that fit it badly still get it (the writer builds the item
   // from the concept), and only a mix chosen by the exam falls back to a plain style.
-  for (let i = 0; i < n; i++) if (!slots[i]) slots[i] = { style: picked.length ? picked[i % picked.length] : exam === 'AMC_CAT' ? 'vignette' : fallback, tier: 'MEDIUM', related: [] };
+  for (let i = 0; i < n; i++) if (!slots[i]) slots[i] = { style: picked.length ? picked[i % picked.length] : fallback, tier: 'MEDIUM', related: [] };
   // Lead-ins and tiers are laid over the final order; related facts come from the same subtopic, then from the rest.
   return slots.map((s, i) => {
     const slot = s as Slot;
@@ -416,7 +414,6 @@ export const COMMON_STYLE_RULES = 'Never cite a guideline, survey, study, shorta
 export const EXAM_RULES: Record<ExamType, string> = {
   NEET_PG: 'NEET PG (NBEMS): exactly 4 options (A-D), one correct. Options are homogeneous and close. Avoid "all of the above" and "none of the above".',
   INI_CET: 'INI-CET (AIIMS): exactly 4 options (A-D), one correct. Distractors are very close; elimination should be hard. Recent guidelines and advances are fair game.',
-  AMC_CAT: 'AMC CAT MCQ (Australia): exactly 5 options (A-E), one best answer. Set the item in Australian practice (general practice, emergency department, ward, rural or remote clinic) and prefer safe, guideline-based steps (Therapeutic Guidelines, Australian Medicines Handbook, RACGP Red Book, Murtagh). Options are homogeneous (all diagnoses, or all management steps).',
 };
 
 /** Difficulty wording that fits the style (the vignette wording of the exam patterns would contradict a one-liner). */

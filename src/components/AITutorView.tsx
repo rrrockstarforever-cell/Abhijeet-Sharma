@@ -1,7 +1,7 @@
 // Clinical AI Tutor — real provider chat with a ChatGPT/Grok-style UX.
 // - Conversation list (left, localStorage), new/rename/delete, persisted across restarts.
 // - Every reply comes from POST /api/ai/tutor-chat with the active provider/model and
-//   the last ~10 turns of history. No canned replies, ever; failures surface as error bubbles.
+// the last ~10 turns of history. No canned replies, ever; failures surface as error bubbles.
 // - Sticky bottom composer: Enter = send, Shift+Enter = newline. Typing indicator while waiting.
 // - Per-message actions: copy, regenerate, "Save as highlight" (writes to the user-highlights store).
 // - Context question attaches as a removable chip; quick prompts for clinical use.
@@ -36,6 +36,7 @@ import {
   Mic,
   MicOff
 } from 'lucide-react';
+import { motion, useReducedMotion } from 'motion/react';
 import { useVoiceInput } from './useVoiceInput.ts';
 import { AppView, ClinicalQuestion, ExamType } from '../types.ts';
 import {
@@ -180,10 +181,10 @@ function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
   return parts.map((part, i) => {
     const key = `${keyPrefix}-${i}`;
     if (part.length > 4 && part.startsWith('**') && part.endsWith('**')) {
-      return <strong key={key} className="font-bold text-slate-900">{part.slice(2, -2)}</strong>;
+      return <strong key={key} className="font-medium text-slate-900 ">{part.slice(2, -2)}</strong>;
     }
     if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) {
-      return <code key={key} className="px-1 py-0.5 rounded bg-slate-100 text-[#0f8b8d] font-mono text-[11px]">{part.slice(1, -1)}</code>;
+      return <code key={key} className="px-1 py-0.5 rounded-[6px] bg-teal-50    font-mono text-[11px] border  ">{part.slice(1, -1)}</code>;
     }
     return <React.Fragment key={key}>{part}</React.Fragment>;
   });
@@ -231,14 +232,14 @@ function renderMarkdown(text: string): React.ReactNode {
     if (heading) {
       flushList();
       blocks.push(
-        <div key={key} className={`font-bold text-slate-900 mt-3 mb-1 ${heading[1].length <= 2 ? 'text-sm' : 'text-xs'}`}>
+        <div key={key} className={`font-medium text-slate-900  mt-3 mb-1 ${heading[1].length <= 2 ? 'text-sm' : 'text-xs'}`}>
           {renderInline(heading[2], key)}
         </div>
       );
       return;
     }
     flushList();
-    blocks.push(<p key={key} className="my-2.5 leading-7">{renderInline(line, key)}</p>);
+    blocks.push(<p key={key} className="my-2.5 leading-7 text-slate-900 ">{renderInline(line, key)}</p>);
   });
   flushList();
   return <>{blocks}</>;
@@ -294,7 +295,19 @@ function useConversationPending(id: string): boolean {
   return useSyncExternalStore(subscribeStore, () => pendingConversations.has(id));
 }
 
+function ConversationPendingDot({ id }: { id: string }) {
+  const pending = useConversationPending(id);
+  return pending ? (
+    <span
+      className="inline-block h-1.5 w-1.5 rounded-full   "
+      aria-label="Awaiting reply"
+    />
+  ) : null;
+}
+
 export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, attachedQuestion, onNavigate, currentExam = 'NEET_PG' }) => {
+  const reduceMotion = useReducedMotion();
+
   // ----- conversations -----
   const [conversations, setConversations] = useConversationStore();
   const [activeId, setActiveId] = useState<string>('');
@@ -374,10 +387,9 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
           setProvider(stored);
           if (providers[stored]) setModel((m) => m || getEffectiveModel(stored));
         } else {
-          // Otherwise fall back to ANY connected provider. This used to search a
-          // hard-coded ['chatgpt','claude','grok','gemini'] list that omitted `nvidia`,
-          // so a machine whose only working provider was NVIDIA appeared to have no
-          // provider at all and the whole composer stayed disabled.
+          // Otherwise fall back to ANY connected provider. Previously a stale
+          // hard-coded provider list could omit a working provider, making the app
+          // appear to have no provider at all and leaving the whole composer disabled.
           const first = pickDefaultActiveProvider(providers);
           if (first) {
             setProvider(first);
@@ -440,7 +452,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
   }, [updateConversation]);
 
   // ----- provider/model controls -----
-  // Derived from the canonical provider list so a newly added provider (nvidia, opencode)
+  // Derived from the canonical provider list so a newly added provider
   // can never again be silently excluded from the tutor.
   const connectedProviders = AI_PROVIDER_IDS.filter((id) => providerMap[id]?.connected);
 
@@ -826,91 +838,115 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
 
   // ----- quick prompts -----
   const quickPrompts = [
-    'Explain the trap in this question',
-    'Make an Anki cloze from the key fact',
-    'Give a 5-question quiz on this topic',
+ 'Explain the trap in this question',
+ 'Make an Anki cloze from the key fact',
+ 'Give a 5-question quiz on this topic',
   ];
 
   const connectedCount = connectedProviders.length;
 
   return (
     <div className="h-[calc(100vh-64px)] flex flex-col max-w-7xl mx-auto w-full px-2">
-      {/* Top header */}
-      <div className="bg-[#001432] rounded-2xl p-4 text-white border border-[#13294b] shadow-md mt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-xl bg-[#0f8b8d]/30 border border-[#0f8b8d]/40 flex items-center justify-center">
-            <Sparkles className="w-4 h-4 text-[#8ff3f4]" />
-          </div>
-          <div>
-            <h1 className="text-base font-bold text-white leading-tight">Clinical AI Tutor</h1>
-            <p className="text-[11px] text-slate-300">
-              {provider && providerMap[provider]?.connected
-                ? `Live · ${provider} · ${model || getEffectiveModel(provider)}`
-                : `No connected provider · ${NOT_CONNECTED_MESSAGE}`}
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* Persona */}
-          <div className="relative">
-            <select
-              value={persona}
-              onChange={(e) => setPersona(e.target.value as typeof persona)}
-              className="appearance-none bg-white dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 text-[11px] font-semibold text-slate-800 dark:text-white rounded-lg pl-2.5 pr-7 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+      {/* Hero band */}
+      <div className="relative overflow-hidden mt-2 rounded-[20px] border   via-white dark:dark:dark:">
+        <div aria-hidden className="pointer-events-none absolute inset-0 opacity-[0.10] dark:opacity-[0.12]" />
+        <div
+          aria-hidden
+          className={`pointer-events-none absolute inset-0 opacity-[0.05] dark:opacity-[0.10] [mask-image:radial-gradient(circle_at_center,transparent_18%,black_115%)] ${reduceMotion ? 'hidden' : ''}`}
+        />
+        <div className="relative p-4 sm:p-5 flex flex-col gap-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-11 h-11 rounded-[16px]   border   flex items-center justify-center shrink-0">
+                <Sparkles className="w-5 h-5  " />
+              </div>
+              <div className="min-w-0">
+                <div className="font-[''] tracking-wide text-[10px] uppercase  ">Clinical AI Tutor</div>
+                <h1 className="font-['Cormorant'] text-xl sm:text-2xl font-semibold text-slate-900  leading-tight truncate">Ask anything clinical</h1>
+                <p className="text-[11px] text-slate-600  truncate">
+                  {provider && providerMap[provider]?.connected
+                    ? `Live · ${provider} · ${model || getEffectiveModel(provider)}`
+                    : `No connected provider · ${NOT_CONNECTED_MESSAGE}`}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={createConversation}
+              className="inline-flex items-center justify-center gap-1.5 rounded-[14px] border border-slate-900/80  bg-white  px-3.5 py-2 text-[11px] font-medium text-slate-900  hover:-translate-y-0.5 transition-transform shrink-0"
             >
-              {PERSONAS.map((p) => (
-                <option key={p.id} value={p.id}>{p.label}</option>
-              ))}
-            </select>
-            <ChevronDown className="w-3 h-3 text-slate-400 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <Plus className="w-3.5 h-3.5" /> New chat
+            </button>
           </div>
 
-          {/* Provider (only connected ones) */}
-          <div className="relative">
-            <select
-              value={provider ?? ''}
-              onChange={(e) => handleProviderChange(e.target.value as AiProviderId)}
-              className="appearance-none bg-white dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 text-[11px] font-semibold text-slate-800 dark:text-white rounded-lg pl-2.5 pr-7 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] disabled:opacity-50"
-              disabled={connectedCount === 0}
-            >
-              {connectedCount === 0 && <option value="">No provider connected</option>}
-              {connectedProviders.map((id) => (
-                <option key={id} value={id}>{id}</option>
-              ))}
-            </select>
-            <ChevronDown className="w-3 h-3 text-slate-400 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
-          </div>
+          <div className="flex flex-col xl:flex-row xl:items-center gap-3">
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* Persona segmented */}
+              <div className="inline-flex rounded-[14px] border   bg-white/80  p-0.5">
+                {PERSONAS.map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => setPersona(p.id)}
+                    title={p.hint}
+                    className={`px-2.5 py-1.5 rounded-[11px] text-[10px] font-medium transition-colors ${
+                      persona === p.id
+                        ? '  '
+                        : 'text-slate-600   '
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
 
-          {/* Model (editable, persisted per provider) */}
-          <input
-            value={model || (provider ? getEffectiveModel(provider) : '')}
-            onChange={(e) => handleModelChange(e.target.value)}
-            disabled={!provider}
-            list="tutor-model-options"
-            placeholder="model id"
-            title={model || (provider ? getEffectiveModel(provider) : '')}
-            className="w-64 bg-white dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 text-[11px] font-mono text-slate-800 dark:text-white rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] disabled:opacity-50 placeholder-slate-500"
-          />
-          <datalist id="tutor-model-options">
-            {provider && providerMap[provider]?.connected && (
-              <option value={getEffectiveModel(provider)} />
-            )}
-          </datalist>
+              {/* Provider (only connected ones) */}
+              <div className="relative">
+                <select
+                  value={provider ?? ''}
+                  onChange={(e) => handleProviderChange(e.target.value as AiProviderId)}
+                  className="appearance-none bg-white  border border-slate-300  text-[11px] font-semibold text-slate-800  rounded-[12px] pl-2.5 pr-7 py-2 focus:outline-none focus:ring-2 focus: disabled:opacity-50"
+                  disabled={connectedCount === 0}
+                >
+                  {connectedCount === 0 && <option value="">No provider connected</option>}
+                  {connectedProviders.map((id) => (
+                    <option key={id} value={id}>{id}</option>
+                  ))}
+                </select>
+                <ChevronDown className="w-3 h-3 text-slate-400 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+              </div>
 
-          {/* Reasoning effort (Min..Ultra) — persisted; applied by subscription providers */}
-          <div className="relative">
-            <select
-              value={effort}
-              onChange={(e) => handleEffortChange(e.target.value as EffortLevel)}
-              title="Reasoning effort (subscription providers)"
-              className="appearance-none bg-white dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 text-[11px] font-semibold text-slate-800 dark:text-white rounded-lg pl-2.5 pr-7 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
-            >
+              {/* Model (editable, persisted per provider) */}
+              <input
+                value={model || (provider ? getEffectiveModel(provider) : '')}
+                onChange={(e) => handleModelChange(e.target.value)}
+                disabled={!provider}
+                list="tutor-model-options"
+                placeholder="model id"
+                title={model || (provider ? getEffectiveModel(provider) : '')}
+                className="w-56 bg-white  border border-slate-300  text-[11px] font-mono text-slate-800  rounded-[12px] px-2 py-2 focus:outline-none focus:ring-2 focus: disabled:opacity-50 placeholder-slate-500"
+              />
+              <datalist id="tutor-model-options">
+                {provider && providerMap[provider]?.connected && (
+                  <option value={getEffectiveModel(provider)} />
+                )}
+              </datalist>
+            </div>
+
+            {/* Effort segmented (Min..Ultra), persisted */}
+            <div className="inline-flex rounded-[14px] border   bg-white/80  p-0.5 shrink-0" title="Reasoning effort (subscription providers)">
               {EFFORT_LEVELS.map((level) => (
-                <option key={level} value={level}>{level} effort</option>
+                <button
+                  key={level}
+                  onClick={() => handleEffortChange(level)}
+                  className={`px-2.5 py-1.5 rounded-[11px] text-[10px] font-medium transition-colors ${
+                    effort === level
+                      ? '  '
+                      : 'text-slate-600   '
+                  }`}
+                >
+                  {level}
+                </button>
               ))}
-            </select>
-            <ChevronDown className="w-3 h-3 text-slate-400 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+            </div>
           </div>
         </div>
       </div>
@@ -919,14 +955,14 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
       {contextQuestion && !contextRemoved && (
         <div className="mt-2">
           <div className="flex items-center gap-2">
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-50 border border-amber-200 text-xs text-amber-900 min-w-0">
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-[20px] bg-amber-50  border border-amber-300  text-xs text-amber-900  min-w-0 transition-transform hover:-">
               <BookOpen className="w-3.5 h-3.5 text-amber-600 shrink-0" />
               <span className="font-semibold truncate max-w-[320px] lg:max-w-[480px]">
                 Context: {contextQuestion.subtopic} — {contextQuestion.stem.slice(0, 80)}{contextQuestion.stem.length > 80 ? '…' : ''}
               </span>
               <button
                 onClick={() => setContextOpen((open) => !open)}
-                className="font-bold text-[#00696b] hover:underline shrink-0"
+                className="font-medium  hover:underline shrink-0"
                 aria-expanded={contextOpen}
               >
                 {contextOpen ? 'Hide' : 'Show full question'}
@@ -948,7 +984,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
               )}
               <ol className="space-y-1">
                 {contextQuestion.options.map((o) => (
-                  <li key={o.id}><span className="font-bold mr-1.5">{o.id}.</span>{o.text}</li>
+                  <li key={o.id}><span className="font-medium mr-1.5">{o.id}.</span>{o.text}</li>
                 ))}
               </ol>
               <p className="text-[10px] text-slate-400">The answer key is not shown here, so the tutor's reasoning is yours to check.</p>
@@ -963,19 +999,27 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
         <div className="hidden md:flex flex-col w-60 shrink-0 bg-white rounded-2xl border border-slate-200 shadow-sm">
           <button
             onClick={createConversation}
-            className="m-3 mb-2 px-3 py-2 rounded-xl bg-[#001432] hover:bg-[#13294b] text-white text-xs font-bold flex items-center justify-center gap-1.5"
+            className="m-3 mb-2 px-3 py-2 rounded-xl   text-white text-xs font-medium flex items-center justify-center gap-1.5"
           >
             <Plus className="w-3.5 h-3.5" /> New chat
           </button>
           <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1">
-            {conversations.map((c) => {
+            {conversations.map((c, index) => {
               const isActive = c.id === activeConversation?.id;
               return (
+                <motion.div
+                  key={c.id}
+                  initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.22, ease: "easeOut", delay: reduceMotion ? 0 : Math.min(index * 0.03, 0.2) }}
+                >
                 <div
                   key={c.id}
                   onClick={() => setActiveId(c.id)}
-                  className={`group flex items-center justify-between px-2.5 py-2 rounded-xl cursor-pointer text-xs transition-colors ${
-                    isActive ? 'bg-teal-50 border border-[#0f8b8d]/30 text-[#00696b]' : 'hover:bg-slate-50 text-slate-700 border border-transparent'
+                  className={`group flex items-center justify-between px-3 py-2.5 rounded-[20px] cursor-pointer text-xs transition-all duration-200 border ${
+                    isActive
+                      ? '  '
+                      : 'bg-white  border-slate-200  text-slate-700  hover:translate-x-1  '
                   }`}
                 >
                   {renamingId === c.id ? (
@@ -985,25 +1029,26 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                       onChange={(e) => setRenameText(e.target.value)}
                       onBlur={commitRename}
                       onKeyDown={(e) => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenamingId(null); }}
-                      className="flex-1 min-w-0 bg-white border border-slate-200 rounded px-1.5 py-0.5 text-xs focus:outline-none"
+                      className="flex-1 min-w-0 bg-white  border border-slate-200  rounded-[8px] px-1.5 py-0.5 text-xs text-slate-900  focus:outline-none focus:ring-2 focus:"
                     />
                   ) : (
                     <>
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <MessageSquare className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-[#0f8b8d]' : 'text-slate-400'}`} />
+                        <MessageSquare className={`w-3.5 h-3.5 shrink-0 ${isActive ? '' : 'text-slate-400'}`} />
                         <span className="truncate font-medium">{c.title}</span>
+                        <ConversationPendingDot id={c.id} />
                       </div>
-                      <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
+                      <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 transition-opacity">
                         <button
                           onClick={(e) => { e.stopPropagation(); setRenamingId(c.id); setRenameText(c.title); }}
-                          className="p-1 rounded hover:bg-slate-200 text-slate-500"
+                          className="p-1 rounded-[8px] hover:bg-slate-200  text-slate-500  focus:outline-none focus:ring-2 focus:"
                           title="Rename"
                         >
                           <Pencil className="w-3 h-3" />
                         </button>
                         <button
                           onClick={(e) => { e.stopPropagation(); deleteConversation(c.id); }}
-                          className="p-1 rounded hover:bg-rose-100 text-slate-500 hover:text-rose-600"
+                          className="p-1 rounded-[8px] hover:bg-rose-100  text-slate-500  hover:text-rose-600 focus:outline-none focus:ring-2 focus:"
                           title="Delete"
                         >
                           <Trash2 className="w-3 h-3" />
@@ -1012,6 +1057,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                     </>
                   )}
                 </div>
+                </motion.div>
               );
             })}
           </div>
@@ -1040,12 +1086,14 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
           {/* Messages */}
           <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
             {messages.length === 0 && (
-              <div className="h-full flex flex-col items-center justify-center text-center space-y-3 py-10">
-                <div className="w-12 h-12 rounded-2xl bg-teal-50 border border-[#0f8b8d]/20 flex items-center justify-center">
-                  <Bot className="w-6 h-6 text-[#0f8b8d]" />
+              <div className="relative h-full flex flex-col items-center justify-center text-center space-y-3 py-10 overflow-hidden rounded-[20px] border border-slate-200  bg-white ">
+                <div aria-hidden className="pointer-events-none absolute inset-0 opacity-[0.10] dark:opacity-[0.12]" />
+                <div aria-hidden className={`pointer-events-none absolute inset-0 opacity-[0.05] dark:opacity-[0.10] [mask-image:radial-gradient(circle_at_center,transparent_20%,black_120%)] ${reduceMotion ? 'hidden' : ''}`} />
+                <div className="relative w-12 h-12 rounded-[16px] bg-teal-50  border   flex items-center justify-center ">
+                  <Bot className="w-6 h-6  " />
                 </div>
-                <h3 className="text-sm font-bold text-slate-800">Ask anything clinical</h3>
-                <p className="text-xs text-slate-500 max-w-sm leading-relaxed">
+                <h3 className="relative font-['Cormorant'] text-xl font-semibold text-slate-900 ">Ask anything clinical</h3>
+                <p className="relative text-xs text-slate-600  max-w-sm leading-relaxed">
                   Replies are generated live by your connected provider ({provider ? `currently ${provider}` : 'none connected'})
                   with the last 10 turns of this conversation as context. Attach an exam question with the chip above, attach
                   a real page from your PDF library with the paperclip, or start with a quick prompt below.
@@ -1057,11 +1105,11 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
               <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div className={`group max-w-[85%] ${msg.role === 'user' ? 'items-end' : 'items-start'} flex flex-col gap-1`}>
                   <div
-                    className={`px-4 py-3 rounded-2xl text-xs leading-relaxed ${msg.role === 'user'
-                      ? 'bg-[#001432] text-white rounded-tr-sm'
+                    className={`px-4 py-3 rounded-[20px] text-xs leading-relaxed ${msg.role === 'user'
+                      ? 'bg-white  border   text-slate-900  rounded-tr-sm'
                       : msg.isError
-                        ? 'bg-rose-50 border border-rose-300 text-rose-900 rounded-tl-sm'
-                        : 'bg-slate-50 border border-slate-200 text-slate-800 rounded-tl-sm'}`}
+                        ? 'bg-rose-50  border  text-rose-900 dark:text-rose-100 rounded-tl-sm ring-4 ring-[rgba(255,95,109,0.15)]'
+                        : 'bg-white  border border-slate-200  text-slate-900  rounded-tl-sm'}`}
                   >
                     {msg.role === 'assistant' && !msg.isError && msg.citations && msg.citations.length > 0 && (
                       <div className="flex flex-wrap items-center gap-1.5 pb-2 mb-1.5 border-b border-slate-200/70">
@@ -1108,21 +1156,30 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                     )}
 
                     {msg.isError && (
-                      <button onClick={() => onNavigate('settings')} className="mt-2 text-rose-700 hover:text-rose-900 underline font-semibold">
-                        Open Settings → AI Subscription Hub
-                      </button>
+                      <div className="mt-2 flex flex-wrap items-center gap-3">
+                        <button
+                          onClick={() => regenerate(index)}
+                          disabled={loading}
+                          className="inline-flex items-center gap-1.5 rounded-[12px] border  bg-white  px-3 py-1.5 text-[11px] font-medium   hover:-translate-y-0.5 disabled:opacity-40 transition-transform"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" /> Retry
+                        </button>
+                        <button onClick={() => onNavigate('settings')} className="text-rose-700  hover:text-rose-900 dark:hover:text-white underline font-semibold">
+                          Open Settings → AI Subscription Hub
+                        </button>
+                      </div>
                     )}
                   </div>
 
                   {/* reasoning steps / pearl from the server (rendered only when present) */}
                   {msg.role === 'assistant' && !msg.isError && msg.reasoningSteps && msg.reasoningSteps.length > 0 && (
-                    <div className="w-full p-3 bg-teal-50/60 border border-[#0f8b8d]/20 rounded-xl text-[11px] text-slate-700 space-y-1.5">
-                      <div className="font-bold uppercase tracking-wider text-[#0f8b8d] flex items-center gap-1.5">
+                    <div className="w-full p-3 bg-teal-50/60 border  rounded-xl text-[11px] text-slate-700 space-y-1.5">
+                      <div className="font-medium uppercase tracking-wider  flex items-center gap-1.5">
                         <Layers className="w-3 h-3" /> Reasoning trace
                       </div>
                       {msg.reasoningSteps.map((s, i) => (
                         <div key={i} className="flex gap-2">
-                          <span className="font-bold text-slate-800 shrink-0">{s.step}:</span>
+                          <span className="font-medium text-slate-800 shrink-0">{s.step}:</span>
                           <span className="leading-relaxed">{s.detail}</span>
                         </div>
                       ))}
@@ -1130,10 +1187,10 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                   )}
 
                   {msg.role === 'assistant' && !msg.isError && msg.pearl && (
-                    <div className="w-full p-3 bg-[#001432] text-white rounded-xl text-[11px] flex gap-2">
+                    <div className="w-full p-3  text-white rounded-xl text-[11px] flex gap-2">
                       <Brain className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
                       <span className="leading-relaxed">
-                        <span className="font-bold text-amber-400 uppercase tracking-wider mr-1">Board pearl:</span>
+                        <span className="font-medium text-amber-400 uppercase tracking-wider mr-1">Board pearl:</span>
                         {msg.pearl}
                       </span>
                     </div>
@@ -1174,7 +1231,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                         <button
                           key={i}
                           onClick={() => send(f)}
-                          className="text-[11px] px-3 py-1.5 rounded-full bg-white border border-slate-200 hover:border-[#0f8b8d]/40 hover:bg-teal-50 text-slate-700"
+                          className="text-[11px] px-3 py-1.5 rounded-full bg-white border border-slate-200  hover:bg-teal-50 text-slate-700"
                         >
                           {f}
                         </button>
@@ -1189,7 +1246,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
             {loading && (
               <div className="flex justify-start">
                 <div className="px-4 py-3 rounded-2xl rounded-tl-sm bg-slate-50 border border-slate-200 flex items-center gap-2">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#0f8b8d]" />
+                  <Loader2 className="w-3.5 h-3.5 animate-spin " />
                   <span className="text-[11px] text-slate-500">
                     Synthesising with {provider ? `${provider} · ${model || getEffectiveModel(provider)}` : 'AI'}…
                   </span>
@@ -1207,7 +1264,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                   key={p}
                   onClick={() => send(p)}
                   disabled={!provider || connectedCount === 0}
-                  className="text-[11px] px-3 py-1.5 rounded-full bg-slate-100 hover:bg-teal-50 border border-slate-200 text-slate-700 disabled:opacity-40"
+                  className="text-[11px] px-3 py-1.5 rounded-[12px]   border border-slate-900/70   font-medium hover:-translate-y-0.5 transition-transform disabled:opacity-40 [clip-path:polygon(0%_15%,8%_0%,20%_12%,32%_0%,45%_10%,58%_0%,72%_10%,86%_0%,100%_14%,92%_30%,100%_48%,90%_62%,100%_80%,84%_92%,70%_84%,56%_100%,42%_88%,28%_100%,14%_88%,0%_100%,8%_78%,0%_60%,10%_44%)]"
                 >
                   {p}
                 </button>
@@ -1226,10 +1283,10 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                     return (
                       <span
                         key={a.id}
-                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[10px] ${
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[14px] border text-[10px] transition-transform hover:-${
                           big
-                            ? 'bg-amber-50 border-amber-300 text-amber-800'
-                            : 'bg-teal-50 border-[#0f8b8d]/30 text-[#00696b]'
+                            ? 'bg-amber-50   text-amber-800  ring-4 ring-[rgba(255,95,109,0.15)]'
+                            : 'bg-teal-50     '
                         }`}
                         title={a.tokens ? `Approx ${formatTokens(a.tokens)} of context` : undefined}
                       >
@@ -1240,7 +1297,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                         <button
                           onClick={() => removeAttachment(a.id)}
                           title="Remove this source from context"
-                          className="text-[#0f8b8d] hover:text-rose-600 shrink-0"
+                          className=" hover:text-rose-600 shrink-0"
                         >
                           <X className="w-3 h-3" />
                         </button>
@@ -1253,8 +1310,8 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
               {attachOpen && (
                 <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
                   <div className="flex items-center justify-between">
-                    <div className="text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
-                      <BookOpen className="w-3.5 h-3.5 text-[#0f8b8d]" />
+                    <div className="text-[11px] font-medium text-slate-700 flex items-center gap-1.5">
+                      <BookOpen className="w-3.5 h-3.5 " />
                       Attach pages from your PDF library
                     </div>
                     <button
@@ -1286,7 +1343,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                           setAttachEndPage('1');
                           setAttachError(null);
                         }}
-                        className="max-w-[300px] flex-1 min-w-[160px] text-[11px] px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                        className="max-w-[300px] flex-1 min-w-[160px] text-[11px] px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:"
                       >
                         {attachDocs.map((d) => (
                           <option key={d.id} value={d.id}>
@@ -1308,7 +1365,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                             if (Number.isFinite(s) && s > Number(attachEndPage || 1)) setAttachEndPage(String(s));
                             setAttachError(null);
                           }}
-                          className="w-16 text-[11px] font-mono px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                          className="w-16 text-[11px] font-mono px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:"
                         />
                         <span>to</span>
                         <input
@@ -1318,14 +1375,14 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                           value={attachEndPage}
                           onChange={(e) => { setAttachEndPage(e.target.value); setAttachError(null); }}
                           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); attachSelectedPage(); } }}
-                          className="w-16 text-[11px] font-mono px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                          className="w-16 text-[11px] font-mono px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:"
                         />
                         <span>of {selectedAttachDoc?.numPages ?? '?'}</span>
                       </div>
                       <button
                         onClick={attachSelectedPage}
                         disabled={attachBusy}
-                        className="px-3 py-1.5 rounded-lg bg-[#0f8b8d] hover:bg-[#00696b] text-white text-[11px] font-bold disabled:opacity-40 inline-flex items-center gap-1.5"
+                        className="px-3 py-1.5 rounded-lg   text-white text-[11px] font-medium disabled:opacity-40 inline-flex items-center gap-1.5"
                       >
                         {attachBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Paperclip className="w-3.5 h-3.5" />}
                         {attachBusy ? 'Attaching…' : 'Attach'}
@@ -1347,9 +1404,9 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                       const advice = adviseAttachment('x'.repeat(n * 3_000));
                       return (
                         <div className="text-[10px] text-slate-500 leading-relaxed">
-                          <span className="font-mono font-bold text-slate-600">{n}</span> page{n === 1 ? '' : 's'}
+                          <span className="font-mono font-medium text-slate-600">{n}</span> page{n === 1 ? '' : 's'}
                           {' · approx '}
-                          <span className="font-mono font-bold text-slate-600">{advice.label}</span>
+                          <span className="font-mono font-medium text-slate-600">{advice.label}</span>
                           {n > 1 && <span className="opacity-70"> (varies with text density)</span>}
                           {advice.warning && (
                             <span className="block mt-1 text-amber-700">{advice.warning}</span>
@@ -1378,7 +1435,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
           )}
 
           {/* Sticky composer */}
-          <div className="p-3 border-t border-slate-100 flex items-end gap-2">
+          <div className="sticky bottom-0 z-10 p-3 border-t border-slate-100  bg-white  flex items-end gap-2 rounded-b-2xl">
             <button
               onClick={() => {
                 const next = !imageEnabled;
@@ -1389,10 +1446,10 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                 ? 'Illustrations ON — a verified clinical image may be added to explanations. Click to turn off.'
                 : 'Illustrations OFF — explanations will be text only. Click to turn on.'}
               aria-pressed={imageEnabled}
-              className={`p-2.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 shrink-0 ${
+              className={`p-2.5 rounded-[14px] border text-xs font-medium flex items-center gap-1.5 shrink-0 transition-transform hover:-translate-y-0.5 ${
                 imageEnabled
-                  ? 'bg-teal-50 border-[#0f8b8d]/40 text-[#00696b]'
-                  : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-[#00696b] hover:border-[#0f8b8d]/40'
+                  ? 'bg-teal-50     '
+                  : 'bg-slate-50  border-slate-200  text-slate-400   '
               }`}
             >
               <ImageIcon className="w-4 h-4" />
@@ -1402,10 +1459,10 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
               disabled={loading}
               title={recording ? 'Stop recording and transcribe' : 'Speak your question (transcribed on this device)'}
               aria-pressed={recording}
-              className={`p-2.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 shrink-0 disabled:opacity-40 ${
+              className={`p-2.5 rounded-[14px] border text-xs font-medium flex items-center gap-1.5 shrink-0 disabled:opacity-40 transition-transform hover:-translate-y-0.5 ${
                 recording
-                  ? 'bg-rose-50 border-rose-300 text-rose-700 animate-pulse'
-                  : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-[#00696b] hover:border-[#0f8b8d]/40'
+                  ? 'bg-rose-50  border-rose-300  text-rose-700  animate-pulse'
+                  : 'bg-slate-50  border-slate-200  text-slate-500   '
               }`}
             >
               {recording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
@@ -1413,14 +1470,14 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
             <button
               onClick={openAttachPanel}
               title="Attach a page from your PDF library as context"
-              className={`p-2.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 shrink-0 ${
+              className={`p-2.5 rounded-[14px] border text-xs font-medium flex items-center gap-1.5 shrink-0 transition-transform hover:-translate-y-0.5 ${
                 attachOpen || attachments.length
-                  ? 'bg-teal-50 border-[#0f8b8d]/40 text-[#00696b]'
-                  : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-[#00696b] hover:border-[#0f8b8d]/40'
+                  ? 'bg-teal-50     '
+                  : 'bg-slate-50  border-slate-200  text-slate-500   '
               }`}
             >
               <Paperclip className="w-4 h-4" />
-              {attachments.length > 0 && <span className="font-mono text-[10px]">{attachments.length}</span>}
+              {attachments.length > 0 && <span className="font-[''] text-[12px]">{attachments.length}</span>}
             </button>
             <textarea
               ref={textareaRef}
@@ -1438,12 +1495,12 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                 : attachments.length > 0
                   ? `Ask about page ${attachments[0].pageNumber} of ${attachments[0].docTitle.slice(0, 40)}… (Enter to send)`
                   : contextQuestion ? 'Ask about the attached question… (Enter to send, Shift+Enter for a new line)' : 'Type a clinical question… (Enter to send, Shift+Enter for a new line)'}
-              className="flex-1 resize-none text-xs text-slate-800 px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] placeholder-slate-400"
+              className="flex-1 resize-none text-xs font-['M_PLUS_Rounded_1c'] text-slate-900  px-3.5 py-2.5 rounded-[16px] bg-slate-50  border border-slate-200  focus:outline-none focus: focus:ring-4 focus:ring-[rgba(142,197,252,0.15)] placeholder-slate-400 dark:placeholder-[#8B8580]"
             />
             <button
               onClick={() => send(input)}
               disabled={loading || !input.trim() || connectedCount === 0}
-              className="px-4 py-2.5 rounded-xl bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 text-white text-xs font-bold flex items-center gap-2 shrink-0"
+              className="px-4 py-2.5 rounded-[14px] hover:-translate-y-[3px] hover:scale-[1.03] disabled:opacity-40  text-xs font-medium flex items-center gap-2 shrink-0 transition-transform"
             >
               {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
               Send
@@ -1459,7 +1516,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                   key={action.label}
                   onClick={() => send(action.prompt)}
                   disabled={loading || connectedCount === 0}
-                  className="px-2.5 py-1.5 rounded-full border border-slate-200 bg-white text-[11px] font-semibold text-slate-600 hover:text-[#00696b] hover:border-[#0f8b8d]/40 disabled:opacity-40"
+                  className="px-2.5 py-1.5 rounded-full border border-slate-200 bg-white text-[11px] font-semibold text-slate-600   disabled:opacity-40"
                 >
                   {action.label}
                 </button>

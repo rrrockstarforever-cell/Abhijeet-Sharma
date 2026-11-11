@@ -1,11 +1,11 @@
 // Why does a topic get few planned facts? Plans one topic and prints, per subtopic, what the model returned and why facts were dropped.
-//   node --import tsx tools/quality/plan-debug.mjs "urea cycle and its disorders" vyce
+//   node --import tsx tools/quality/plan-debug.mjs "urea cycle and its disorders" deeprelay
 const BASE = 'http://localhost:3100';
 const store = new Map();
 const mk = (m) => ({ getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); }, removeItem: (k) => { m.delete(k); }, key: (i) => [...m.keys()][i] ?? null, get length() { return m.size; } });
 globalThis.localStorage = mk(store);
 globalThis.sessionStorage = mk(new Map());
-const provider = process.argv[3] || 'vyce';
+const provider = process.argv[3] || 'deeprelay';
 store.set('ai.activeProvider', provider);
 store.set('ai.model.opencode', 'deepseek-v4.1-flash');
 const realFetch = globalThis.fetch.bind(globalThis);

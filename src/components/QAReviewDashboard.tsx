@@ -8,14 +8,14 @@ import { runIntegrityScan, listQuestions, listBatches, type IntegrityIssue } fro
 import { BenchmarkPanel } from './BenchmarkPanel.tsx';
 
 const statusColor: Record<string, string> = {
-  APPROVED: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-  PUBLISHED: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-  REVISION_REQUIRED: 'bg-amber-50 text-amber-700 border-amber-200',
-  HUMAN_REVIEW_REQUIRED: 'bg-rose-50 text-rose-700 border-rose-200',
-  REJECTED: 'bg-slate-100 text-slate-600 border-slate-200',
-  GENERATED: 'bg-sky-50 text-sky-700 border-sky-200',
-  REVIEWING: 'bg-indigo-50 text-indigo-700 border-indigo-200',
-  SUSPENDED: 'bg-slate-100 text-slate-500 border-slate-200',
+  APPROVED: 'border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200',
+  PUBLISHED: 'border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200',
+  REVISION_REQUIRED: 'border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-200',
+  HUMAN_REVIEW_REQUIRED: 'border-rose-500/50 bg-rose-500/10 text-rose-700 dark:text-rose-200',
+  REJECTED: 'border-slate-500/40 bg-slate-500/10 text-slate-700 dark:text-slate-200',
+  GENERATED: 'border-sky-500/50 bg-sky-500/10 text-sky-700 dark:text-sky-200',
+  REVIEWING: 'border-indigo-500/50 bg-indigo-500/10 text-indigo-700 dark:text-indigo-200',
+  SUSPENDED: 'border-slate-500/40 bg-slate-500/10 text-slate-600 dark:text-slate-300',
 };
 
 export const QAReviewDashboard: React.FC = () => {
@@ -78,128 +78,178 @@ export const QAReviewDashboard: React.FC = () => {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
-      <div className="bg-[#001432] rounded-2xl p-6 text-white border border-[#13294b]">
-        <div className="flex items-center gap-2 text-[#8ff3f4] text-xs font-semibold uppercase tracking-wider mb-1">
-          <ShieldCheck className="w-4 h-4" /> Quality Assurance
-        </div>
-        <h1 className="text-2xl font-bold">Question Verification Pipeline</h1>
-        <p className="text-slate-300 text-sm mt-1 max-w-2xl">
-          Every generated question passes deterministic validation before it can enter the bank. Clinical
-          solving, evidence verification, adversarial audit and refinement run as independent LLM stages.
-        </p>
-        <div className="flex flex-wrap gap-3 mt-4">
-          <Stat label="Generated" value={counts.total} />
-          <Stat label="Approved" value={counts.approved} tone="good" />
-          <Stat label="Awaiting review" value={counts.review} tone="warn" />
-          <Stat label="Rejected" value={counts.rejected} tone="bad" />
+      <div className="relative overflow-hidden rounded-[28px] border p-6    ">
+        <div className="pointer-events-none absolute inset-0 opacity-[0.10]" aria-hidden="true" />
+        <div className="pointer-events-none absolute inset-0 opacity-[0.05] motion-reduce:hidden" aria-hidden="true" />
+        <div className="relative">
+          <div className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-[''] tracking-wide    ">
+            <ShieldCheck className="h-4 w-4" /> QA PIPELINE
+          </div>
+          <h1 className="mt-3 font-['Cormorant'] text-3xl font-medium leading-tight md:text-4xl">Question Verification Pipeline</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-7  ">
+            Every generated question passes deterministic validation before it can enter the bank. Clinical
+            solving, evidence verification, adversarial audit and refinement run as independent LLM stages.
+          </p>
+          <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <Stat label="Generated" value={counts.total} />
+            <Stat label="Approved" value={counts.approved} tone="good" />
+            <Stat label="Awaiting review" value={counts.review} tone="warn" />
+            <Stat label="Rejected" value={counts.rejected} tone="bad" />
+          </div>
         </div>
       </div>
 
-      {note && <div className="rounded-xl border border-teal-200 bg-teal-50 px-4 py-2 text-xs text-teal-800">{note}</div>}
-
-      {Object.keys(defectCounts).length > 0 && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-4">
-          <div className="text-xs font-bold text-slate-700 mb-2">Most common defect categories</div>
-          <div className="flex flex-wrap gap-2">
-            {Object.entries(defectCounts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([cat, n]) => (
-              <span key={cat} className="text-[10px] font-semibold px-2 py-1 rounded-full bg-slate-100 text-slate-600">{cat} · {n}</span>
-            ))}
+      {note && (
+        <div className="relative overflow-hidden rounded-[20px] border px-4 py-3 text-sm    ">
+          <div className="pointer-events-none absolute inset-0 opacity-[0.08]" aria-hidden="true" />
+          <div className="relative flex items-start gap-2">
+            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0  " />
+            <span>{note}</span>
           </div>
         </div>
       )}
 
-      <BenchmarkPanel />
-
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm">
-        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
-          <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-            <FileQuestion className="w-4 h-4 text-[#0f8b8d]" /> Review queue
-          </h2>
-          <button onClick={refresh} className="text-xs font-semibold text-[#0f8b8d] hover:underline">Refresh</button>
-        </div>
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="text-sm font-bold text-slate-900">Question Bank Storage</div>
-          <div className="text-[11px] text-slate-500">
-            {storedCount} persisted question{storedCount === 1 ? '' : 's'} · {batchCount} generation batch{batchCount === 1 ? '' : 'es'}.
-            Every generated question is saved automatically with exam, bank, subject, topic and subtopic before launch.
+      <div className="relative overflow-hidden rounded-[24px] border   p-5 shadow-sm ">
+        <div className="pointer-events-none absolute inset-0 opacity-[0.10]" aria-hidden="true" />
+        <div className="relative">
+          <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+            <div>
+              <div className="text-[10px] font-medium uppercase tracking-[0.18em]  ">Quality signals</div>
+              <h2 className="font-['Cormorant'] text-xl font-medium  ">Diagnostics</h2>
+            </div>
+            <span className="text-[11px]  ">Defects and integrity checks</span>
           </div>
-        </div>
-        <button
-          onClick={runIntegrity}
-          disabled={integrityBusy}
-          className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 disabled:opacity-40 flex items-center gap-1"
-        >
-          {integrityBusy ? <RefreshCw className="w-3 h-3 animate-spin" /> : <ShieldCheck className="w-3 h-3" />}
-          Run integrity scan
-        </button>
-      </div>
-
-      {integrity && (
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
-          <div className="text-sm font-bold text-slate-900 mb-2">
-            Integrity scan: {integrity.length === 0 ? 'clean' : `${integrity.length} issue${integrity.length === 1 ? '' : 's'}`}
+          <div className="rounded-[16px] border   p-3 ">
+            <div className="mb-2 text-xs font-medium  ">Most common defect categories</div>
+            {Object.keys(defectCounts).length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(defectCounts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([cat, n]) => (
+                  <span key={cat} className="inline-flex items-center rounded-full border   px-2.5 py-1 text-[10px] font-semibold   ">
+                    {cat} · {n}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="text-xs  ">No defect categories recorded yet.</div>
+            )}
           </div>
-          {integrity.length === 0 ? (
-            <div className="text-xs text-emerald-700">No issues found.</div>
-          ) : (
-            <div className="space-y-1">
-              {integrity.map((iss, i) => (
-                <div key={i} className="text-xs flex items-start gap-2">
-                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${iss.severity === 'error' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>{iss.severity}</span>
-                  <span className="font-mono text-slate-400 text-[10px]">{iss.questionId}</span>
-                  <span className="text-slate-600">{iss.issue}</span>
+          {integrity && (
+            <div className="mt-3 rounded-[16px] border   p-3 ">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-medium  ">Integrity scan</div>
+                <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide ${integrity.length === 0 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200' : 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-200'}`}>
+                  {integrity.length === 0 ? <CheckCircle2 className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
+                  {integrity.length === 0 ? 'Clean' : `${integrity.length} issue${integrity.length === 1 ? '' : 's'}`}
+                </span>
+              </div>
+              {integrity.length === 0 ? (
+                <div className="text-xs text-emerald-700 dark:text-emerald-200">No issues found.</div>
+              ) : (
+                <div className="space-y-1.5">
+                  {integrity.map((iss, i) => (
+                    <div key={i} className="flex items-start gap-2 rounded-lg border   px-2 py-1.5 ">
+                      <span className={`mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-medium uppercase ${iss.severity === 'error' ? 'border-rose-500/50 bg-rose-500/10 text-rose-700 dark:text-rose-200' : 'border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-200'}`}>
+                        {iss.severity === 'error' ? <XCircle className="h-2.5 w-2.5" /> : <AlertTriangle className="h-2.5 w-2.5" />}
+                        {iss.severity}
+                      </span>
+                      <span className="font-mono text-[10px]  ">{iss.questionId}</span>
+                      <span className="text-xs  ">{iss.issue}</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
             </div>
           )}
         </div>
-      )}
+      </div>
 
-      {bank.length === 0 ? (
-          <div className="p-10 text-center text-slate-400 text-sm">
-            No generated questions yet. Build a module in the Practice Builder — it will be validated here automatically.
+      <div className="rounded-[24px] border   p-4 shadow-sm ">
+        <BenchmarkPanel />
+      </div>
+
+      <div className="relative overflow-hidden rounded-[24px] border   p-4 shadow-sm ">
+        <div className="pointer-events-none absolute inset-0 opacity-[0.08]" aria-hidden="true" />
+        <div className="relative flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-medium  ">
+              <FileQuestion className="h-4 w-4" /> Question Bank Storage
+            </div>
+            <div className="mt-1 text-[11px] leading-5  ">
+              {storedCount} persisted question{storedCount === 1 ? '' : 's'} · {batchCount} generation batch{batchCount === 1 ? '' : 'es'}.
+              Every generated question is saved automatically with exam, bank, subject, topic and subtopic before launch.
+            </div>
+          </div>
+          <button
+            onClick={runIntegrity}
+            disabled={integrityBusy}
+            className="flex min-h-[44px] items-center gap-1 rounded-2xl border px-4 py-2 text-xs font-medium  transition hover:-translate-y-0.5  focus-visible:outline-none focus-visible:ring-2 focus-visible: disabled:opacity-40  "
+          >
+            {integrityBusy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+            Run integrity scan
+          </button>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-[24px] border   shadow-sm ">
+        <div className="flex items-center justify-between gap-3 border-b  px-4 py-3">
+          <h2 className="flex items-center gap-2 text-sm font-medium  ">
+            <FileQuestion className="h-4 w-4  " /> Review queue
+          </h2>
+          <button onClick={refresh} className="flex min-h-[36px] items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-medium  transition   focus-visible:outline-none focus-visible:ring-2 focus-visible:  ">
+            <RefreshCw className="h-3.5 w-3.5" /> Refresh
+          </button>
+        </div>
+        {bank.length === 0 ? (
+          <div className="relative m-4 overflow-hidden rounded-[20px] border p-8 text-center  ">
+            <div className="pointer-events-none absolute inset-0 opacity-[0.08]" aria-hidden="true" />
+            <div className="relative">
+              <FileQuestion className="mx-auto h-8 w-8  " />
+              <div className="mt-2 font-['Cormorant'] text-xl font-medium  ">No generated questions yet</div>
+              <p className="mx-auto mt-1 max-w-md text-sm leading-6  ">Build a module in the Practice Builder — it will be validated here automatically.</p>
+            </div>
           </div>
         ) : (
-          <div className="divide-y divide-slate-100">
+          <div className="divide-y ">
             {bank.slice().reverse().map((b) => (
-              <div key={b.id} className="px-4 py-3">
-                <div className="flex items-start justify-between gap-3">
+              <div key={b.id} className="group px-4 py-4 transition-transform duration-200 hover:-focus-within:-">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${statusColor[b.status] ?? 'bg-slate-100 text-slate-600 border-slate-200'}`}>
-                        {b.status}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide ${statusColor[b.status] ?? 'border-slate-500/40 bg-slate-500/10 text-slate-700 dark:text-slate-200'}`}>
+                        <ShieldCheck className="h-3 w-3" /> {b.status}
                       </span>
-                      <span className="text-[10px] font-mono text-slate-400">{b.subject} · {b.subtopic}</span>
-                      <span className="text-[10px] font-mono text-slate-400">{b.review.adjudication.totalScore}/100</span>
+                      <span className="text-[10px] font-mono  ">{b.subject} · {b.subtopic}</span>
+                      <span className="rounded-full border   px-2 py-0.5 font-[''] text-sm   ">{b.review.adjudication.totalScore}/100</span>
                     </div>
-                    <div className="text-xs text-slate-800 mt-1 line-clamp-2">{b.question.stem}</div>
+                    <div className="mt-2 text-sm leading-6  line-clamp-2 ">{b.question.stem}</div>
                     {b.review.humanReviewRequired && (
-                      <div className="text-[10px] text-rose-600 mt-1 flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> Human review required</div>
+                      <div className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-rose-500/60 bg-rose-500/10 px-3 py-1 text-[10px] font-medium uppercase tracking-wide text-rose-700 dark:border-rose-300/60 dark:text-rose-200">
+                        <AlertTriangle className="h-3.5 w-3.5" /> Human review required
+                      </div>
                     )}
                   </div>
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex shrink-0 items-center gap-2">
                     <button
                       onClick={() => setExpanded(expanded === b.id ? null : b.id)}
-                      className="text-xs font-semibold text-slate-600 hover:text-[#0f8b8d]"
+                      className="min-h-[36px] rounded-xl border px-3 py-1.5 text-xs font-medium  transition hover:-translate-y-0.5  focus-visible:outline-none focus-visible:ring-2 focus-visible:  "
                     >
                       {expanded === b.id ? 'Hide' : 'Findings'}
                     </button>
                     <button
                       onClick={() => runFullReview(b.id)}
                       disabled={busy === b.id}
-                      className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 disabled:opacity-40 flex items-center gap-1"
+                      className="flex min-h-[36px] items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-medium  transition hover:-translate-y-0.5 hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible: disabled:opacity-40"
                     >
-                      <RefreshCw className={`w-3 h-3 ${busy === b.id ? 'animate-spin' : ''}`} />
+                      <RefreshCw className={`h-3 w-3 ${busy === b.id ? 'animate-spin' : ''}`} />
                       {busy === b.id ? 'Reviewing…' : 'Full review'}
                     </button>
                   </div>
                 </div>
                 {expanded === b.id && (
-                  <div className="mt-3 space-y-2 text-xs">
-                    <div className="font-bold text-slate-700">Findings</div>
+                  <div className="mt-4 space-y-2 rounded-[18px] border p-4 text-xs shadow-inner ">
+                    <div className="mb-2 font-['Cormorant'] text-lg font-medium  ">Findings</div>
                     {b.review.structural.findings.length === 0 && (b.review.audit?.findings.length ?? 0) === 0 && (
-                      <div className="text-slate-400">No findings.</div>
+                      <div className=" ">No findings.</div>
                     )}
                     {b.review.structural.findings.map((f, i) => (
                       <Finding key={`s${i}`} severity={f.severity} text={`[${f.category}] ${f.message}`} />
@@ -213,11 +263,17 @@ export const QAReviewDashboard: React.FC = () => {
                     {b.review.solver && !b.review.solver.agreed && (
                       <Finding severity="error" text={`Solver selected ${b.review.solver.selectedOption} but key is ${b.question.correctOption}`} />
                     )}
-                    <div className="text-slate-500">{b.review.adjudication.reason}</div>
-                    <div className="flex items-center gap-2 pt-1">
-                      <button onClick={() => { updateReviewStatus(b.id, 'APPROVED'); refresh(); }} className="text-[10px] font-bold px-2 py-1 rounded bg-emerald-100 text-emerald-800">Approve (override)</button>
-                      <button onClick={() => { updateReviewStatus(b.id, 'REJECTED'); refresh(); }} className="text-[10px] font-bold px-2 py-1 rounded bg-rose-100 text-rose-700">Reject</button>
-                      <button onClick={() => { updateReviewStatus(b.id, 'SUSPENDED'); refresh(); }} className="text-[10px] font-bold px-2 py-1 rounded bg-slate-200 text-slate-700">Suspend</button>
+                    <div className="mt-2  ">{b.review.adjudication.reason}</div>
+                    <div className="mt-3 flex flex-wrap items-center gap-2 pt-1">
+                      <button onClick={() => { updateReviewStatus(b.id, 'APPROVED'); refresh(); }} className="inline-flex items-center gap-1 rounded-lg border border-emerald-600/40 bg-emerald-500/15 px-2.5 py-1.5 text-[10px] font-medium text-emerald-800 transition hover:-translate-y-0.5 dark:text-emerald-200">
+                        <CheckCircle2 className="h-3 w-3" /> Approve (override)
+                      </button>
+                      <button onClick={() => { updateReviewStatus(b.id, 'REJECTED'); refresh(); }} className="inline-flex items-center gap-1 rounded-lg border border-rose-600/40 bg-rose-500/15 px-2.5 py-1.5 text-[10px] font-medium text-rose-700 transition hover:-translate-y-0.5 dark:text-rose-200">
+                        <XCircle className="h-3 w-3" /> Reject
+                      </button>
+                      <button onClick={() => { updateReviewStatus(b.id, 'SUSPENDED'); refresh(); }} className="inline-flex items-center gap-1 rounded-lg border border-slate-400/50 bg-slate-500/10 px-2.5 py-1.5 text-[10px] font-medium text-slate-700 transition hover:-translate-y-0.5 dark:text-slate-200">
+                        Suspend
+                      </button>
                     </div>
                   </div>
                 )}
@@ -231,20 +287,21 @@ export const QAReviewDashboard: React.FC = () => {
 };
 
 const Stat: React.FC<{ label: string; value: number; tone?: 'good' | 'warn' | 'bad' }> = ({ label, value, tone }) => (
-  <div className={`px-4 py-2 rounded-xl border ${tone === 'good' ? 'bg-emerald-500/10 border-emerald-400/30' : tone === 'warn' ? 'bg-amber-500/10 border-amber-400/30' : tone === 'bad' ? 'bg-rose-500/10 border-rose-400/30' : 'bg-white/5 border-white/10'}`}>
-    <div className="text-2xl font-bold">{value}</div>
-    <div className="text-[11px] text-slate-300">{label}</div>
+  <div className="relative overflow-hidden rounded-[20px] border px-4 py-3  ">
+    <div className="pointer-events-none absolute -right-3 -top-3 h-12 w-12 rounded-full border opacity-20" aria-hidden="true" />
+    <div className={`font-[''] text-3xl leading-none ${tone === 'good' ? 'text-emerald-600 dark:text-emerald-300' : tone === 'warn' ? 'text-amber-600 dark:text-amber-300' : tone === 'bad' ? 'text-rose-600 dark:text-rose-300' : ' '}`}>{value}</div>
+    <div className="mt-1 text-[11px] font-semibold uppercase tracking-wide  ">{label}</div>
   </div>
 );
 
 const Finding: React.FC<{ severity: string; text: string }> = ({ severity, text }) => (
-  <div className="flex items-start gap-1.5">
+  <div className="flex items-start gap-2 rounded-lg border   px-2.5 py-2 text-xs ">
     {severity === 'critical' || severity === 'error'
-      ? <XCircle className="w-3 h-3 text-rose-500 mt-0.5 shrink-0" />
+      ? <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-500 dark:text-rose-300" />
       : severity === 'warning'
-        ? <AlertTriangle className="w-3 h-3 text-amber-500 mt-0.5 shrink-0" />
-        : <CheckCircle2 className="w-3 h-3 text-emerald-500 mt-0.5 shrink-0" />}
-    <span className={severity === 'critical' || severity === 'error' ? 'text-rose-700' : severity === 'warning' ? 'text-amber-700' : 'text-slate-600'}>{text}</span>
+        ? <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500 dark:text-amber-300" />
+        : <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500 dark:text-emerald-300" />}
+    <span className={severity === 'critical' || severity === 'error' ? 'text-rose-700 dark:text-rose-200' : severity === 'warning' ? 'text-amber-700 dark:text-amber-200' : ' '}>{text}</span>
   </div>
 );
 

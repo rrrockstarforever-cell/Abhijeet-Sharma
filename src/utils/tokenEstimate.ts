@@ -54,7 +54,6 @@ export function adviseAttachment(text: string): AttachAdvice {
     label,
     scale: 'huge',
     warning:
-      'Very large attachment. On the free NVIDIA tier this may take several minutes, time out, ' +
-      'or be rejected under load. Consider a smaller page range.',
+ 'Very large attachment. This may take several minutes or time out.',
   };
 }

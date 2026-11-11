@@ -53,9 +53,9 @@ export const DUPLICATE_SIMILARITY = 0.6;
 
 const LETTERS = ['A', 'B', 'C', 'D', 'E'];
 const STOPWORDS = new Set([
-  'the', 'and', 'for', 'with', 'was', 'were', 'that', 'this', 'which', 'what', 'following', 'statement',
-  'statements', 'correct', 'regarding', 'is', 'are', 'of', 'in', 'a', 'an', 'to', 'on', 'at', 'by', 'from',
-  'as', 'be', 'has', 'have', 'had', 'about', 'most', 'likely', 'patient', 'year', 'old', 'only',
+ 'the', 'and', 'for', 'with', 'was', 'were', 'that', 'this', 'which', 'what', 'following', 'statement',
+ 'statements', 'correct', 'regarding', 'is', 'are', 'of', 'in', 'a', 'an', 'to', 'on', 'at', 'by', 'from',
+ 'as', 'be', 'has', 'have', 'had', 'about', 'most', 'likely', 'patient', 'year', 'old', 'only',
 ]);
 
 export function toBenchItem(q: ClinicalQuestion): BenchItem {
@@ -172,13 +172,13 @@ export function compareSets(generated: BenchItem[], reference: BenchItem[]): Ben
 
   const stemDrift = r.medianStemWords > 0 ? Math.abs(g.medianStemWords - r.medianStemWords) / r.medianStemWords : 0;
   add('Median stem length (words)', fmt(g.medianStemWords), fmt(r.medianStemWords), stemDrift > 0.4,
-    'Flagged when more than 40% away from the reference.');
+ 'Flagged when more than 40% away from the reference.');
   add('Clinical vignettes (%)', fmt(g.pctVignette), fmt(r.pctVignette), Math.abs(g.pctVignette - r.pctVignette) > 20,
-    'Flagged when more than 20 points away.');
+ 'Flagged when more than 20 points away.');
   add('Negative stems, EXCEPT/NOT/FALSE (%)', fmt(g.pctNegative), fmt(r.pctNegative), Math.abs(g.pctNegative - r.pctNegative) > 10,
-    'Flagged when more than 10 points away.');
+ 'Flagged when more than 10 points away.');
   add('Multi-statement items (%)', fmt(g.pctMultiStatement), fmt(r.pctMultiStatement), Math.abs(g.pctMultiStatement - r.pctMultiStatement) > 20,
-    'Flagged when more than 20 points away.');
+ 'Flagged when more than 20 points away.');
   // Judged against the reference when there is one; otherwise against an absolute ceiling.
   rows.push({
     metric: 'Longest option is the key (%)',
@@ -190,11 +190,11 @@ export function compareSets(generated: BenchItem[], reference: BenchItem[]): Ben
       : `No reference yet, so flagged above ${GIVEAWAY_ABSOLUTE}% (four options give about 25% by chance).`,
   });
   add('Options per question', fmt(g.meanOptionCount, 1), fmt(r.meanOptionCount, 1), Math.abs(g.meanOptionCount - r.meanOptionCount) > 0.5,
-    'Flagged when the mean differs by more than half an option.');
+ 'Flagged when the mean differs by more than half an option.');
   add('Option length spread (max/min)', fmt(g.medianOptionSpread, 1), fmt(r.medianOptionSpread, 1), g.medianOptionSpread > r.medianOptionSpread * 1.5,
-    'Flagged when options are more than 50% more uneven than the reference.');
+ 'Flagged when options are more than 50% more uneven than the reference.');
 
-  // Only compare subjects when the reference actually labels them; AMC SUCCESS has no subject field.
+  // Only compare subjects when the reference actually labels them; some references have no subject field.
   const refSubjects = new Set([...r.subjects].map(normalizeSubject).filter((s) => s && s !== 'unknown'));
   if (refSubjects.size === 0) {
     rows.push({ metric: 'Subjects present in reference (%)', generated: '—', reference: '—', flag: false,
@@ -203,7 +203,7 @@ export function compareSets(generated: BenchItem[], reference: BenchItem[]): Ben
     const covered = generated.filter((i) => refSubjects.has(normalizeSubject(i.subject))).length;
     const coverage = share(covered, generated.length);
     add('Subjects present in reference (%)', fmt(coverage), '100', coverage < 80,
-      'Flagged when under 80% of items come from a subject the reference papers do not cover.');
+ 'Flagged when under 80% of items come from a subject the reference papers do not cover.');
   }
 
   const duplicates: DuplicateHit[] = [];

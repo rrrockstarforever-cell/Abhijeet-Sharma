@@ -10,7 +10,7 @@ export const MATRIX = [];
 const GENERIC_LEAD = /^which of the following\??$/i;
 const HEDGE = /\b(may|might|possibly|uncertain|unclear|remains? to be|not well understood)\b/i;
 const PATIENT = /\b(\d{1,2}[- ]year[- ]old|\d+ ?(month|week|day)s?[- ]old|a (man|woman|boy|girl|patient|child|infant|neonate))\b/i;
-const OPTION_COUNT = { NEET_PG: 4, INI_CET: 4, AMC_CAT: 5 };
+const OPTION_COUNT = { NEET_PG: 4, INI_CET: 4 };
 
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 const correctText = (q) => (q.options.find((o) => o.id === q.correctOption)?.text) || '';
@@ -65,14 +65,13 @@ export function plainChecks(questions, c = {}) {
     const kinds = { negative: questions.filter((q) => /\b(NOT|EXCEPT|FALSE|INCORRECT)\b/.test(`${q.questionText} ${q.stem}`)).length, statements: questions.filter((q) => /(^|\s)1[.)]\s.*\s2[.)]\s/s.test(q.stem)).length, match: questions.filter((q) => /match list/i.test(q.stem)).length };
     if (c.exam === 'NEET_PG' && (kinds.statements + kinds.match) / n > 0.1) set.push('NEET-PG set has statement or match items (they are almost absent in real papers)');
     if (c.exam === 'NEET_PG' && kinds.negative / n > 0.25) set.push('NEET-PG set has too many NOT items');
-    if (c.exam === 'AMC_CAT' && cases / n < 0.9) set.push(`AMC set is not all patient vignettes (${Math.round((cases / n) * 100)}%)`);
     if (c.exam === 'INI_CET' && kinds.negative / n > 0.3) set.push('INI-CET set has too many NOT items');
   }
   return { per, set, patientShare: questions.length ? cases / questions.length : 0 };
 }
 
 const JUDGE_SYSTEM =
-  'You are a strict NEET-PG / INI-CET / AMC examiner reviewing MCQs. For each numbered question decide: ' +
+  'You are a strict NEET-PG / INI-CET examiner reviewing MCQs. For each numbered question decide: ' +
   '"correct" (the marked answer is right by standard textbooks and guidelines), "single" (exactly one option is defensible), ' +
   '"relevance" (1-5: how likely an exam is to test this fact; 1 = research trivia or filler), "clear" (stem unambiguous and complete), ' +
   '"style_ok" (the question really has the required style, given below), "difficulty" ("easy", "medium" or "hard"), ' +
@@ -83,7 +82,7 @@ const JUDGE_SYSTEM =
 async function judge(c, questions, provider) {
   if (!questions.length) return [];
   const slot = declaredSlot(c.style);
-  const required = slot ? `Required style: ${STYLES[slot.style].judge}${slot.leadIn ? `; the question line asks for the ${slot.leadIn.replace(/-/g, ' ')} (for a drug-of-choice item a drug, regimen or treatment of choice is fine)` : ''}.` : `No single style was required: the exam's own mix for ${c.exam} applies (NEET-PG: mostly vignettes and one-liners; INI-CET: also NOT items and some statements; AMC: patient vignettes with 5 options). Mark style_ok true if the item is a well-formed exam question of any normal style.`;
+  const required = slot ? `Required style: ${STYLES[slot.style].judge}${slot.leadIn ? `; the question line asks for the ${slot.leadIn.replace(/-/g, ' ')} (for a drug-of-choice item a drug, regimen or treatment of choice is fine)` : ''}.` : `No single style was required: the exam's own mix for ${c.exam} applies (NEET-PG: mostly vignettes and one-liners; INI-CET: also NOT items and some statements). Mark style_ok true if the item is a well-formed exam question of any normal style.`;
   const list = questions.map((q, i) => `${i + 1}. ${q.stem}\n${q.questionText}\n` + q.options.map((o) => `${o.id}) ${o.text}`).join('\n') + `\nMarked answer: ${q.correctOption}\nExplanation: ${String(q.explanation || '').slice(0, 1800)}`).join('\n\n');
   const raw = await aiComplete({ system: JUDGE_SYSTEM, messages: [{ role: 'user', content: `Topic: ${c.topic}\nExam: ${c.exam}\n${required}\n\n${list}` }], json: true, effort: 'medium', provider, model: getEffectiveModel(provider) }).catch(() => '');
   return extractJson(raw)?.items ?? [];

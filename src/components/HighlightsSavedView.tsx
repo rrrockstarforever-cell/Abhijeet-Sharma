@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { motion, useReducedMotion } from 'motion/react';
 import {
   Bookmark,
   Search,
@@ -201,13 +202,14 @@ function dueDateText(due: string): string {
 
 const KIND_LABEL: Record<string, string> = {
   manual: 'My note',
-  'ai-reply': 'AI Tutor note',
+ 'ai-reply': 'AI Tutor note',
   pdf: 'PDF highlight'
 };
 
 /* -------------------------------- component ------------------------------- */
 
 export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavigate }) => {
+  const reduceMotion = useReducedMotion();
   const [selectedTag, setSelectedTag] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
@@ -268,6 +270,11 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
     const created = new Date(h.createdAt).getTime();
     return Date.now() - created < 7 * 86400000;
   }).length;
+
+  const suspendedHighlights = useMemo(
+    () => highlights.filter(h => srs[h.id]?.suspended),
+    [highlights, srs]
+  );
 
   /* Tag filter chips derived from real saved highlights. */
   const tagTabs = useMemo(() => {
@@ -352,7 +359,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
     });
     setRatedNote(`Scheduled — next review ${dueLabel(card.due)} (${formatSpan(card.intervalDays)} interval).`);
     setRevealed(false);
-    setDeckIndex(0);
+    setDeckIndex(prev => Math.min(prev, Math.max(0, dueDeck.length - 2)));
     refreshHighlights();
     bumpSrs();
   };
@@ -360,18 +367,18 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
   const handleReviewLater = (): void => {
     if (!currentCard) return;
     deferReview(currentCard.id);
-    setRatedNote('Deferred — back in the deck tomorrow.');
+    setRatedNote("Deferred to tomorrow — the card is out of today's deck.");
     setRevealed(false);
-    setDeckIndex(0);
+    setDeckIndex(prev => Math.min(prev, Math.max(0, dueDeck.length - 2)));
     bumpSrs();
   };
 
   const handleRemoveFromReview = (): void => {
     if (!currentCard) return;
     suspendReview(currentCard.id);
-    setRatedNote('Removed from the review deck. It stays in your saved highlights.');
+    setRatedNote('SUSPENDED — removed from review. Your saved highlight is intact.');
     setRevealed(false);
-    setDeckIndex(0);
+    setDeckIndex(prev => Math.min(prev, Math.max(0, dueDeck.length - 2)));
     bumpSrs();
   };
 
@@ -388,130 +395,196 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
-      {/* Header Banner */}
-      <div className="bg-[#001432] rounded-2xl p-6 text-white border border-[#13294b] shadow-md relative overflow-hidden">
-        <div className="absolute right-0 top-0 bottom-0 w-96 bg-gradient-to-l from-[#0f8b8d]/20 to-transparent pointer-events-none" />
-
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
-          <div>
-            <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-[#0f8b8d]/20 text-[#8ff3f4] text-xs font-semibold uppercase tracking-wider mb-2 border border-[#0f8b8d]/30">
-              <Bookmark className="w-3.5 h-3.5" />
-              Saved Highlights & Memory Anchors
+      <section className="relative overflow-hidden rounded-[20px] border ">
+        <div className=" pointer-events-none absolute inset-0 opacity-[0.10] dark:opacity-[0.12]" aria-hidden="true" />
+        <div className=" pointer-events-none absolute inset-0 opacity-5 [mask-image:radial-gradient(ellipse_at_center,transparent_35%,black_75%)]" aria-hidden="true" />
+        <div className="relative z-10 space-y-5 p-5 md:p-6">
+          <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
+            <div className="space-y-2">
+              <div className="inline-flex items-center gap-2 rounded-xl border px-3 py-1 text-[11px] font-medium uppercase tracking-wider ">
+                <Bookmark className="h-3.5 w-3.5" /> Review Arena
+              </div>
+              <h1 className="font-['Cormorant'] text-3xl font-medium tracking-tight md:text-4xl">
+                Saved Highlights & Memory Anchors
+              </h1>
+              <p className="max-w-2xl text-sm ">
+                Train recall from your clinical captures. Due now, active reviews, and new anchors are counted from the same SRS deck.
+              </p>
             </div>
-            <h1 className="text-2xl font-bold tracking-tight text-white">
-              Clinical Highlights & Memory Anchors Repository
-            </h1>
-            <p className="text-slate-300 text-sm mt-1 max-w-2xl">
-              Your saved highlights with spaced-repetition review. {dueNowCount > 0
-                ? `${dueNowCount} card${dueNowCount === 1 ? '' : 's'} due now.`
-                : nextDue
-                  ? `Nothing due right now — next review ${dueLabel(nextDue.due)}.`
-                  : 'Save a highlight to start a review deck.'}
-            </p>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleExportTsv}
-              className="inline-flex items-center gap-2 px-3.5 py-2.5 bg-slate-800/80 hover:bg-slate-700 text-white text-xs font-semibold rounded-xl border border-slate-700 transition-colors"
-            >
-              <Download className="w-4 h-4 text-slate-300" />
-              Export Anki TSV
-            </button>
-            <button
-              onClick={() => setShowAddModal(true)}
-              className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-semibold rounded-xl shadow-md transition-all active:scale-95"
-            >
-              <Plus className="w-4 h-4" />
-              Add Clinical Pearl
-            </button>
-          </div>
-        </div>
-
-        {/* Filter Bar & Search */}
-        <div className="mt-6 pt-5 border-t border-slate-700/60 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-2 overflow-x-auto w-full sm:w-auto pb-1 sm:pb-0">
-            {tagTabs.map(tab => (
+            <div className="flex flex-wrap items-center gap-2">
               <button
-                key={tab.id}
-                onClick={() => setSelectedTag(tab.id)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
-                  selectedTag === tab.id
-                    ? 'bg-[#0f8b8d] text-white shadow-sm'
-                    : 'bg-slate-800/60 text-slate-300 hover:bg-slate-800'
-                }`}
+                onClick={handleExportTsv}
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-[16px] border   px-3.5 py-2.5 text-xs font-medium  transition-colors hover:opacity-90"
               >
-                {tab.label}
+                <Download className="h-4 w-4" />
+                Export Anki TSV
               </button>
-            ))}
+              <button
+                onClick={() => setShowAddModal(true)}
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-[16px] border px-4 py-2.5 text-xs font-medium   transition-all active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible: dark:focus-visible:"
+              >
+                <Plus className="h-4 w-4" />
+                Add Clinical Pearl
+              </button>
+            </div>
           </div>
 
-          <div className="relative w-full sm:w-64">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Search your saved highlights..."
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-900/80 border border-slate-700 rounded-xl pl-9 pr-3 py-1.5 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-[#0f8b8d]"
-            />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="rounded-[16px] border p-3 ">
+              <div className="font-[''] text-2xl tracking-wide">{dueNowCount}</div>
+              <div className="text-[11px] font-medium uppercase tracking-wider ">Due now</div>
+            </div>
+            <div className="rounded-[16px] border p-3 ">
+              <div className="font-[''] text-2xl tracking-wide">{inReviewCount}</div>
+              <div className="text-[11px] font-medium uppercase tracking-wider ">In review</div>
+            </div>
+            <div className="rounded-[16px] border p-3 ">
+              <div className="font-[''] text-2xl tracking-wide">{newThisWeekCount}</div>
+              <div className="text-[11px] font-medium uppercase tracking-wider ">New this week</div>
+            </div>
+          </div>
+
+          <div className="flex flex-col justify-between gap-3 rounded-[16px] border   p-3 sm:flex-row sm:items-center">
+            <div className="text-xs font-semibold ">
+              {nextDue ? <>Next due {dueLabel(nextDue.due)} · {dueDateText(nextDue.due)}</> : dueNowCount > 0 ? 'Review deck ready.' : 'Save a highlight to start a review deck.'}
+            </div>
+            <button
+              onClick={() => {
+                const el = document.getElementById('pm-review-card');
+                el?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+                (el as HTMLElement | null)?.focus();
+              }}
+              className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-[16px] border px-5 py-2.5 text-xs font-medium   focus-visible:outline-none focus-visible:ring-2 focus-visible: dark:focus-visible:"
+            >
+              <Brain className="h-4 w-4" /> Start Review
+            </button>
+          </div>
+
+          {/* Filter Bar & Search */}
+          <div className="flex flex-col items-center justify-between gap-3 pt-1 sm:flex-row">
+            <div className="flex w-full items-center gap-2 overflow-x-auto pb-1 sm:w-auto sm:pb-0">
+              {tagTabs.map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setSelectedTag(tab.id)}
+                  className={`min-h-[36px] whitespace-nowrap rounded-xl border px-3 py-1.5 text-xs font-medium transition-colors ${
+                    selectedTag === tab.id
+                      ? 'border '
+                      : '   '
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="relative w-full sm:w-64">
+              <Search className="absolute left-3 top-2.5 h-4 w-4 " />
+              <input
+                type="text"
+                placeholder="Search your saved highlights..."
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                className="min-h-[40px] w-full rounded-xl border   py-1.5 pl-9 pr-3 text-xs   focus:outline-none focus:ring-2 focus: dark:focus:"
+              />
+            </div>
           </div>
         </div>
-      </div>
+      </section>
 
       {/* Main Content Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left Column: Highlights Cards */}
         <div className="lg:col-span-8 space-y-6">
+          <div className="flex flex-col justify-between gap-2 rounded-[16px] border   p-3 text-xs  sm:flex-row sm:items-center">
+            <div className="font-semibold ">
+              <span className="">{filteredHighlights.length}</span> saved highlight{filteredHighlights.length === 1 ? '' : 's'} shown
+              {(selectedTag !== 'ALL' || searchQuery.trim() !== '') && (
+                <span> · {selectedTag !== 'ALL' ? `tag: ${selectedTag}` : 'all tags'}{searchQuery.trim() ? ` · search: “${searchQuery.trim()}”` : ''}</span>
+              )}
+            </div>
+            {(selectedTag !== 'ALL' || searchQuery.trim() !== '') && (
+              <button
+                onClick={() => { setSelectedTag('ALL'); setSearchQuery(''); }}
+                className="inline-flex min-h-[36px] items-center justify-center rounded-xl border   px-3 py-1.5 font-medium  hover:opacity-90"
+              >
+                Clear filters
+              </button>
+            )}
+          </div>
           {highlights.length === 0 ? (
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-10 text-center">
-              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-[#0f8b8d]/10 mb-3">
-                <Bookmark className="w-6 h-6 text-[#0f8b8d]" />
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full  mb-3">
+                <Bookmark className="w-6 h-6 " />
               </div>
-              <h3 className="text-base font-bold text-slate-900">Nothing saved yet</h3>
+              <h3 className="text-base font-medium text-slate-900">Nothing saved yet</h3>
               <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto leading-relaxed">
-                Highlights you save from the PDF reader, the AI tutor, or the quick capture box land here and join your spaced-repetition deck.
+                You have not saved any highlights yet. Save one from the PDF reader, AI tutor, or quick capture box, or tap Add your first highlight.
               </p>
               <button
                 onClick={() => setShowAddModal(true)}
-                className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-semibold rounded-xl transition-colors"
+                className="mt-4 inline-flex items-center gap-2 px-4 py-2   text-white text-xs font-semibold rounded-xl transition-colors"
               >
                 <Plus className="w-4 h-4" /> Add your first highlight
               </button>
             </div>
           ) : filteredHighlights.length === 0 ? (
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-8 text-center text-xs text-slate-500">
-              No saved highlights match this filter.
+            <div className="rounded-[20px] border p-8 text-center text-xs  ">
+              <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full border ">
+                <Search className="h-5 w-5 " />
+              </div>
+              <div className="font-[''] text-xl tracking-wide ">NO MATCHES</div>
+              <p className="mx-auto mt-1 max-w-sm leading-relaxed">
+                No saved highlights match this search or filter. Clear it to see your full deck again.
+              </p>
+              <button
+                onClick={() => { setSelectedTag('ALL'); setSearchQuery(''); }}
+                className="mt-4 inline-flex min-h-[44px] items-center justify-center rounded-[16px] border px-4 py-2 text-xs font-medium  "
+              >
+                Clear filters
+              </button>
             </div>
           ) : (
-            filteredHighlights.map((highlight) => {
+            filteredHighlights.map((highlight, index) => {
               const rec = srs[highlight.id];
-              const footerSrs = !rec
-                ? 'New · not scheduled yet'
+              const isDue = !!rec && !rec.suspended && new Date(rec.due).getTime() <= Date.now();
+              const statusLabel = !rec ? 'New' : rec.suspended ? 'Suspended' : isDue ? 'Due now' : 'Later';
+              const statusTone = !rec
+                ? '  '
                 : rec.suspended
-                  ? 'Removed from review'
-                  : `Next review ${dueLabel(rec.due)} · interval ${formatSpan(rec.intervalDays)}`;
+                  ? 'border-rose-400/60 bg-rose-500/10 text-rose-700 dark:text-rose-200'
+                  : isDue
+                    ? 'border-amber-400/70 bg-amber-400/15 text-amber-800 dark:text-amber-200'
+                    : 'border-sky-400/60 bg-sky-500/10 text-sky-700 dark:text-sky-200';
+              const footerSrs = !rec
+                ? 'Not scheduled yet'
+                : rec.suspended
+                  ? 'Removed from review — saved highlight stays intact'
+                  : `Next ${dueLabel(rec.due)} · interval ${formatSpan(rec.intervalDays)}`;
               return (
-                <div
+                <motion.div
                   key={highlight.id}
-                  className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden hover:border-slate-300 transition-all"
+                  initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.22, ease: "easeOut", delay: reduceMotion ? 0 : Math.min(index * 0.03, 0.2) }}
+                  className="overflow-hidden rounded-[20px] border     transition-all "
                 >
                   {/* Card Header */}
                   <div className="p-6 pb-4">
                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                       <div className="flex items-center gap-2">
-                        <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[#0f8b8d]/10 text-[#0f8b8d] uppercase tracking-wide">
+                        <span className="text-[11px] font-medium px-2 py-0.5 rounded   uppercase tracking-wide">
                           {highlight.subject}
                         </span>
                         <span className="text-xs font-semibold text-slate-700">
                           {highlight.subtopic}
                         </span>
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 uppercase tracking-wider">
+                        <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 uppercase tracking-wider">
                           {KIND_LABEL[highlight.kind] || 'Saved'}
                         </span>
                       </div>
 
-                      <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200 uppercase tracking-wider">
+                      <span className="text-[11px] font-medium px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200 uppercase tracking-wider">
                         {highlight.yieldTier}
                       </span>
                     </div>
@@ -523,8 +596,8 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                     </div>
 
                     {/* Quote Box */}
-                    <div className="p-4 rounded-xl bg-slate-50 border-l-4 border-[#0f8b8d] text-slate-800 text-xs leading-relaxed font-sans italic">
-                      "{highlight.quote}"
+                    <div className="p-4 rounded-xl bg-slate-50 border-l-4  text-slate-800 text-xs leading-relaxed font-sans italic">
+ "{highlight.quote}"
                     </div>
 
                     {/* Memory Anchor Box */}
@@ -533,7 +606,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                         <div className="flex items-start gap-2.5">
                           <Brain className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                           <div>
-                            <div className="text-xs font-bold text-amber-900 uppercase tracking-wider">
+                            <div className="text-xs font-medium text-amber-900 uppercase tracking-wider">
                               Memory Anchor & Rapid Recall Mnemonic:
                             </div>
                             <p className="text-xs text-amber-800 font-medium mt-1 leading-relaxed">
@@ -549,7 +622,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                       <div className="mt-4 p-3.5 rounded-xl bg-rose-50 border border-rose-200 flex items-start gap-2.5 text-xs">
                         <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                         <div>
-                          <span className="font-bold text-rose-900 uppercase tracking-wider text-[11px]">Board Trap Warning: </span>
+                          <span className="font-medium text-rose-900 uppercase tracking-wider text-[11px]">Board Trap Warning: </span>
                           <span className="text-rose-800 font-medium leading-relaxed">{highlight.boardTrapAlert}</span>
                         </div>
                       </div>
@@ -558,15 +631,17 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
 
                   {/* Card Footer */}
                   <div className="px-6 py-3 bg-slate-50 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3 text-xs">
-                    <div className="flex items-center gap-2 text-slate-500 font-medium">
-                      <Clock className="w-3.5 h-3.5 text-slate-400" />
+                    <div className="flex flex-wrap items-center gap-2 font-medium ">
+                      <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider  ${statusTone}`}>
+                        <Clock className="h-3 w-3" /> {statusLabel}
+                      </span>
                       <span>{footerSrs}</span>
                       {rec?.suspended && (
                         <button
                           onClick={() => { resumeReview(highlight.id); bumpSrs(); }}
-                          className="text-[#0f8b8d] hover:underline font-semibold inline-flex items-center gap-1"
+                          className="inline-flex min-h-[36px] items-center gap-1 rounded-xl border   px-2.5 py-1 font-medium  hover:opacity-90"
                         >
-                          <RotateCcw className="w-3 h-3" /> Resume review
+                          <RotateCcw className="h-3 w-3" /> Restore
                         </button>
                       )}
                     </div>
@@ -574,7 +649,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                     <div className="flex items-center gap-3">
                       <button
                         onClick={() => onNavigate('ai-tutor')}
-                        className="text-slate-600 hover:text-[#0f8b8d] font-semibold flex items-center gap-1 transition-colors"
+                        className="text-slate-600  font-semibold flex items-center gap-1 transition-colors"
                       >
                         <Sparkles className="w-3.5 h-3.5 text-amber-500" /> Ask AI Tutor
                       </button>
@@ -587,7 +662,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                       </button>
                     </div>
                   </div>
-                </div>
+                </motion.div>
               );
             })
           )}
@@ -595,125 +670,154 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
 
         {/* Right Column: Interactive SRS Review Deck & Quick Capture */}
         <div className="lg:col-span-4 space-y-6">
-          {/* Spaced Repetition Interactive Card */}
-          <div className="bg-gradient-to-br from-[#001432] to-[#13294b] text-white rounded-2xl p-5 border border-[#13294b] shadow-md">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-[#8ff3f4] font-bold flex items-center gap-1.5">
-                <Clock className="w-3.5 h-3.5" /> Review Deck
-              </span>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-                {dueNowCount > 0 ? `Due ${dueNowCount}` : 'All clear'}
-              </span>
-            </div>
-
-            {highlights.length === 0 ? (
-              <div className="mt-3 p-4 rounded-xl bg-slate-900/80 border border-slate-700/80 text-xs text-slate-300 text-center">
-                No saved highlights yet — add one to build your review deck.
+          <div
+            id="pm-review-card"
+            tabIndex={-1}
+            className="relative scroll-mt-24 overflow-hidden rounded-[20px] border p-5   outline-none"
+          >
+            <div className=" pointer-events-none absolute inset-0 opacity-[0.08] dark:opacity-[0.12]" aria-hidden="true" />
+            <div className="relative z-10">
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[11px] font-medium uppercase tracking-wider ">
+                  <Clock className="h-3.5 w-3.5" /> Review Deck
+                </span>
+                <span className="rounded-full border   px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider ">
+                  {dueNowCount > 0 ? `Due ${dueNowCount}` : 'Deck clear'}
+                </span>
               </div>
-            ) : currentCard ? (
-              <>
-                <div className="mt-3 p-3.5 rounded-xl bg-slate-900/80 border border-slate-700/80 text-xs">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-amber-400 font-bold">Prompt:</span>
-                    <span className="text-[10px] text-slate-400 font-semibold">
-                      {KIND_LABEL[currentCard.kind] || 'Saved'} · {currentCard.subject}
-                    </span>
+
+              {highlights.length === 0 ? (
+                <div className="mt-4 rounded-[16px] border   p-4 text-center text-xs ">
+                  You have not saved any highlights yet. Add one to build your review deck.
+                </div>
+              ) : currentCard ? (
+                <>
+                  <div className="mt-4 rounded-[16px] border p-4 text-xs ">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="rounded-lg border   px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider">
+                          {currentCard.subject}
+                        </span>
+                        <span className="text-xs font-medium ">{currentCard.subtopic}</span>
+                        <span className="rounded-full border   px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider ">
+                          {KIND_LABEL[currentCard.kind] || 'Saved'}
+                        </span>
+                      </div>
+                      <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider  ${isNewCard ? '  ' : 'border-amber-400/70 bg-amber-400/15 text-amber-800 dark:text-amber-200'}`}>
+                        <Sparkles className="h-3 w-3" /> {isNewCard ? 'NEW' : 'DUE NOW'}
+                      </span>
+                    </div>
+
+                    {currentCard.tags.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {currentCard.tags.map(tag => (
+                          <span key={tag} className="rounded-full border   px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider ">
+                            #{tag}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    <p className="mt-3 text-sm font-medium leading-relaxed ">“{currentCard.quote}”</p>
+
+                    {isNewCard && (
+                      <div className="mt-2 text-[10px] italic ">
+                        New card · no rating has confirmed recall yet.
+                      </div>
+                    )}
+
+                    {revealed ? (
+                      <div className="mt-3 border-t  pt-3">
+                        <div className="mb-1 font-[''] text-lg tracking-wide ">EXPLANATION</div>
+                        <p className="leading-relaxed ">
+                          {currentCard.memoryAnchor || currentCard.note || 'No memory anchor or note saved with this highlight yet.'}
+                        </p>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setRevealed(true)}
+                        className="mt-3 inline-flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-[16px] border px-3 py-2 text-xs font-medium   hover:opacity-90"
+                      >
+                        <Eye className="h-3.5 w-3.5" /> Reveal answer
+                      </button>
+                    )}
                   </div>
-                  <p className="text-slate-200 leading-relaxed font-medium">{currentCard.quote}</p>
 
-                  {isNewCard && (
-                    <div className="mt-2 text-[10px] text-slate-400 italic">
-                      New card · correct answer never confirmed by a rating yet.
+                  <div className="mt-4">
+                    <div className="mb-2 text-[11px] font-semibold ">
+                      {revealed ? 'Rate recall to set the next due date:' : 'Reveal the answer before rating.'}
                     </div>
-                  )}
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      {([
+                        { label: 'Again', tone: 'rose', preview: ratingPreview('Again') },
+                        { label: 'Hard', tone: 'amber', preview: ratingPreview('Hard') },
+                        { label: 'Good', tone: 'sky', preview: ratingPreview('Good') },
+                        { label: 'Easy', tone: 'emerald', preview: ratingPreview('Easy') }
+                      ] as const).map(btn => {
+                        const toneCls =
+                          btn.tone === 'rose'
+                            ? 'text-rose-700 dark:text-rose-200 border-rose-400/60 hover:bg-rose-500/10'
+                            : btn.tone === 'amber'
+                              ? 'text-amber-800 dark:text-amber-200 border-amber-400/70 hover:bg-amber-400/10'
+                              : btn.tone === 'sky'
+                                ? 'text-sky-700 dark:text-sky-200 border-sky-400/60 hover:bg-sky-500/10'
+                                : 'text-emerald-700 dark:text-emerald-200 border-emerald-400/60 hover:bg-emerald-500/10';
+                        return (
+                          <button
+                            key={btn.label}
+                            disabled={!revealed}
+                            onClick={() => handleRate(btn.label as Rating)}
+                            className={`min-h-[44px] rounded-[16px] border px-2.5 py-2 text-center font-medium  transition-all disabled:cursor-not-allowed disabled:opacity-40 ${toneCls}`}
+                          >
+                            {btn.label} <span className="block text-[10px] font-normal opacity-80">in {btn.preview}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
 
-                  {revealed ? (
-                    <div className="mt-3 pt-3 border-t border-slate-700">
-                      <div className="text-amber-400 font-bold mb-1">Answer:</div>
-                      <p className="text-slate-200 leading-relaxed">
-                        {currentCard.memoryAnchor || currentCard.note || 'No answer saved with this highlight yet.'}
-                      </p>
-                    </div>
-                  ) : (
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-[11px]">
                     <button
-                      onClick={() => setRevealed(true)}
-                      className="mt-3 w-full py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 inline-flex items-center justify-center gap-1.5 transition-colors"
+                      onClick={handleReviewLater}
+                      className="inline-flex min-h-[36px] items-center gap-1 rounded-xl border   px-2.5 py-1 font-medium  hover:opacity-90"
                     >
-                      <Eye className="w-3.5 h-3.5" /> Show answer
+                      <Clock className="h-3.5 w-3.5" /> Review later
                     </button>
+                    <button
+                      onClick={handleRemoveFromReview}
+                      className="inline-flex min-h-[36px] items-center gap-1 rounded-xl border border-rose-400/50 bg-rose-500/10 px-2.5 py-1 font-medium text-rose-700 hover:opacity-90 dark:text-rose-200"
+                    >
+                      <EyeOff className="h-3.5 w-3.5" /> Remove from review
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="mt-4 rounded-[16px] border   p-4 text-xs">
+                  <div className="font-[''] text-2xl tracking-wide ">DECK CLEAR</div>
+                  <div className="mt-1 font-semibold ">Nothing due right now.</div>
+                  {nextDue && (
+                    <div className="mt-1 ">
+                      Next review {dueLabel(nextDue.due)} — {dueDateText(nextDue.due)}.
+                    </div>
                   )}
                 </div>
+              )}
 
-                <div className="mt-4">
-                  <div className="text-[11px] text-slate-400 mb-2 font-medium">
-                    Rate recall difficulty to set the next due date:
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    {([
-                      { label: 'Again', tone: 'rose', preview: ratingPreview('Again') },
-                      { label: 'Hard', tone: 'amber', preview: ratingPreview('Hard') },
-                      { label: 'Good', tone: 'sky', preview: ratingPreview('Good') },
-                      { label: 'Easy', tone: 'emerald', preview: ratingPreview('Easy') }
-                    ] as const).map(btn => {
-                      const toneCls =
-                        btn.tone === 'rose'
-                          ? 'text-rose-300 border-slate-700 hover:bg-slate-800'
-                          : btn.tone === 'amber'
-                            ? 'text-amber-300 border-slate-700 hover:bg-slate-800'
-                            : btn.tone === 'sky'
-                              ? 'text-sky-300 border-slate-700 hover:bg-slate-800'
-                              : 'text-emerald-300 border-slate-700 hover:bg-slate-800';
-                      return (
-                        <button
-                          key={btn.label}
-                          disabled={!revealed}
-                          onClick={() => handleRate(btn.label as Rating)}
-                          className={`py-2 px-2.5 rounded-xl border text-center font-bold transition-all bg-slate-800/60 disabled:opacity-40 disabled:cursor-not-allowed ${toneCls}`}
-                        >
-                          {btn.label} <span className="text-[10px] block font-normal opacity-80">in {btn.preview}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
+              {ratedNote && (
+                <div className="mt-4 rounded-[16px] border p-3 text-center text-[11px] font-medium  ">
+                  <span className="mr-1 font-[''] text-base tracking-wide">
+                    {ratedNote.toLowerCase().includes('suspend') ? 'SUSPENDED' : ratedNote.toLowerCase().includes('defer') ? 'LATER' : 'DUE NOW'}
+                  </span>
+                  {ratedNote}
                 </div>
-
-                <div className="mt-3.5 flex items-center justify-between gap-2 text-[11px]">
-                  <button
-                    onClick={handleReviewLater}
-                    className="text-slate-300 hover:text-white font-semibold inline-flex items-center gap-1"
-                  >
-                    <Clock className="w-3.5 h-3.5" /> Review later
-                  </button>
-                  <button
-                    onClick={handleRemoveFromReview}
-                    className="text-slate-400 hover:text-rose-300 font-semibold inline-flex items-center gap-1"
-                  >
-                    <EyeOff className="w-3.5 h-3.5" /> Remove from review
-                  </button>
-                </div>
-
-                {ratedNote && (
-                  <div className="mt-3 p-2 rounded-lg bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 text-[11px] text-center font-semibold">
-                    ✓ {ratedNote}
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="mt-3 p-4 rounded-xl bg-slate-900/80 border border-slate-700/80 text-xs text-slate-300">
-                <div className="font-semibold text-slate-200 mb-1">Nothing due right now.</div>
-                {nextDue && (
-                  <div className="text-slate-400">
-                    Next review {dueLabel(nextDue.due)} — {dueDateText(nextDue.due)}.
-                  </div>
-                )}
-              </div>
-            )}
+              )}
+            </div>
           </div>
 
           {/* Quick Capture Form */}
           <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
-            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-              <Plus className="w-4 h-4 text-[#0f8b8d]" /> Quick Pearl Capture
+            <h3 className="text-sm font-medium text-slate-900 flex items-center gap-2">
+              <Plus className="w-4 h-4 " /> Quick Pearl Capture
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
               Paste or type high-yield board facts from bedside rounds or mock tests
@@ -725,7 +829,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                 onChange={e => setCustomPearlText(e.target.value)}
                 placeholder="e.g. Linezolid causes bone marrow suppression & weak reversible MAO inhibition (risk of serotonin syndrome with SSRIs)..."
                 rows={3}
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:"
               />
 
               <div className="flex items-center justify-between">
@@ -741,7 +845,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                     });
                     setCustomPearlText('');
                   }}
-                  className="px-3.5 py-1.5 bg-[#001432] hover:bg-[#13294b] text-white text-xs font-semibold rounded-lg transition-colors"
+                  className="px-3.5 py-1.5   text-white text-xs font-semibold rounded-lg transition-colors"
                 >
                   Save Pearl
                 </button>
@@ -749,100 +853,130 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
             </div>
           </div>
 
-          {/* Deck Retention Status */}
-          <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
-            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-              <Brain className="w-4 h-4 text-[#0f8b8d]" /> Study Deck Retention Status
+          {/* Suspended Review Management */}
+          <div className="rounded-[20px] border p-5  ">
+            <h3 className="flex items-center gap-2 text-sm font-medium">
+              <RotateCcw className="h-4 w-4" /> Suspended Reviews
             </h3>
+            <p className="mt-0.5 text-xs ">
+              Restored cards become due now. Saved highlights stay intact.
+            </p>
 
-            <div className="mt-4 grid grid-cols-2 gap-3 text-center">
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <div className="text-xl font-mono font-bold text-slate-900">{highlights.length}</div>
-                <div className="text-[11px] text-slate-500 mt-0.5 font-medium">Total Anchors</div>
+            {suspendedHighlights.length === 0 ? (
+              <div className="mt-4 rounded-[16px] border   p-3 text-center text-xs ">
+                No suspended reviews.
               </div>
-              <div className="p-3 rounded-xl bg-amber-50 border border-amber-100">
-                <div className="text-xl font-mono font-bold text-amber-700">{dueNowCount}</div>
-                <div className="text-[11px] text-amber-600 mt-0.5 font-medium">Due Now</div>
+            ) : (
+              <div className="mt-4 space-y-2">
+                {suspendedHighlights.map(h => (
+                  <div key={h.id} className="flex items-center justify-between gap-2 rounded-[16px] border   p-3 text-xs">
+                    <div className="min-w-0">
+                      <div className="truncate font-medium ">{h.subtopic || h.subject}</div>
+                      <div className="truncate ">{h.subject} · {KIND_LABEL[h.kind] || 'Saved'}</div>
+                    </div>
+                    <button
+                      onClick={() => { resumeReview(h.id); bumpSrs(); }}
+                      className="inline-flex min-h-[36px] shrink-0 items-center gap-1 rounded-xl border px-2.5 py-1 font-medium  "
+                    >
+                      <RotateCcw className="h-3 w-3" /> Restore
+                    </button>
+                  </div>
+                ))}
               </div>
-              <div className="p-3 rounded-xl bg-sky-50 border border-sky-100">
-                <div className="text-xl font-mono font-bold text-sky-700">{inReviewCount}</div>
-                <div className="text-[11px] text-sky-600 mt-0.5 font-medium">In Active Review</div>
-              </div>
-              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-100">
-                <div className="text-xl font-mono font-bold text-emerald-700">{newThisWeekCount}</div>
-                <div className="text-[11px] text-emerald-600 mt-0.5 font-medium">New This Week</div>
-              </div>
-            </div>
+            )}
           </div>
         </div>
       </div>
 
       {/* Add Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200">
-            <h3 className="text-lg font-bold text-slate-900">Add New Clinical Highlight</h3>
-            <p className="text-xs text-slate-500 mt-1">Saved to your highlights and added to the review deck.</p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <div className="relative w-full max-w-lg overflow-hidden rounded-[20px] border p-6  ">
+            <div className=" pointer-events-none absolute inset-0 opacity-[0.08] dark:opacity-[0.12]" aria-hidden="true" />
+            <div className="relative z-10">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="font-[''] text-2xl tracking-wide">NEW HIGHLIGHT</div>
+                  <p className="mt-1 text-xs ">Saved to your highlights and added to the review deck.</p>
+                </div>
+                <button
+                  onClick={() => setShowAddModal(false)}
+                  className="inline-flex min-h-[36px] items-center justify-center rounded-xl border   px-2.5 text-xs font-medium"
+                  aria-label="Close add highlight modal"
+                >
+                  ✕
+                </button>
+              </div>
 
-            <div className="mt-4 space-y-3">
-              <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">Subject</label>
-                <input
-                  type="text"
-                  value={modalSubject}
-                  onChange={e => setModalSubject(e.target.value)}
-                  placeholder="e.g. PHARMACOLOGY"
-                  className="w-full text-xs p-2.5 rounded-lg border border-slate-200 bg-slate-50"
-                />
+              <div className="mt-4 space-y-3">
+                <div>
+                  <label className="mb-1 block text-xs font-semibold">Subject</label>
+                  <input
+                    type="text"
+                    value={modalSubject}
+                    onChange={e => setModalSubject(e.target.value)}
+                    placeholder="e.g. PHARMACOLOGY"
+                    className="w-full rounded-xl border   p-2.5 text-xs   focus:outline-none focus:ring-2 focus: dark:focus:"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-semibold">Concept / Title</label>
+                  <input
+                    type="text"
+                    value={modalConcept}
+                    onChange={e => setModalConcept(e.target.value)}
+                    placeholder="e.g. Daptomycin Surfactant Inactivation"
+                    aria-invalid={!modalConcept.trim() && !modalNote.trim()}
+                    className={`w-full rounded-xl border  p-2.5 text-xs   focus:outline-none focus:ring-2 focus: dark:focus: ${!modalConcept.trim() && !modalNote.trim() ? 'border-rose-400' : ''}`}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-semibold">Memory Anchor / Board Trap Note</label>
+                  <textarea
+                    rows={3}
+                    value={modalNote}
+                    onChange={e => setModalNote(e.target.value)}
+                    placeholder="Key high yield point..."
+                    aria-invalid={!modalConcept.trim() && !modalNote.trim()}
+                    className={`w-full rounded-xl border  p-2.5 text-xs   focus:outline-none focus:ring-2 focus: dark:focus: ${!modalConcept.trim() && !modalNote.trim() ? 'border-rose-400' : ''}`}
+                  />
+                  {!modalConcept.trim() && !modalNote.trim() && (
+                    <p className="mt-1 text-[11px] font-semibold text-rose-600 dark:text-rose-300">
+                      Add a concept or note before saving.
+                    </p>
+                  )}
+                </div>
               </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">Concept / Title</label>
-                <input
-                  type="text"
-                  value={modalConcept}
-                  onChange={e => setModalConcept(e.target.value)}
-                  placeholder="e.g. Daptomycin Surfactant Inactivation"
-                  className="w-full text-xs p-2.5 rounded-lg border border-slate-200 bg-slate-50"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">Memory Anchor / Board Trap Note</label>
-                <textarea
-                  rows={3}
-                  value={modalNote}
-                  onChange={e => setModalNote(e.target.value)}
-                  placeholder="Key high yield point..."
-                  className="w-full text-xs p-2.5 rounded-lg border border-slate-200 bg-slate-50"
-                />
-              </div>
-            </div>
 
-            <div className="mt-6 flex justify-end gap-3">
-              <button
-                onClick={() => setShowAddModal(false)}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  const quote = (modalConcept.trim() || modalNote.trim());
-                  if (!quote) return;
-                  saveManualHighlight({
-                    subject: modalSubject.trim() || 'General',
-                    subtopic: modalConcept.trim() || 'Clinical Pearl',
-                    quote,
-                    note: modalNote.trim() || undefined
-                  });
-                  setModalSubject('');
-                  setModalConcept('');
-                  setModalNote('');
-                  setShowAddModal(false);
-                }}
-                className="px-4 py-2 text-xs font-semibold bg-[#0f8b8d] text-white rounded-lg hover:bg-[#00696b]"
-              >
-                Save & Index
-              </button>
+              <div className="mt-6 flex justify-end gap-3">
+                <button
+                  onClick={() => setShowAddModal(false)}
+                  className="min-h-[44px] rounded-[16px] border   px-4 py-2 text-xs font-medium  hover:opacity-90"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    const quote = (modalConcept.trim() || modalNote.trim());
+                    if (!quote) return;
+                    saveManualHighlight({
+                      subject: modalSubject.trim() || 'General',
+                      subtopic: modalConcept.trim() || 'Clinical Pearl',
+                      quote,
+                      note: modalNote.trim() || undefined
+                    });
+                    setRatedNote('NEW — highlight saved and added to the review deck.');
+                    setModalSubject('');
+                    setModalConcept('');
+                    setModalNote('');
+                    setShowAddModal(false);
+                  }}
+                  disabled={!modalConcept.trim() && !modalNote.trim()}
+                  className="min-h-[44px] rounded-[16px] border px-4 py-2 text-xs font-medium   disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Save & Index
+                </button>
+              </div>
             </div>
           </div>
         </div>

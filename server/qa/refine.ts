@@ -119,7 +119,7 @@ export async function refineQuestion(
   }
 
   const system =
-    'You are a meticulous medical MCQ editor for postgraduate exams (NEET-PG / INI-CET / AMC CAT). ' +
+    'You are a meticulous medical MCQ editor for postgraduate exams (NEET-PG / INI-CET). ' +
     'You receive a machine-generated single-best-answer MCQ. Rewrite ONLY its presentation to remove answer leakage and obvious hints, ' +
     'and to make the option set structurally neutral. Never change the tested concept or the correct answer meaning.';
 

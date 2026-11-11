@@ -18,8 +18,10 @@ export interface GenerateFromImageOptions {
   exam?: 'NEET_PG' | 'INI_CET' | 'AMC_CAT';
   difficultyTier?: 'LOW' | 'MEDIUM' | 'HIGH' | 'ALL';
   optionCount?: number;
+  /** OpenAI-compatible chat completions URL of the provider that writes the question. */
+  url: string;
   apiKey: string;
-  model?: string;
+  model: string;
   timeoutMs?: number;
 }
 
@@ -35,5 +37,3 @@ export declare function buildImageQuestionInstruction(input: {
 export declare function generateQuestionFromImage(opts: GenerateFromImageOptions): Promise<VisionQuestionSpec>;
 
 export declare function parseLooseJson(text: string): any | null;
-
-export declare const DEFAULT_VISION_MODEL: string;

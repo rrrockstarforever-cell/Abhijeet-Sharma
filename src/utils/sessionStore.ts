@@ -12,7 +12,7 @@ export const loadActiveTest = (): any => {
     if (
       !parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
       !Array.isArray(parsed.questions) ||
-      !['NEET_PG', 'INI_CET', 'AMC_CAT'].includes(parsed.exam)
+      !['NEET_PG', 'INI_CET'].includes(parsed.exam)
     ) return null;
     return parsed;
   } catch (e) {

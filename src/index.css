@@ -1,4 +1,4 @@
-@import "tailwindcss";
+﻿@import "tailwindcss";
 
 /* Class-based dark variant: the app toggles `.dark` on the root element, so
    `dark:` utilities must follow that class rather than the OS preference. */

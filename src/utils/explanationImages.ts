@@ -1,13 +1,15 @@
 // Illustrations for AI explanations.
 //
 // Design constraints (same rules as the question pipeline):
-//  - The model is only ever allowed to describe WHAT it wants ("chest X-ray of a tension
-//    pneumothorax"). It never writes a URL, so it cannot invent, hotlink or hallucinate an
-//    image address.
-//  - The server matches that description against the curated bank and vision-verifies the
-//    winner before returning it. Unverified => no image; the explanation stays text-only.
-//  - The reply text is never delayed by a vision call: the explanation is returned first
-//    and the illustration is resolved afterwards, so a slow model cannot stall the answer.
+// - The model is only ever allowed to describe WHAT it wants ("chest X-ray of a tension
+// pneumothorax"). It never writes a URL, so it cannot invent, hotlink or hallucinate an
+// image address.
+// - The server matches that description against the curated bank and vision-verifies the
+// winner before returning it. Unverified => no image; the explanation stays text-only.
+// - The reply text is never delayed by a vision call: the explanation is returned first
+// and the illustration is resolved afterwards, so a slow model cannot stall the answer.
+
+import { getActiveProvider, getEffectiveModel } from '../lib/ai';
 
 /** One resolved, already-verified illustration. */
 export interface ExplanationImage {
@@ -105,10 +107,16 @@ export async function resolveExplanationImage(cue: string, subject?: string): Pr
   const key = `${(subject || '').toLowerCase()}::${description.toLowerCase()}`;
   if (cueCache.has(key)) return cueCache.get(key) ?? null;
   try {
+    const provider = getActiveProvider();
+    const payload: { cue: string; subject?: string; provider?: string; model?: string } = { cue: description, subject };
+    if (provider) {
+      payload.provider = provider;
+      payload.model = getEffectiveModel(provider);
+    }
     const res = await fetch('/api/images/find-for-explanation', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cue: description, subject }),
+      body: JSON.stringify(payload),
     });
     const body: any = await res.json().catch(() => ({}));
     if (!res.ok || body?.found !== true || typeof body.imageUrl !== 'string') {
@@ -140,11 +148,11 @@ export async function resolveExplanationImage(cue: string, subject?: string): Pr
  */
 export function imageCueInstruction(): string {
   return [
-    '',
-    'IMAGE REQUEST (optional): if — and only if — a figure would materially help this explanation,',
-    'end your reply with one final line exactly like:',
-    'IMAGE_CUE: <a short description of the single most useful image, e.g. "chest X-ray of tension pneumothorax">',
-    'Describe only the FINDING and MODALITY. Never output a URL, filename, link or markdown image.',
-    'If no image would genuinely help, end with: IMAGE_CUE: NONE',
+ '',
+ 'IMAGE REQUEST (optional): if — and only if — a figure would materially help this explanation,',
+ 'end your reply with one final line exactly like:',
+ 'IMAGE_CUE: <a short description of the single most useful image, e.g. "chest X-ray of tension pneumothorax">',
+ 'Describe only the FINDING and MODALITY. Never output a URL, filename, link or markdown image.',
+ 'If no image would genuinely help, end with: IMAGE_CUE: NONE',
   ].join('\n');
 }

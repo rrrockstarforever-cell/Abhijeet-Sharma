@@ -2,7 +2,7 @@
 // duplicate of it must not be written again. Run: node --import tsx tools/quality/retirement.test.mjs
 import { generateExamQuestions } from '../../src/lib/ai.ts';
 
-globalThis.localStorage = { getItem: (k) => (k === 'ai.activeProvider' ? 'nvidia' : null), setItem: () => {}, removeItem: () => {} };
+globalThis.localStorage = { getItem: (k) => (k === 'ai.activeProvider' ? 'gemini' : null), setItem: () => {}, removeItem: () => {} };
 
 let fails = 0;
 const expect = (name, got, want) => {
@@ -15,7 +15,6 @@ const calls = [];
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (url, init) => {
   const u = String(url);
-  if (u.includes('/api/ai/nvidia-stats')) return new Response('{}');
   if (u.includes('/api/web/research')) {
     return new Response(JSON.stringify({ sources: [{ title: 'Test source', text: 'Phospholipase C of Bacillus anthracis degrades the phospholipid bilayer of host cells and enables escape from phagosomes. Penicillin is the first-line treatment for this infection in standard practice.', kind: 'book' }] }));
   }

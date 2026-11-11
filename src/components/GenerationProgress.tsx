@@ -26,12 +26,12 @@ interface GenerationProgressProps {
 
 // Ordered pipeline steps (idle is the resting state, not part of the bar)
 const STEP_ORDER: Exclude<GenerationStep, 'idle'>[] = [
-  'generating',
-  'refining',
-  'saved',
-  'qa',
-  'integrity',
-  'done',
+ 'generating',
+ 'refining',
+ 'saved',
+ 'qa',
+ 'integrity',
+ 'done',
 ];
 
 const STEP_LABELS: Record<Exclude<GenerationStep, 'idle'>, string> = {

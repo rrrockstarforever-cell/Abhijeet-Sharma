@@ -86,57 +86,6 @@ export const INI_CET_DOMAINS_6 = [
   }
 ];
 
-export const AMC_CAT_DOMAINS_6 = [
-  {
-    id: 'AMC_MED',
-    name: 'Adult Health – Medicine',
-    officialWeight: '30%',
-    questionRatio: '45 of 150 Qs',
-    desc: 'Acute medical emergencies, chronic disease management, pharmacotherapy (eTG guidelines).',
-    highYield: true
-  },
-  {
-    id: 'AMC_SURG',
-    name: 'Adult Health – Surgery',
-    officialWeight: '20%',
-    questionRatio: '30 of 150 Qs',
-    desc: 'Acute abdomen, surgical trauma, post-operative complications, surgical oncology.',
-    highYield: true
-  },
-  {
-    id: 'AMC_WOMEN',
-    name: "Women's Health (Obstetrics & Gynaecology)",
-    officialWeight: '12.5%',
-    questionRatio: '19 of 150 Qs',
-    desc: 'Antenatal screening, obstetric emergencies, contraception, abnormal uterine bleeding.',
-    highYield: true
-  },
-  {
-    id: 'AMC_CHILD',
-    name: 'Child Health (Paediatrics)',
-    officialWeight: '12.5%',
-    questionRatio: '19 of 150 Qs',
-    desc: 'Developmental milestones, neonatal sepsis, pediatric immunization (Australian schedule), acute stridor.',
-    highYield: true
-  },
-  {
-    id: 'AMC_PSYCH',
-    name: 'Mental Health (Psychiatry)',
-    officialWeight: '12.5%',
-    questionRatio: '19 of 150 Qs',
-    desc: 'Major depression, psychosis, acute mania, deliberate self-harm triage, Mental Health Act.',
-    highYield: true
-  },
-  {
-    id: 'AMC_POP',
-    name: 'Population Health, General Practice & Ethics',
-    officialWeight: '12.5%',
-    questionRatio: '19 of 150 Qs',
-    desc: 'RACGP preventive health, infectious disease notification, Australian legal consent & Aboriginal health.',
-    highYield: true
-  }
-];
-
 // ==========================================
 // 2. CLINICAL QUESTIONS BANK WITH DIFFICULTY
 // ==========================================
@@ -195,8 +144,8 @@ export const INITIAL_QUESTIONS: ClinicalQuestion[] = [
     trapExplanation: 'You committed a classical Board Distractor error. VanB is chromosome- or plasmid-borne and confers resistance to Vancomycin but remains susceptible to Teicoplanin. VanA confers resistance to both via substitution of D-Ala-D-Ala with D-Ala-D-Lac.',
     boardPearl: 'Drug of Choice for VanA VRE bacteremia: Linezolid (Oxazolidinone: 50S subunit inhibitor) or Daptomycin (cyclic lipopeptide for bactericidal clearance, contraindicated in pneumonia due to pulmonary surfactant inactivation).',
     citations: [
-      "Harrison's Principles of Internal Medicine 21st Ed. · Ch. 142 (Enterococcal Infections, pp. 1120-1124)",
-      'Robbins & Cotran Pathologic Basis of Disease 10th Ed. · p. 344',
+ "Harrison's Principles of Internal Medicine 21st Ed. · Ch. 142 (Enterococcal Infections, pp. 1120-1124)",
+ 'Robbins & Cotran Pathologic Basis of Disease 10th Ed. · p. 344',
     ],
     targetAccuracy: 68,
     nationalPercentile: 82,
@@ -226,68 +175,12 @@ export const INITIAL_QUESTIONS: ClinicalQuestion[] = [
     trapExplanation: 'You latched onto hemoptysis + renal failure and jumped to Anti-GBM (Goodpasture). However, the stem specified "faint, non-specific immunoglobulin deposition" (Pauci-Immune). Goodpasture requires smooth linear IgG deposition.',
     boardPearl: 'Pauci-immune RPGN Type III is characterized by c-ANCA (PR3) antibodies directed against proteinase-3 neutrophils. The silver stain demarcates ruptured Bowman capsule basement membranes with exuberant parietal cell proliferation.',
     citations: [
-      'Robbins 10th Ed · Glomerular Diseases (p. 912)',
-      "Harrison's 21st Ed · Vasculitis & Nephritic Syndromes (p. 2310)",
+ 'Robbins 10th Ed · Glomerular Diseases (p. 912)',
+ "Harrison's 21st Ed · Vasculitis & Nephritic Syndromes (p. 2310)",
     ],
     targetAccuracy: 52,
     isFlagged: true,
     timesFailed: 1,
-  },
-  {
-    id: 'Q-AMC-501',
-    moduleCode: 'AMC CAT Examination · Core Clinical Block #501',
-    examType: 'AMC_CAT',
-    subject: 'Adult Health – Medicine',
-    subtopic: 'Cardiology & Emergency Pharmacology (eTG)',
-    cognitiveTier: 'Clinical 2-Step',
-    difficultyTier: 'MEDIUM',
-    difficultySubLevel: 'M1',
-    questionText: 'A 64-year-old male presents to the Emergency Department in Sydney with acute central chest pain, diaphoresis, and ST-elevation in leads II, III, and aVF. Blood pressure is 84/50 mmHg with heart rate 54 bpm. Jugular venous pulse is elevated to 6 cm above sternal angle, but lung fields are clear to auscultation bilaterally. Which initial pharmacological management is contraindicated?',
-    stem: 'Right Ventricular Infarction with Hypotension & Clear Lung Bases',
-    options: [
-      { id: 'A', text: 'Intravenous normal saline 500 mL fluid challenge' },
-      { id: 'B', text: 'Sublingual glyceryl trinitrate (GTN) 400 mcg spray' },
-      { id: 'C', text: 'Oral Aspirin 300 mg chewable' },
-      { id: 'D', text: 'Immediate activation of cardiac catheterization laboratory for primary PCI' },
-      { id: 'E', text: 'Supplemental oxygen titrated only if oxygen saturation drops below 92%' },
-    ],
-    correctOption: 'B',
-    trapType: 'PRELOAD REDUCTION COLLAPSE IN RV INFARCTION',
-    trapExplanation: 'Right ventricular infarctions are strictly preload-dependent. Administering vasodilators (GTN / Nitrates or Morphine) causes acute venodilation, plunging right ventricular filling pressures and precipitating catastrophic refractory cardiogenic shock.',
-    boardPearl: 'Triad of RV Infarction: Hypotension, Raised JVP, and Clear Lungs in the presence of inferior STEMI. Mandatory initial therapy: Aggressive IV normal saline loading to maintain RV preload. Inotropes (Dobutamine) if fluid fails.',
-    citations: [
-      'Australian Therapeutic Guidelines (eTG) · Cardiovascular: STEMI 2024',
-      "Harrison's Internal Medicine 21st Ed. · Acute Myocardial Infarction",
-    ],
-    targetAccuracy: 64,
-  },
-  {
-    id: 'Q-AMC-502',
-    moduleCode: 'AMC CAT Examination · Paediatric Sepsis #502',
-    examType: 'AMC_CAT',
-    subject: 'Child Health (Paediatrics)',
-    subtopic: 'Neonatal Antimicrobial Protocols',
-    cognitiveTier: 'Direct Recall',
-    difficultyTier: 'LOW',
-    difficultySubLevel: 'L1',
-    questionText: 'A 10-day-old neonate with jaundice is admitted to a regional hospital in Queensland with temperature 38.6°C, poor feeding, and lethargy. Full blood examination shows elevated white cell count and CRP 42 mg/L. According to Australian Therapeutic Guidelines (eTG), which empirical intravenous regimen is recommended?',
-    stem: 'Empirical Regimen for Early/Late-Onset Neonatal Sepsis (<28 Days)',
-    options: [
-      { id: 'A', text: 'Intravenous Ampicillin plus Gentamicin' },
-      { id: 'B', text: 'Intravenous Ceftriaxone monotherapy' },
-      { id: 'C', text: 'Intravenous Vancomycin plus Meropenem' },
-      { id: 'D', text: 'Oral Amoxicillin-Clavulanate' },
-      { id: 'E', text: 'Intravenous Ciprofloxacin plus Metronidazole' },
-    ],
-    correctOption: 'A',
-    trapType: 'CEFTRIAXONE BINDING DISPLACEMENT KERNICTERUS',
-    trapExplanation: 'Ceftriaxone is explicitly contraindicated in jaundiced neonates <28 days due to displacement of bilirubin from albumin binding sites (Kernicterus) and calcium salt precipitation. Ampicillin + Gentamicin or Ampicillin + Cefotaxime is the standard protocol.',
-    boardPearl: 'Ampicillin covers Listeria monocytogenes and Group B Streptococcus (S. agalactiae). Gentamicin provides synergistic bactericidal coverage for Gram-negative enteric bacilli (E. coli).',
-    citations: [
-      'Australian Therapeutic Guidelines (eTG) · Paediatric Sepsis Guidelines 2024',
-      'Royal Children’s Hospital Melbourne Clinical Guidelines',
-    ],
-    targetAccuracy: 78,
   },
   {
     id: 'Q-GM-4120',
@@ -312,8 +205,8 @@ export const INITIAL_QUESTIONS: ClinicalQuestion[] = [
     trapExplanation: 'Classic board lethal error: Beta-blockade before alpha-blockade eliminates beta-2 mediated vasodilation in skeletal muscle vascular beds, leaving pure, unopposed alpha-1 stimulation. This precipitates fatal hypertensive crises and acute pulmonary edema.',
     boardPearl: 'Rule of tens for Pheochromocytoma: 10% bilateral, 10% extra-adrenal (paraganglioma), 10% malignant, 10% familial (MEN 2A/2B, VHL, NF1). Always alpha-block first!',
     citations: [
-      "Harrison's Internal Medicine 21st Ed. · Ch. 379 (Adrenal Medulla)",
-      'Goodman & Gilman Pharmacology 14th Ed. · Adrenergic Antagonists',
+ "Harrison's Internal Medicine 21st Ed. · Ch. 379 (Adrenal Medulla)",
+ 'Goodman & Gilman Pharmacology 14th Ed. · Adrenergic Antagonists',
     ],
     targetAccuracy: 61,
     isFlagged: true,
@@ -475,9 +368,9 @@ The VanA phenotype is the most clinically prevalent variant worldwide. Carried o
 
 VanA confers high-level inducible resistance to both vancomycin (MIC >= 64 mcg/mL) and teicoplanin (MIC >= 16 mcg/mL). By contrast, the VanB operon (inducible strictly by vancomycin) retains in vitro susceptibility to teicoplanin. However, emergence of promoter mutations during teicoplanin therapy frequently leads to clinical failure.`,
         pearls: [
-          'VanA = Transposon Tn1546 on plasmid; resistant to both Vancomycin and Teicoplanin.',
-          'VanB = Inducible strictly by Vancomycin; Teicoplanin susceptible in vitro.',
-          'VanC = Intrinsic chromosomal resistance in E. gallinarum and E. casseliflavus; D-Ala-D-Ser; low level.',
+ 'VanA = Transposon Tn1546 on plasmid; resistant to both Vancomycin and Teicoplanin.',
+ 'VanB = Inducible strictly by Vancomycin; Teicoplanin susceptible in vitro.',
+ 'VanC = Intrinsic chromosomal resistance in E. gallinarum and E. casseliflavus; D-Ala-D-Ser; low level.',
         ]
       },
       {
@@ -487,8 +380,8 @@ VanA confers high-level inducible resistance to both vancomycin (MIC >= 64 mcg/m
 
 Therapeutic management of VanA VRE bacteremia relies primarily on Linezolid (600 mg IV q12h) or high-dose Daptomycin (8-12 mg/kg/day). Daptomycin is contraindicated in VRE pneumonia due to inactivation by pulmonary surfactant. Quinupristin-dalfopristin is active against E. faecium but inactive against E. faecalis due to intrinsic efflux pump mechanisms.`,
         pearls: [
-          'Linezolid: 50S ribosome inhibitor; monitor for myelosuppression and serotonin syndrome with SSRIs.',
-          'Daptomycin: Cyclic lipopeptide; contraindicated in pneumonia due to surfactant binding.',
+ 'Linezolid: 50S ribosome inhibitor; monitor for myelosuppression and serotonin syndrome with SSRIs.',
+ 'Daptomycin: Cyclic lipopeptide; contraindicated in pneumonia due to surfactant binding.',
         ]
       },
       {
@@ -500,8 +393,8 @@ Preoperative medical preparation is mandatory to avoid intraoperative catastroph
 
 CRITICAL BOARD RULE: Beta-blockers (e.g. Propranolol, Atenolol) should NEVER be started before effective alpha-blockade is established. Administering a beta-blocker first eliminates beta-2 mediated peripheral vasodilation, resulting in unopposed alpha-1 stimulation that precipitates acute pulmonary edema and lethal hypertensive crisis.`,
         pearls: [
-          'Preoperative Rule: Alpha-blocker FIRST (Phenoxybenzamine), Beta-blocker SECOND.',
-          'Rule of 10s: 10% bilateral, 10% extra-adrenal, 10% malignant, 10% familial (MEN 2A/2B, VHL).',
+ 'Preoperative Rule: Alpha-blocker FIRST (Phenoxybenzamine), Beta-blocker SECOND.',
+ 'Rule of 10s: 10% bilateral, 10% extra-adrenal, 10% malignant, 10% familial (MEN 2A/2B, VHL).',
         ]
       }
     ]
@@ -535,9 +428,9 @@ RPGN is classified into three immunological categories:
 2. Type II (Immune Complex Mediated): Granular immune complex deposition (Lupus, Post-streptococcal, IgA nephropathy).
 3. Type III (Pauci-Immune RPGN): Lack of significant anti-GBM or immune complexes (<1+ IF). Strongly associated with circulating Antineutrophil Cytoplasmic Antibodies (ANCA) – c-ANCA (PR3) in Granulomatosis with Polyangiitis and p-ANCA (MPO) in Microscopic Polyangiitis.`,
         pearls: [
-          'Silver Methenamine stain: Delineates black capillary basement membrane rupture.',
-          'Pauci-Immune RPGN = Faint or negative IF; c-ANCA (PR3) or p-ANCA (MPO).',
-          'Goodpasture = Smooth linear IgG along capillary walls.',
+ 'Silver Methenamine stain: Delineates black capillary basement membrane rupture.',
+ 'Pauci-Immune RPGN = Faint or negative IF; c-ANCA (PR3) or p-ANCA (MPO).',
+ 'Goodpasture = Smooth linear IgG along capillary walls.',
         ]
       }
     ]
@@ -576,19 +469,6 @@ export const SAVED_HIGHLIGHTS: SavedHighlight[] = [
     tags: ['#Endocrine', '#EmergencyManagement', '#BoardTrap'],
     srsIntervalDays: 1,
     lastReviewed: 'Yesterday',
-  },
-  {
-    id: 'H3',
-    subject: 'Adult Health – Medicine (AMC)',
-    subtopic: 'Cardiology Emergency',
-    yieldTier: 'AMC CAT High-Frequency',
-    sourceContext: 'Saved from AMC Practice Module',
-    citation: 'Australian Therapeutic Guidelines (eTG) · Cardiovascular: STEMI 2024',
-    quote: '"In Right Ventricular Myocardial Infarction presenting with hypotension, raised JVP and clear lung fields, Nitrates and Morphine are contraindicated. Preload must be preserved with IV fluids."',
-    memoryAnchor: 'AMC GUIDELINE PEARL: Never give GTN to inferior STEMI with elevated neck veins and low BP; load normal saline first!',
-    tags: ['#RVInfarction', '#AMC', '#eTG'],
-    srsIntervalDays: 7,
-    lastReviewed: '3 days ago',
   }
 ];
 
@@ -658,7 +538,7 @@ export function generatePracticeQuestions(
       trapExplanation: `In ${subtopic}, options C and D represent typical board exam distractor patterns. Option A provides the direct evidence-backed clinical action.`,
       boardPearl: `Faculty Pearl for ${subtopic}: Recognize hallmark pathognomonic findings early. Prioritize immediate stabilization and definitive guideline-based therapy.`,
       citations: [
-        exam === 'AMC_CAT' ? 'Australian Therapeutic Guidelines (eTG) 2024' : "Harrison's Principles of Internal Medicine 21st Ed.",
+ "Harrison's Principles of Internal Medicine 21st Ed.",
         exam === 'NEET_PG' ? 'Robbins & Cotran Pathologic Basis of Disease 10th Ed.' : 'AIIMS New Delhi Clinical Protocol Guide'
       ],
       targetAccuracy: qTier === 'LOW' ? 82 : qTier === 'MEDIUM' ? 64 : 48,

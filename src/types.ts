@@ -1,4 +1,4 @@
-export type ExamType = 'NEET_PG' | 'INI_CET' | 'AMC_CAT';
+export type ExamType = 'NEET_PG' | 'INI_CET';
 
 export type AppView =
   | 'analytics'
@@ -12,7 +12,11 @@ export type AppView =
   | 'research'
   | 'settings'
   | 'image-review'
-  | 'qa';
+  | 'qa'
+  | 'study-plan'
+  | 'syllabus'
+  | 'reminders'
+  | 'sync';
 
 export type DifficultyTier = 'ALL' | 'LOW' | 'MEDIUM' | 'HIGH';
 
@@ -31,7 +35,7 @@ export interface MCQStatement {
 export interface ClinicalQuestion {
   id: string;
   moduleCode?: string;
-  sourceType?: 'ai-generator' | 'emedici' | 'success' | 'amc';
+  sourceType?: 'ai-generator' | 'emedici' | 'success';
   examType: ExamType;
   subject: string;
   subtopic: string;

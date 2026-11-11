@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import { scopeInstruction } from './src/lib/scopeRules.ts';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -19,9 +20,9 @@ import {
 import { aiLog } from './server/oauth.mjs';
 import { research as webResearch, literatureSources, SOURCE_REGISTRY } from './server/web.mjs';
 import { pyqWeights, pyqSource } from './server/pyqFrequency.mjs';
-import { searchImages, fetchImage, REFERENCE_SOURCES, parseVisionVerdict, buildVisionVerificationPrompt } from './server/images.mjs';
-import { buildImageBank, loadImageBank, queryImageBank, getBankImage, bankStats, rejectImage, searchBankByText } from './server/imageBank.mjs';
+import { searchImages, fetchImage, REFERENCE_SOURCES, buildVisionVerificationPrompt, parseVisionVerdict } from './server/images.mjs';
 import { generateQuestionFromImage } from './server/visionQuestion.mjs';
+import { buildImageBank, loadImageBank, queryImageBank, getBankImage, bankStats, rejectImage, searchBankByText } from './server/imageBank.mjs';
 import {
   runQaPipeline,
   listExamProfiles,
@@ -58,9 +59,8 @@ try { dotenv.config({ path: ENV_FILE }); } catch { /* dev: file may not exist */
 // Page images for notes are far larger than the default 100 KB body limit. Registered first so
 // this route is parsed here and the global parser below leaves it alone.
 app.use('/api/ai/complete-images', express.json({ limit: '30mb' }));
-app.use('/api/ocr/nemotron', express.json({ limit: '1mb' }));
 app.use('/api/export/questions', express.json({ limit: '5mb' }));
-app.use(express.json());
+app.use(express.json({ limit: '50mb' })); // raised for the sync-folder push (loopback only)
 
 // ==========================================
 // PROVIDER CONFIG (real providers only)
@@ -76,8 +76,6 @@ const DEFAULT_MODELS: Record<string, string> = {
   grok: 'grok-4.7',
   opencode: OPENCODE_DEFAULT_MODEL,
   custom: 'gpt-4o-mini',
-  nvidia: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
-  vyce: 'deepseek-v4.1',
   deeprelay: 'deeprelay/deepseek-v4.1-flash',
 };
 
@@ -100,51 +98,9 @@ function geminiKey(): string {
   return (process.env.GEMINI_API_KEY || '').trim();
 }
 
-function nvidiaKey(): string {
-  return (process.env.NVIDIA_API_KEY || '').trim();
-}
-
-// VyceAI: an OpenAI-compatible gateway that serves DeepSeek models. The key is saved from Settings.
-const VYCE_BASE_URL = 'https://vyceai.com/v1';
-
-function vyceKey(): string {
-  return (process.env.VYCE_API_KEY || '').trim();
-}
 
 const DEEPRELAY_BASE_URL = 'https://api.deeprelay.ai/v1';
 function deepRelayKey(): string { return (process.env.DEEPRELAY_API_KEY || '').trim(); }
-
-/**
- * Map the app's effort levels onto NVIDIA's chat-template reasoning controls.
- *
- * This matters more than it looks. Both Nemotron 3.5 Super VL and the Ultra model are
- * REASONING models: their hidden reasoning trace is billed against `max_tokens`, so a
- * modest cap gets spent entirely on thinking and the request comes back with
- * finish_reason:"length" and EMPTY content. The model cards expose the fix via
- * chat_template_kwargs: `enable_thinking` toggles the trace and `medium_effort` trims it.
- *
- * Effort therefore maps to a real quality/latency/token trade-off instead of being
- * accepted and silently ignored (which is what used to happen).
- */
-function nvidiaReasoningKwargs(effort?: string): Record<string, unknown> {
-  const level = String(effort || '').trim().toLowerCase();
-  if (level === 'min' || level === 'minimal') return { enable_thinking: false };
-  if (level === 'low' || level === 'brief') return { enable_thinking: true, medium_effort: true };
-  if (level === 'high') return { enable_thinking: true };
-  if (level === 'ultra') return { enable_thinking: true };
-  // Medium / Standard / unset: a trace is still wanted, but not an unbounded one.
-  return { enable_thinking: true, medium_effort: true };
-}
-
-/** Settings that let a long answer finish instead of being truncated mid-thought. */
-function nvidiaTokenBudget(effort?: string): number {
-  const level = String(effort || '').trim().toLowerCase();
-  if (level === 'min' || level === 'minimal') return 2048;
-  if (level === 'low' || level === 'brief') return 4096;
-  if (level === 'high') return 16384;
-  if (level === 'ultra') return 24000;
-  return 8192;
-}
 
 // Gemini client is created lazily and refreshed if the key changes, so a key pasted
 // in Settings takes effect immediately without restarting the server.
@@ -258,8 +214,6 @@ function providerErrorText(body: any, status: number): string {
 function isProviderConnected(providerId: string): boolean {
   if (providerId === 'gemini') return Boolean(geminiKey());
   if (providerId === 'opencode') return Boolean(opencodeKey());
-  if (providerId === 'nvidia') return Boolean(nvidiaKey());
-  if (providerId === 'vyce') return Boolean(vyceKey());
   if (providerId === 'deeprelay') return Boolean(deepRelayKey());
   if (providerId === 'deeprelay') return Boolean(deepRelayKey());
   if (providerId === 'custom') return Boolean(getActiveCustomEndpoint());
@@ -279,12 +233,6 @@ function notConnectedMessage(providerId: string): string {
   if (providerId === 'opencode') {
     return 'OpenCode is not connected. Paste your OpenCode Console API key in Settings → AI Subscription Hub.';
   }
-  if (providerId === 'nvidia') {
-    return 'NVIDIA is not connected. Paste your NVIDIA API key in Settings → AI Subscription Hub.';
-  }
-  if (providerId === 'vyce') {
-    return 'VyceAI is not connected. Paste your VyceAI API key in Settings → AI Subscription Hub.';
-  }
   if (providerId === 'deeprelay') return 'Deep Relay is not connected. Paste your Deep Relay API key in Settings → AI Subscription Hub.';
   if (providerId === 'custom') {
     return 'Custom provider is not connected. Add a custom endpoint in Settings → AI Subscription Hub.';
@@ -292,66 +240,8 @@ function notConnectedMessage(providerId: string): string {
   return `${providerId.charAt(0).toUpperCase() + providerId.slice(1)} is not signed in. Connect an AI provider in Settings → AI Subscription Hub.`;
 }
 
-// Models that refuse the JSON response format. They are sent plain requests from then on.
-const nvidiaNoJsonFormat = new Set<string>();
 
-// Text questions are spread over these NVIDIA models in turn, so one model's rate limit does not hold up every question.
-const NVIDIA_SPREAD_MODELS = [
-  'nvidia/nemotron-3.5-super-vl-120b-a12b',
-];
-let nvidiaSpreadCursor = 0;
-
-// Live counts for the NVIDIA generation, read by the progress widget. Attempts are single HTTP calls; finished
-// counts one per question. Only the last few events are kept.
-type NvidiaAttemptOutcome = 'ok' | 'refused' | 'error' | 'timeout';
-type NvidiaFinishOutcome = 'ok' | 'failed' | 'stopped';
-const nvidiaStats = {
-  started: 0,
-  inFlight: 0,
-  finished: { ok: 0, failed: 0, stopped: 0 } as Record<NvidiaFinishOutcome, number>,
-  // Questions the app kept, and those it dropped by reason (after the model replied).
-  accepted: 0,
-  dropped: {} as Record<string, number>,
-  // Repair outcomes for rejected drafts: attempted (sent), accepted (kept after its checks), failed (no repair returned).
-  repairs: {} as Record<string, number>,
-  tokens: { input: 0, output: 0, total: 0, calls: 0, unreported: 0 },
-  tokenStages: {} as Record<string, { calls: number; input: number; output: number; total: number }>,
-  byModel: {} as Record<string, Record<NvidiaAttemptOutcome, number>>,
-  events: [] as { at: string; model: string; outcome: string; detail: string }[],
-};
-function nvidiaEvent(model: string, outcome: string, detail = '') {
-  nvidiaStats.events.push({ at: new Date().toISOString().slice(11, 19), model: model.replace('nvidia/', ''), outcome, detail });
-  if (nvidiaStats.events.length > 40) nvidiaStats.events.shift();
-}
-function nvidiaAttempt(model: string, outcome: NvidiaAttemptOutcome, detail = '') {
-  const counts = (nvidiaStats.byModel[model] ??= { ok: 0, refused: 0, error: 0, timeout: 0 });
-  counts[outcome] += 1;
-  nvidiaEvent(model, outcome, detail);
-}
-function recordTokenUsage(purpose: string | undefined, body: any): void {
-  const usage = body?.usage ?? body?.token_usage ?? body?.usageMetadata;
-  const input = Number(usage?.prompt_tokens ?? usage?.input_tokens ?? usage?.promptTokenCount ?? 0);
-  const output = Number(usage?.completion_tokens ?? usage?.output_tokens ?? usage?.candidatesTokenCount ?? 0);
-  const total = Number(usage?.total_tokens ?? usage?.totalTokenCount ?? input + output);
-  if (![input, output, total].every(Number.isFinite) || total <= 0) {
-    nvidiaStats.tokens.unreported += 1;
-    return;
-  }
-  const stage = String(purpose || 'other').slice(0, 40);
-  const row = (nvidiaStats.tokenStages[stage] ??= { calls: 0, input: 0, output: 0, total: 0 });
-  row.calls += 1;
-  row.input += input;
-  row.output += output;
-  row.total += total;
-  nvidiaStats.tokens.calls += 1;
-  nvidiaStats.tokens.input += input;
-  nvidiaStats.tokens.output += output;
-  nvidiaStats.tokens.total += total;
-}
-function nvidiaFinish(model: string, outcome: NvidiaFinishOutcome, detail = '') {
-  nvidiaStats.inFlight = Math.max(0, nvidiaStats.inFlight - 1);
-  nvidiaStats.finished[outcome] += 1;
-  nvidiaEvent(model, `question ${outcome}`, detail);
+function recordTokenUsage(_purpose: string | undefined, _body: any): void {
 }
 
 // Shared completion dispatcher used by /api/ai/complete and /api/ai/tutor-chat.
@@ -366,9 +256,7 @@ async function runCompletion(opts: {
   signal?: AbortSignal;
   /** Stable conversation id for providers that route/cache per session (OpenCode Go). */
   session?: string;
-  /** Data URLs attached to the last message. Only the NVIDIA path sends them. */
   images?: string[];
-  /** Spread this call across the NVIDIA text models in turn, so one model's rate limit does not hold up the run. */
   /** Who asked for this call (write, check-solve, check-judge): shown in the server log. */
   purpose?: string;
 }): Promise<string> {
@@ -557,51 +445,6 @@ async function runCompletion(opts: {
     return text;
   }
 
-  if (provider === 'vyce') {
-    const key = vyceKey();
-    if (!key) throw new ApiError(notConnectedMessage('vyce'), 401);
-    const model_ = model || DEFAULT_MODELS.vyce;
-    const payload = JSON.stringify({
-      model: model_,
-      messages: [
-        ...(system ? [{ role: 'system', content: system }] : []),
-        ...messages.map((m) => ({ role: m.role, content: m.content })),
-      ],
-      temperature: 0.7,
-      ...(json ? { response_format: { type: 'json_object' } } : {}),
-    });
-    // VyceAI sometimes answers 502 for a moment; one more try almost always succeeds.
-    let r = null as unknown as globalThis.Response;
-    let raw = '';
-    let body: any = {};
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      r = await fetch(`${VYCE_BASE_URL}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-        body: payload,
-        ...(signal ? { signal } : {}),
-      });
-      raw = await r.text();
-      body = {};
-      try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
-      if (r.ok || r.status < 500) break;
-      aiLog({ provider: 'vyce', model: model_, status: r.status, error: true, retry: attempt });
-      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
-    }
-    if (!r.ok) {
-      aiLog({ provider: 'vyce', model: model_, status: r.status, error: true });
-      // Only a bad key means "not connected"; a 403 is a model this account cannot use, so its message is shown.
-      throw new ApiError(`VyceAI: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
-    }
-    const content = body?.choices?.[0]?.message?.content;
-    const text = typeof content === 'string' ? content : '';
-    aiLog({ provider: 'vyce', model: model_, status: r.status, text_len: text.length, json: !!json });
-    recordTokenUsage(opts.purpose, body);
-    if (!text.trim()) {
-      throw new ApiError(`VyceAI returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || 'unknown'}).`, 502);
-    }
-    return text;
-  }
   if (provider === 'deeprelay') {
     const key = deepRelayKey();
     if (!key) throw new ApiError(notConnectedMessage('deeprelay'), 401);
@@ -616,111 +459,6 @@ async function runCompletion(opts: {
     return text;
   }
 
-  if (provider === 'nvidia') {
-    const key = nvidiaKey();
-    if (!key) throw new ApiError(notConnectedMessage('nvidia'), 401);
-    nvidiaStats.started += 1;
-    nvidiaStats.inFlight += 1;
-    // A model chosen in the app is used as it is, with no spreading and no switching on refusal. Without a chosen
-    // model, text requests start on the next model in the spread and image requests use the vision model.
-    const pinned = Boolean(model);
-    const spreadStart = nvidiaSpreadCursor++ % NVIDIA_SPREAD_MODELS.length;
-    let spreadIndex = spreadStart;
-    let model_ = pinned ? String(model) : images?.length ? DEFAULT_MODELS.nvidia : NVIDIA_SPREAD_MODELS[spreadIndex];
-    const payloadMessages = [
-      ...(system ? [{ role: 'system', content: system }] : []),
-      ...messages.map((m, i) => ({
-        role: m.role,
-        content: images?.length && i === messages.length - 1
-          ? [{ type: 'text', text: m.content }, ...images.map((url) => ({ type: 'image_url', image_url: { url } }))]
-          : m.content,
-      })),
-    ];
-    const buildPayload = (withFormat: boolean) => JSON.stringify({
-      model: model_,
-      messages: payloadMessages,
-      // Reading pages is transcription as much as writing, so keep it close to the source.
-      temperature: images?.length ? 0.3 : 0.7,
-      // Let a long clinical answer finish rather than starving the reasoning trace.
-      max_tokens: nvidiaTokenBudget(effort),
-      chat_template_kwargs: nvidiaReasoningKwargs(effort),
-      ...(json && withFormat ? { response_format: { type: 'json_object' } } : {}),
-    });
-    // Some models refuse response_format; for those the request goes without it and the JSON is read from the text.
-    let withFormat = Boolean(json) && !nvidiaNoJsonFormat.has(model_);
-    let payload = buildPayload(withFormat);
-    let httpRes: any = null;
-    let raw = '';
-    let body: any = {};
-    // Up to six tries. A refused call (429) waits 5 seconds and tries again, so a burst of questions drains instead of failing.
-    for (let attempt = 1; attempt <= 6; attempt++) {
-      try {
-        httpRes = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-          body: payload,
-          // A call that never returns would hold its question forever; give up after 60 seconds, or sooner if the client stops.
-          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000),
-        });
-      } catch (err: any) {
-        if (signal?.aborted) {
-          nvidiaFinish(model_, 'stopped');
-          throw err;
-        }
-        nvidiaAttempt(model_, err?.name === 'TimeoutError' ? 'timeout' : 'error', err?.name ?? 'error');
-        console.log(`[nvidia] ${new Date().toISOString().slice(11, 23)} ${opts.purpose ?? 'unlabelled'} model=${model_} failed=${err?.name ?? 'error'}`);
-        httpRes = null;
-        if (attempt >= 3) break;
-        await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
-        continue;
-      }
-      raw = await httpRes.text();
-      console.log(`[nvidia] ${new Date().toISOString().slice(11, 23)} ${opts.purpose ?? 'unlabelled'} model=${model_} attempt=${attempt} status=${httpRes.status}`);
-      body = {};
-      try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
-      if (httpRes.status === 400 && withFormat && /response_format/i.test(raw)) {
-        nvidiaNoJsonFormat.add(model_);
-        withFormat = false;
-        payload = buildPayload(false);
-        attempt -= 1;
-        continue;
-      }
-      const rateLimited = httpRes.status === 429;
-      nvidiaAttempt(model_, httpRes.ok ? 'ok' : rateLimited ? 'refused' : 'error', String(httpRes.status));
-      if (httpRes.ok || (httpRes.status < 500 && !rateLimited)) break;
-      aiLog({ provider: 'nvidia', model: model_, status: httpRes.status, error: true, retry: attempt });
-      // Server errors give up after three tries; refused calls keep trying until the sixth.
-      if (!rateLimited && attempt >= 3) break;
-      if (rateLimited && !images?.length && !pinned) {
-        // A refused call moves straight to the next model in the spread. It waits only after every model has refused.
-        spreadIndex = (spreadIndex + 1) % NVIDIA_SPREAD_MODELS.length;
-        model_ = NVIDIA_SPREAD_MODELS[spreadIndex];
-        withFormat = Boolean(json) && !nvidiaNoJsonFormat.has(model_);
-        payload = buildPayload(withFormat);
-        if (spreadIndex !== spreadStart) continue;
-      }
-      if (attempt < 6) await new Promise((resolve) => setTimeout(resolve, rateLimited ? 5000 : 1200 * attempt));
-    }
-    if (!httpRes || !httpRes.ok) {
-      const status = httpRes?.status ?? 502;
-      aiLog({ provider: 'nvidia', model: model_, status, error: true });
-      nvidiaFinish(model_, 'failed', String(status));
-      // Keep NVIDIA's own words (quota, rate or model message) so the cause can be read in the app.
-      const detail = providerErrorText(body, status);
-      const extra = detail === `HTTP ${status}` && raw ? ` — ${raw.replace(/s+/g, ' ').slice(0, 160)}` : '';
-      throw new ApiError(`NVIDIA: ${detail}${extra}`, status === 401 ? 401 : 502);
-    }
-    const content = body?.choices?.[0]?.message?.content;
-    const text = typeof content === 'string' ? content : '';
-    aiLog({ provider: 'nvidia', model: model_, status: httpRes.status, text_len: text.length, json: !!json });
-    recordTokenUsage(opts.purpose, body);
-    if (!text.trim()) {
-      nvidiaFinish(model_, 'failed', 'empty');
-      throw new ApiError(`NVIDIA returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || 'unknown'}).`, 502);
-    }
-    nvidiaFinish(model_, 'ok');
-    return text;
-  }
 
   const internal = INTERNAL_PROVIDER[provider];
   if (!internal) throw new ApiError(`Unknown AI provider: ${provider}`, 400);  try {
@@ -740,7 +478,7 @@ async function runCompletion(opts: {
       throw new ApiError(notConnectedMessage(provider), 401);
     }
     if (provider === 'claude' && /not allowed for this organization/i.test(msg)) {
-      throw new ApiError('Claude subscription sign-in is restricted for your organisation. Use Claude via OpenCode (Claude Haiku 5.5) or add a Gemini API key instead.', 401);
+      throw new ApiError('Claude subscription sign-in is restricted for your organisation. Use Claude via OpenCode or add a Gemini API key instead.', 401);
     }
     if (provider === 'opencode' && /unavailable/i.test(msg)) {
       throw new ApiError('OpenCode: this model is not on your plan. Pick one from “Find models” (Go-included: deepseek-v4.1-flash, grok-4.7, qwen3.8-flash, glm-5.3-flash …).', 400);
@@ -765,8 +503,6 @@ app.get('/api/oauth/status', (req: Request, res: Response) => {
       claude: { connected: isProviderConnected('claude') },
       grok: { connected: isProviderConnected('grok') },
       opencode: { connected: isProviderConnected('opencode') },
-      nvidia: { connected: isProviderConnected('nvidia') },
-      vyce: { connected: isProviderConnected('vyce') },
       deeprelay: { connected: isProviderConnected('deeprelay') },
       custom: { connected: isProviderConnected('custom') },
     },
@@ -809,6 +545,7 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
     `Split the topic "${topic}" into its distinct subtopics, sorted as an examiner would sort them:`,
     'for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. List every distinct subtopic an examiner tests on this topic: a narrow topic may have only two or three, a broad one thirty or more. Do not stop at a fixed number.',
     'Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.',
+    `Subtopic lock: list only subtopics inside the boundary. ${scopeInstruction()} Do not broaden a narrow topic to its whole chapter.`,
     'Give each subtopic a priority from 1 to 10 for how often it is tested.',
     'Give each subtopic "facts": the number of high-yield, exam-testable facts in it (1 to 6). Count only facts an examiner would ask, not background detail.',
     // JSON mode returns one object, so the list sits inside it under "subtopics".
@@ -847,8 +584,7 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
   };
   try {
     // A small model sometimes gives no list. Retry once with the stronger default model, then fall back to the typed topic.
-    let subtopics = await splitWith(model || undefined).catch(() => []);
-    if (!subtopics.length && provider === 'nvidia') subtopics = await splitWith(DEFAULT_MODELS.nvidia).catch(() => []);
+    let subtopics = await splitWith(model || undefined).catch((e: any) => { console.log('[split-topic] first attempt failed:', e?.message || e); return []; });
     // One or two categories cannot spread a set, so a thin split is asked again with a stricter brief.
     if (subtopics.length < 4) {
       const strict = [
@@ -858,13 +594,8 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
         'For a disease, cover its causes, clinical features, investigations, treatment, complications and prognosis.',
         'A single subtopic is not acceptable.',
       ].join('\n');
-      const more = await splitWith(model || undefined, strict).catch(() => []);
+      const more = await splitWith(model || undefined, strict).catch((e: any) => { console.log('[split-topic] strict attempt failed:', e?.message || e); return []; });
       if (more.length > subtopics.length) subtopics = more;
-    }
-    // VyceAI sometimes cannot answer this brief at all (long evidence); NVIDIA is the fallback for the split.
-    if (subtopics.length < 4 && provider === 'vyce') {
-      const alt = await splitWith(DEFAULT_MODELS.nvidia, prompt, 'nvidia').catch(() => []);
-      if (alt.length > subtopics.length) subtopics = alt;
     }
     // A failed or thin split (the provider was rate-limited or timed out) is never kept: the next request asks again.
     const thin = subtopics.length < 4;
@@ -938,7 +669,6 @@ async function listDistinctTopics(
   ].filter(Boolean).join('\n');
   const raw = await runCompletion({
     provider: provider || 'gemini',
-    model: model || DEFAULT_MODELS.nvidia,
     messages: [{ role: 'user', content: prompt }],
     json: true,
     effort: 'min',
@@ -1011,7 +741,6 @@ app.post('/api/ai/plan-topics', async (req: Request, res: Response) => {
     if (!raw) {
       raw = await runCompletion({
         provider: provider || 'gemini',
-        model: model || DEFAULT_MODELS.nvidia,
         messages: [{ role: 'user', content: planPrompt }],
         json: true,
         // Ranking subtopics is a short judgement, so it runs without reasoning, like the rest of the pipeline.
@@ -1201,14 +930,6 @@ app.post('/api/oauth/complete', async (req: Request, res: Response) => {
 // 5. POST /api/oauth/logout: revoke the locally stored subscription tokens
 app.post('/api/oauth/logout', (req: Request, res: Response) => {
   const { provider } = req.body || {};
-  if (provider === 'vyce') {
-    try {
-      clearEnvValue('VYCE_API_KEY');
-      return res.json({ ok: true, connected: false, provider });
-    } catch (err: any) {
-      return res.status(500).json({ error: err?.message || 'Could not remove the VyceAI key.' });
-    }
-  }
   if (provider === 'opencode') {
     // The OpenCode key is a plain API key in <PULSE_DATA_DIR>/.env, not an OAuth token.
     try {
@@ -1261,35 +982,6 @@ app.post('/api/settings/opencode-key', (req: Request, res: Response) => {
   }
 });
 
-// 6c. POST /api/settings/nvidia-key: save the NVIDIA API key.
-// NEVER echoes the key back.
-app.post('/api/settings/nvidia-key', (req: Request, res: Response) => {
-  const key = String(req.body?.apiKey || '').trim();
-  if (!/^[A-Za-z0-9_\-]{10,}$/.test(key)) {
-    return res.status(400).json({ error: 'That does not look like a valid NVIDIA API key.' });
-  }
-  try {
-    writeEnvValue('NVIDIA_API_KEY', key);
-    return res.json({ ok: true, connected: true });
-  } catch (err: any) {
-    return res.status(500).json({ error: err?.message || 'Could not save the NVIDIA API key.' });
-  }
-});
-
-// 6d. POST /api/settings/vyce-key: save the VyceAI API key.
-// NEVER echoes the key back.
-app.post('/api/settings/vyce-key', (req: Request, res: Response) => {
-  const key = String(req.body?.apiKey || '').trim();
-  if (!/^[A-Za-z0-9_.\-]{10,}$/.test(key)) {
-    return res.status(400).json({ error: 'That does not look like a valid VyceAI API key.' });
-  }
-  try {
-    writeEnvValue('VYCE_API_KEY', key);
-    return res.json({ ok: true, connected: true });
-  } catch (err: any) {
-    return res.status(500).json({ error: err?.message || 'Could not save the VyceAI API key.' });
-  }
-});
 
 app.post('/api/settings/deeprelay-key', (req: Request, res: Response) => {
   const key = String(req.body?.apiKey || '').trim();
@@ -1340,6 +1032,220 @@ function findCustomEndpoint(id: string): CustomEndpoint | undefined {
 }
 
 // GET /api/settings/custom-endpoints: list all saved custom endpoints
+// ---- Sync across devices through a shared folder (loopback only; fixed file name) ----
+type PulseSyncStoredConfig = { folder: string | null };
+
+const PULSE_SYNC_FILE_NAME = 'pulse-med-sync.json';
+
+async function pulseSyncConfigPaths(): Promise<{ configDir: string; configFile: string }> {
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const configDir = path.join(os.homedir(), '.pulse-med');
+  return {
+    configDir,
+    configFile: path.join(configDir, 'sync-config.json'),
+  };
+}
+
+async function readPulseSyncStoredConfig(): Promise<PulseSyncStoredConfig> {
+  const fs = await import('node:fs/promises');
+  const { configFile } = await pulseSyncConfigPaths();
+
+  try {
+    const raw = await fs.readFile(configFile, 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === 'object' && 'folder' in parsed) {
+      const folder = (parsed as { folder?: unknown }).folder;
+      if (folder === null || typeof folder === 'string') {
+        return { folder };
+      }
+    }
+  } catch {
+    // Missing or unreadable config means no folder is configured yet.
+  }
+
+  return { folder: null };
+}
+
+async function writePulseSyncStoredConfig(folder: string): Promise<void> {
+  const fs = await import('node:fs/promises');
+  const { configDir, configFile } = await pulseSyncConfigPaths();
+
+  await fs.mkdir(configDir, { recursive: true });
+  await fs.writeFile(configFile, JSON.stringify({ folder }, null, 2), 'utf8');
+}
+
+async function getPulseSyncConfigResponse(folder: string | null): Promise<{
+  folder: string | null;
+  file: string | null;
+  exists: boolean;
+  modifiedAt: string | null;
+}> {
+  if (!folder) {
+    return { folder: null, file: null, exists: false, modifiedAt: null };
+  }
+
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const file = path.join(folder, PULSE_SYNC_FILE_NAME);
+
+  try {
+    const stat = await fs.stat(file);
+    if (!stat.isFile()) {
+      return { folder, file, exists: false, modifiedAt: null };
+    }
+    return {
+      folder,
+      file,
+      exists: true,
+      modifiedAt: stat.mtime.toISOString(),
+    };
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    if (code === 'ENOENT') {
+      return { folder, file, exists: false, modifiedAt: null };
+    }
+    throw error;
+  }
+}
+
+app.get('/api/sync/config', async (_req: Request, res: Response) => {
+  try {
+    const stored = await readPulseSyncStoredConfig();
+    const config = await getPulseSyncConfigResponse(stored.folder);
+    res.json(config);
+  } catch {
+    res.status(500).json({ error: 'Could not read sync configuration.' });
+  }
+});
+
+app.post('/api/sync/config', async (req: Request, res: Response) => {
+  try {
+    const body = req.body as { folder?: unknown } | undefined;
+    const rawFolder = body?.folder;
+
+    if (typeof rawFolder !== 'string' || rawFolder.trim().length === 0) {
+      res.status(400).json({ error: 'A non-empty folder path is required.' });
+      return;
+    }
+
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const folder = path.resolve(rawFolder.trim());
+
+    let stat;
+    try {
+      stat = await fs.stat(folder);
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (code === 'ENOENT') {
+        res.status(400).json({ error: 'The selected folder does not exist.' });
+        return;
+      }
+      throw error;
+    }
+
+    if (!stat.isDirectory()) {
+      res.status(400).json({ error: 'The selected path is not a directory.' });
+      return;
+    }
+
+    await writePulseSyncStoredConfig(folder);
+    const config = await getPulseSyncConfigResponse(folder);
+    res.json(config);
+  } catch {
+    res.status(500).json({ error: 'Could not save sync configuration.' });
+  }
+});
+
+app.post('/api/sync/push', async (req: Request, res: Response) => {
+  try {
+    const body = req.body as { payload?: unknown } | undefined;
+    const payload = body?.payload;
+
+    if (typeof payload !== 'string' || payload.length > 50_000_000) {
+      res.status(400).json({
+        error: 'Payload must be a string up to 50,000,000 characters.',
+      });
+      return;
+    }
+
+    const stored = await readPulseSyncStoredConfig();
+    if (!stored.folder) {
+      res.status(400).json({ error: 'No sync folder is configured.' });
+      return;
+    }
+
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const target = path.join(stored.folder, PULSE_SYNC_FILE_NAME);
+    const temp = path.join(
+      stored.folder,
+      `.${PULSE_SYNC_FILE_NAME}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`,
+    );
+
+    let tempWritten = false;
+    try {
+      await fs.writeFile(temp, payload, 'utf8');
+      tempWritten = true;
+      await fs.rename(temp, target);
+      tempWritten = false;
+    } finally {
+      if (tempWritten) {
+        try {
+          await fs.unlink(temp);
+        } catch {
+          // Best-effort cleanup of the temporary file.
+        }
+      }
+    }
+
+    const stat = await fs.stat(target);
+    res.json({
+      ok: true,
+      bytes: Buffer.byteLength(payload, 'utf8'),
+      modifiedAt: stat.mtime.toISOString(),
+    });
+  } catch {
+    res.status(500).json({ error: 'Could not write the sync file.' });
+  }
+});
+
+app.get('/api/sync/pull', async (_req: Request, res: Response) => {
+  try {
+    const stored = await readPulseSyncStoredConfig();
+    if (!stored.folder) {
+      res.status(404).json({ error: 'No sync file is available yet.' });
+      return;
+    }
+
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const file = path.join(stored.folder, PULSE_SYNC_FILE_NAME);
+
+    try {
+      const [payload, stat] = await Promise.all([
+        fs.readFile(file, 'utf8'),
+        fs.stat(file),
+      ]);
+      res.json({
+        ok: true,
+        payload,
+        modifiedAt: stat.mtime.toISOString(),
+      });
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (code === 'ENOENT') {
+        res.status(404).json({ error: 'No sync file is available yet.' });
+        return;
+      }
+      throw error;
+    }
+  } catch {
+    res.status(500).json({ error: 'Could not read the sync file.' });
+  }
+});
+
 app.get('/api/settings/custom-endpoints', (_req: Request, res: Response) => {
   const endpoints = readCustomEndpoints().map((e) => ({ ...e, apiKey: '***' })); // never return real keys
   return res.json({ endpoints });
@@ -1460,38 +1366,8 @@ app.post('/api/settings/custom-endpoints/:id/test', async (req: Request, res: Re
   }
 });
 
-// GET /api/models/custom: discover models from a custom endpoint or NVIDIA.
-// Query param `provider=nvidia` fetches NVIDIA NIM models instead.
 app.get('/api/models/custom', async (_req: Request, res: Response) => {
   const provider = String(_req.query.provider || '').trim();
-  if (provider === 'nvidia') {
-    const key = nvidiaKey();
-    if (!key) {
-      return res.status(401).json({ error: 'NVIDIA API key not configured. Add it in Settings → AI Subscription Hub.' });
-    }
-    try {
-      const r = await fetch('https://integrate.api.nvidia.com/v1/models', {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${key}`,
-        },
-      });
-      const raw = await r.text();
-      let body: any = {};
-      try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
-      if (!r.ok) {
-        return res.status(502).json({ error: `NVIDIA model discovery failed: ${providerErrorText(body, r.status)}` });
-      }
-      const rows: any[] = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
-      const models = rows
-        .map((m) => ({ id: String(m?.id ?? m?.name ?? ''), name: String(m?.name || m?.id || ''), source: 'nvidia' }))
-        .filter((m) => m.id);
-      return res.json({ models, fetchedAt: new Date().toISOString(), provider: 'nvidia' });
-    } catch (err: any) {
-      return res.status(502).json({ error: err?.message || 'Could not discover NVIDIA models.' });
-    }
-  }
 
   // Default: custom endpoint model discovery
   const endpoints = readCustomEndpoints();
@@ -1676,58 +1552,6 @@ async function listGeminiModels(): Promise<{ models: { id: string; name: string;
   }
 }
 
-async function listNvidiaModels(): Promise<{ models: { id: string; name: string; source: string }[]; error?: string }> {
-  if (!isProviderConnected('nvidia')) return { models: [], error: 'No NVIDIA API key saved.' };
-  try {
-    const key = nvidiaKey();
-    const r = await fetch('https://integrate.api.nvidia.com/v1/models', {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${key}`,
-      },
-    });
-    const b = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(b?.error?.message || `HTTP ${r.status}`);
-    const rows: any[] = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
-    const verifiedModels = [
-      'nvidia/nemotron-3.5-super-vl-120b-a12b',
-      'nvidia/nemotron-3-ultra-550b-a55b',
-      'nvidia/nemotron-3.5-lightning-30b-a3b',
-      'nvidia/nemotron-3.5-bolt-e4b',
-      'nvidia/nemotron-3.5-content-safety',
-      'nvidia/nemotron-parse-2.0',
-      'meta/llama-guard-4-12b',
-    ];
-    return {
-      models: rows
-        .map((m) => ({ id: String(m?.id ?? m?.name ?? ''), name: String(m?.name || m?.id || ''), source: 'account' }))
-        .filter((m) => m.id && verifiedModels.includes(m.id)),
-    };
-  } catch (e: any) {
-    return { models: [], error: e?.message || 'Could not list NVIDIA models.' };
-  }
-}
-
-async function listVyceModels(): Promise<{ models: { id: string; name: string; source: string }[]; error?: string }> {
-  if (!isProviderConnected('vyce')) return { models: [], error: 'No VyceAI API key saved.' };
-  try {
-    const r = await fetch(`${VYCE_BASE_URL}/models`, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${vyceKey()}` },
-    });
-    const b = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(providerErrorText(b, r.status));
-    const rows: any[] = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
-    return {
-      models: rows
-        .map((m) => ({ id: String(m?.id ?? m?.name ?? ''), name: String(m?.name || m?.id || ''), source: 'account' }))
-        .filter((m) => m.id),
-    };
-  } catch (e: any) {
-    return { models: [], error: e?.message || 'Could not list VyceAI models.' };
-  }
-}
 
 async function listDeepRelayModels(): Promise<{ models: { id: string; name: string; source: string }[]; error?: string }> {
   if (!isProviderConnected('deeprelay')) return { models: [], error: 'No Deep Relay API key saved.' };
@@ -1744,7 +1568,7 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
   const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
   const probe = req.query.probe === '1' || req.query.probe === 'true';
   const only = String(req.query.provider || '').trim();
-  if (only && !['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'nvidia', 'vyce', 'deeprelay'].includes(only)) {
+  if (only && !['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'deeprelay'].includes(only)) {
     return res.status(400).json({ error: `Unknown provider: ${only}` });
   }
   // The full, unprobed list is cacheable; targeted or probed requests are not.
@@ -1790,17 +1614,7 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
     if (oc.error) errors.opencode = oc.error;
   }
 
-  if (!only || only === 'nvidia') {
-    const nv = await listNvidiaModels();
-    providers.nvidia = nv.models;
-    if (nv.error) errors.nvidia = nv.error;
-  }
 
-  if (!only || only === 'vyce') {
-    const vy = await listVyceModels();
-    providers.vyce = vy.models;
-    if (vy.error) errors.vyce = vy.error;
-  }
   if (!only || only === 'deeprelay') {
     const dr = await listDeepRelayModels(); providers.deeprelay = dr.models; if (dr.error) errors.deeprelay = dr.error;
   }
@@ -1821,7 +1635,7 @@ app.get('/api/models/available', async (req: Request, res: Response) => {
 app.post('/api/models/probe', async (req: Request, res: Response) => {
   const provider = String(req.body?.provider || '').trim();
   const model = String(req.body?.model || '').trim();
-  if (!['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'nvidia', 'vyce', 'deeprelay'].includes(provider)) {
+  if (!['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'custom', 'deeprelay'].includes(provider)) {
     return res.status(400).json({ error: 'Choose a provider to test.' });
   }
   if (!model || model.length > 200) {
@@ -1916,10 +1730,6 @@ async function withInternetSources(messages: OAuthChatMessage[], groundOn: { que
   ];
 }
 
-// Live progress page for NVIDIA generation. Open it in the browser pane or a browser at /nvidia-progress.
-app.get('/nvidia-progress', (_req: Request, res: Response) => {
-  res.type('html').send(fs.readFileSync(path.join(process.cwd(), 'server', 'nvidia-progress.html'), 'utf8'));
-});
 
 // Checks one generated item against the sources: is the keyed answer correct, and is every fact it relies on
 // (a study, a product, a therapy) supported by those sources? Returns 'supported' or 'unsupported' with a reason.
@@ -1973,80 +1783,12 @@ app.post('/api/export/questions', (req: Request, res: Response) => {
   res.json({ ok: true, file: path.join('exports', name) });
 });
 
-// Clears the NVIDIA counts. The app calls this when a new generation starts, so the progress page shows one run.
-app.post('/api/ai/nvidia-stats/reset', (_req: Request, res: Response) => {
-  nvidiaStats.started = 0;
-  nvidiaStats.inFlight = 0;
-  nvidiaStats.finished = { ok: 0, failed: 0, stopped: 0 };
-  nvidiaStats.byModel = {};
-  nvidiaStats.events = [];
-  nvidiaStats.accepted = 0;
-  nvidiaStats.dropped = {};
-  nvidiaStats.repairs = {};
-  nvidiaStats.tokens = { input: 0, output: 0, total: 0, calls: 0, unreported: 0 };
-  nvidiaStats.tokenStages = {};
-  res.json({ ok: true });
-});
 
-// The app reports each question it keeps, or the reason it drops one (for example a failed source check).
-app.post('/api/ai/nvidia-stats/question', (req: Request, res: Response) => {
-  const { outcome, reason, draft } = req.body || {};
-  if (outcome === 'accepted') nvidiaStats.accepted += 1;
-  else if (outcome === 'dropped') {
-    const key = String(reason || 'other');
-    nvidiaStats.dropped[key] = (nvidiaStats.dropped[key] ?? 0) + 1;
-    // Keep the dropped question itself, so the rejects can be examined later: one JSON line per drop.
-    if (draft && typeof draft === 'object') {
-      try {
-        const dir = path.join(process.cwd(), 'tools', 'quality', 'out');
-        fs.mkdirSync(dir, { recursive: true });
-        fs.appendFileSync(path.join(dir, 'dropped-questions.jsonl'), JSON.stringify({ at: new Date().toISOString(), reason: key, draft }) + '\n');
-      } catch {
-        // A failed write must not fail the generation.
-      }
-    }
-  }
-  res.json({ ok: true });
-});
 
-// The app reports each attempt to repair a rejected draft, so the progress page can show how many repairs were sent,
-// kept, or failed. Outcomes are counted individually; unknown values are ignored.
-app.post('/api/ai/nvidia-stats/repair', (req: Request, res: Response) => {
-  const { outcome } = req.body || {};
-  if (outcome === 'attempted' || outcome === 'accepted' || outcome === 'failed') {
-    nvidiaStats.repairs[outcome] = (nvidiaStats.repairs[outcome] ?? 0) + 1;
-  }
-  res.json({ ok: true });
-});
 
 // The engine used by the most recent generation request, so the progress page can show what is running.
 let lastEngine: { provider: string; model: string; at: string } | null = null;
 
-// Snapshot of the NVIDIA counts for the progress widget: totals, per-model attempts and the latest events.
-app.get('/api/ai/nvidia-stats', (_req: Request, res: Response) => {
-  const f = nvidiaStats.finished;
-  const totals = Object.values(nvidiaStats.byModel).reduce(
-    (sum, m) => ({ ok: sum.ok + m.ok, refused: sum.refused + m.refused, error: sum.error + m.error, timeout: sum.timeout + m.timeout }),
-    { ok: 0, refused: 0, error: 0, timeout: 0 },
-  );
-  res.json({
-    started: nvidiaStats.started,
-    inFlight: nvidiaStats.inFlight,
-    questionsOk: f.ok,
-    questionsFailed: f.failed,
-    questionsStopped: f.stopped,
-    accepted: nvidiaStats.accepted,
-    repairs: nvidiaStats.repairs,
-    tokens: nvidiaStats.tokens,
-    tokenStages: nvidiaStats.tokenStages,
-    dropped: nvidiaStats.dropped,
-    attempts: totals,
-    byModel: Object.fromEntries(Object.entries(nvidiaStats.byModel).map(([k, v]) => [k.replace('nvidia/', ''), v])),
-    events: nvidiaStats.events.slice(-25).reverse(),
-    engine: lastEngine,
-    serverTime: new Date().toISOString(),
-  });
-});
 
 app.post('/api/ai/complete', async (req: Request, res: Response) => {
   const { provider, model, system, messages, json, effort, groundOn } = req.body || {};
@@ -2098,12 +1840,6 @@ app.post('/api/ai/jobs', (req: Request, res: Response) => {
   completionJobs.set(id, job);
   const session = req.header('x-opencode-session') || undefined;
   lastEngine = { provider: String(provider), model: String(model || DEFAULT_MODELS[provider] || provider), at: new Date().toISOString() };
-  // NVIDIA calls are counted inside runCompletion; other providers are counted here, so the progress page covers them too.
-  const countHere = provider !== 'nvidia';
-  if (countHere) {
-    nvidiaStats.started += 1;
-    nvidiaStats.inFlight += 1;
-  }
   void (async () => {
     try {
       const grounded = groundOn && typeof groundOn === 'object' ? await withInternetSources(messages, groundOn) : messages;
@@ -2120,14 +1856,6 @@ app.post('/api/ai/jobs', (req: Request, res: Response) => {
       job.body = { error: err?.message || 'AI request failed.' };
     } finally {
       job.done = true;
-      if (countHere) {
-        // Shown under the model's own name in the "By model" table.
-        nvidiaAttempt(String(model || DEFAULT_MODELS[provider] || provider), job.status === 200 ? 'ok' : 'error', String(job.status));
-        nvidiaStats.inFlight = Math.max(0, nvidiaStats.inFlight - 1);
-        if (job.status === 200) nvidiaStats.finished.ok += 1;
-        else if (job.controller.signal.aborted) nvidiaStats.finished.stopped += 1;
-        else nvidiaStats.finished.failed += 1;
-      }
     }
   })();
   return res.json({ id });
@@ -2152,111 +1880,8 @@ app.delete('/api/ai/jobs/:id', (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
-// Words from an NVIDIA OCR response. The response shape is not fully documented, so this reads any
-// object that carries both a text string and a list of corner points, wherever it sits.
-export function nemotronWords(body: any): { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }[] {
-  const out: { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }[] = [];
-  const visit = (node: any) => {
-    if (!node || typeof node !== 'object') return;
-    if (Array.isArray(node)) {
-      node.forEach(visit);
-      return;
-    }
-    const text: unknown = typeof node.text === 'string' ? node.text : node.text_prediction?.text;
-    const shape = node.bounding_box ?? node.bbox ?? node.points ?? node.bounding_box?.points;
-    const pts: any[] | undefined = Array.isArray(shape) ? shape : Array.isArray(shape?.points) ? shape.points : undefined;
-    if (typeof text === 'string' && text.trim() && pts && pts.length) {
-      const xs: number[] = [];
-      const ys: number[] = [];
-      if (pts.every((v) => typeof v === 'number')) {
-        pts.forEach((v, i) => (i % 2 === 0 ? xs : ys).push(v));
-      } else {
-        for (const p of pts) {
-          const x = Array.isArray(p) ? p[0] : p?.x;
-          const y = Array.isArray(p) ? p[1] : p?.y;
-          if (typeof x === 'number' && typeof y === 'number') {
-            xs.push(x);
-            ys.push(y);
-          }
-        }
-      }
-      if (xs.length && ys.length) {
-        const conf = Number(node.confidence ?? node.text_prediction?.confidence);
-        out.push({
-          text: text.trim(),
-          confidence: Number.isFinite(conf) ? conf * (conf <= 1 ? 100 : 1) : 90,
-          bbox: { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) },
-        });
-      }
-      return;
-    }
-    Object.values(node).forEach(visit);
-  };
-  visit(body);
-  return out;
-}
 
-// POST /api/ocr/nemotron {image} -> {text, words}. One page image through NVIDIA's hosted nemotron-ocr-v2.
-// The image is a JPEG/PNG/WebP data URL; the client shrinks it first, because the API takes at most ~180k base64 characters.
-app.post('/api/ocr/nemotron', async (req: Request, res: Response) => {
-  const image = req.body?.image;
-  if (typeof image !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/.test(image)) {
-    return res.status(400).json({ error: 'image must be a JPEG, PNG or WebP data URL.' });
-  }
-  const key = nvidiaKey();
-  if (!key) return res.status(401).json({ error: notConnectedMessage('nvidia') });
-  if (image.split(',')[1].length > 180_000) {
-    return res.status(413).json({ error: 'The page image is too large for the NVIDIA OCR API. Use a smaller image.' });
-  }
-  try {
-    const r = await fetch('https://ai.api.nvidia.com/v1/cv/nvidia/nemotron-ocr-v2', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ input: [{ type: 'image_url', url: image }] }),
-      signal: AbortSignal.timeout(120_000),
-    });
-    const raw = await r.text();
-    let body: any = {};
-    try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON error body */ }
-    if (!r.ok) return res.status(r.status === 429 ? 429 : 502).json({ error: `NVIDIA OCR: ${providerErrorText(body, r.status)}` });
-    const words = nemotronWords(body);
-    if (process.env.OCR_DEBUG) console.log('[ocr/nemotron] raw response:', raw.slice(0, 2000));
-    return res.json({ text: words.map((w) => w.text).join('\n'), words });
-  } catch (err: any) {
-    return res.status(502).json({ error: err?.message || 'The NVIDIA OCR request failed.' });
-  }
-});
 
-// POST /api/ai/complete-images -> {text}. Same as /api/ai/complete, with page images attached.
-// Only NVIDIA sends images, so other providers get a clear 400 and the client uses text alone.
-app.post('/api/ai/complete-images', async (req: Request, res: Response) => {
-  const { provider, model, system, messages, json, effort, images } = req.body || {};
-  if (provider !== 'nvidia') {
-    return res.status(400).json({ error: `Reading page images is not available with ${provider || 'this provider'}.` });
-  }
-  if (!Array.isArray(messages) || messages.length === 0 || messages.some((m: any) => !m || typeof m.content !== 'string')) {
-    return res.status(400).json({ error: 'messages must be an array of {role, content}.' });
-  }
-  if (!Array.isArray(images) || images.length === 0 || images.some((u: any) => typeof u !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/.test(u))) {
-    return res.status(400).json({ error: 'images must be JPEG, PNG or WebP data URLs.' });
-  }
-  const controller = new AbortController();
-  res.on('close', () => {
-    if (!res.writableFinished) controller.abort();
-  });
-  try {
-    const text = await runCompletion({ provider, model, system, messages, json, effort, images, signal: controller.signal });
-    if (controller.signal.aborted) return;
-    if (!text || !text.trim()) {
-      return res.status(502).json({ error: 'The AI provider returned an empty response. Try again.' });
-    }
-    return res.json({ success: true, text });
-  } catch (err: any) {
-    if (controller.signal.aborted) return;
-    const status = err instanceof ApiError ? err.status : 502;
-    if (!res.headersSent) return res.status(status).json({ error: err?.message || 'AI request failed.' });
-  }
-});
 
 // ---------- tutor-chat (kept for AITutorView; backed by the same real completion path) ----------
 
@@ -2295,10 +1920,7 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
   // The client sends its ACTIVE provider/model; if absent, resolve any connected provider.
   let provider: string = typeof body.provider === 'string' ? body.provider : '';
   if (!provider) {
-    // Include every provider the app actually supports — this list previously omitted
-    // `nvidia`, so a server-side fallback could never select the NVIDIA engine even when
-    // it was the only connected provider.
-    const candidates = ['nvidia', 'chatgpt', 'claude', 'grok', 'opencode', 'gemini'];
+    const candidates = ['chatgpt', 'claude', 'grok', 'opencode', 'gemini'];
     provider = candidates.find((p) => isProviderConnected(p)) || '';
   }
   if (!provider) {
@@ -2431,6 +2053,8 @@ app.get('/api/images/proxy', async (req: Request, res: Response) => {
   }
 });
 
+
+
 // Vision check: does `imageUrl` actually show `claim`? Shared by the /verify route and
 // the bank harvest (so both use identical strictness). Fail-closed: any error, missing
 // key, unsupported type or non-answer yields pass=false — an unverified picture is NEVER
@@ -2439,10 +2063,14 @@ async function visionVerify(
   imageUrl: string,
   claim: string,
   modality: string,
-  key: string,
   questionContext: { questionStem?: string; questionText?: string; correctAnswer?: string; explanation?: string; boardPearl?: string; bodyPart?: string } = {},
+  provider: string = 'gemini',
+  model: string = '',
   attempt = 0,
 ): Promise<{ pass: boolean; reason: string; debug?: { raw: string; finish?: string } }> {
+  if (provider === 'gemini' && !geminiKey()) {
+    return { pass: false, reason: notConnectedMessage('gemini') };
+  }
   const { buffer, type } = await fetchImage(imageUrl);
   // The vision API accepts JPEG/PNG/WebP. GIF (and anything else) is rejected with
   // HTTP 415, so treat it as unverifiable rather than attaching it blind.
@@ -2450,7 +2078,6 @@ async function visionVerify(
     return { pass: false, reason: `Unsupported image type (${type}) — image skipped.` };
   }
   const dataUrl = `data:${type};base64,${buffer.toString('base64')}`;
-  const model_ = process.env.VISION_MODEL || DEFAULT_MODELS.nvidia;
   const instruction = buildVisionVerificationPrompt({
     claim,
     modality,
@@ -2461,6 +2088,10 @@ async function visionVerify(
     boardPearl: questionContext.boardPearl,
     bodyPart: questionContext.bodyPart,
   });
+  if (provider !== 'gemini') {
+    return { pass: false, reason: 'The selected model cannot check images. Use Gemini for image questions.' };
+  }
+  const model_ = model || DEFAULT_MODELS.gemini;
   const payload = JSON.stringify({
     model: model_,
     messages: [
@@ -2474,20 +2105,13 @@ async function visionVerify(
       },
     ],
     temperature: 0,
-    // This is a reasoning model: a small budget is spent entirely on hidden
-    // reasoning (finish_reason "length") and returns empty content. Give it room.
     max_tokens: Number(process.env.VISION_MAX_TOKENS || 2048),
-    // A yes/no verification needs no deliberation at all, and the reasoning trace was
-    // what silently ate the budget and produced empty verdicts. Turn it off outright.
-    chat_template_kwargs: { enable_thinking: false },
     stream: false,
   });
-  const r = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+  const r = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${geminiKey()}` },
     body: payload,
-    // The reasoning model occasionally takes a very long time on a hard image; too
-    // short a timeout silently discards a perfectly good image. Overridable.
     signal: AbortSignal.timeout(Number(process.env.VISION_TIMEOUT_MS || 180000)),
   });
   const raw = await r.text();
@@ -2495,12 +2119,12 @@ async function visionVerify(
   try { body = raw ? JSON.parse(raw) : {}; } catch { /* non-JSON */ }
   if (!r.ok) {
     // A 5xx here is an upstream blip, not a verdict on the image. Retry once so a good
-    // image is not discarded (and forced to text-only) because NVIDIA hiccuped.
+    // image is not discarded (and forced to text-only) because the provider hiccuped.
     if (r.status >= 500 && attempt < 1) {
       await new Promise((resolve) => setTimeout(resolve, 1500));
-      return visionVerify(imageUrl, claim, modality, key, questionContext, attempt + 1);
+      return visionVerify(imageUrl, claim, modality, questionContext, provider, model, attempt + 1);
     }
-    aiLog({ provider: 'nvidia', model: model_, status: r.status, error: true, route: 'images/verify' });
+    aiLog({ provider: 'gemini', model: model_, status: r.status, error: true, route: 'images/verify' });
     return { pass: false, reason: `Vision check failed (HTTP ${r.status}) — image skipped.` };
   }
   const msg = body?.choices?.[0]?.message;
@@ -2510,7 +2134,6 @@ async function visionVerify(
     : Array.isArray(content)
       ? content.map((p: any) => (typeof p === 'string' ? p : p?.text || '')).join('')
       : '';
-  // Some reasoning models put the answer (or everything) in reasoning_content.
   if (!text.trim() && typeof msg?.reasoning_content === 'string') text = msg.reasoning_content;
   const finish = body?.choices?.[0]?.finish_reason;
   const verdict = parseVisionVerdict(text);
@@ -2520,7 +2143,7 @@ async function visionVerify(
     : finish === 'length'
       ? 'Vision model ran out of tokens before answering — image skipped.'
       : 'Model did not return a complete structured verdict — image skipped.');
-  aiLog({ provider: 'nvidia', model: model_, status: r.status, route: 'images/verify', pass, finish, text_len: text.length });
+  aiLog({ provider: 'gemini', model: model_, status: r.status, route: 'images/verify', pass, finish, text_len: text.length });
   return process.env.VISION_DEBUG
     ? { pass, reason, debug: { raw: text.slice(0, 1500), finish } }
     : { pass, reason };
@@ -2529,7 +2152,7 @@ async function visionVerify(
 // POST /api/images/verify -> vision check BEFORE an image may be attached.
 // The old pipeline matched a figure's *caption/title* words, so an unrelated picture
 // whose caption happened to reuse the right words (a tangerine for "hazy cornea")
-// still passed. This actually looks at the pixels with the connected NVIDIA vision
+// still passed. This actually looks at the pixels with the selected Gemini vision
 // model and asks whether the image shows what the question claims.
 app.post('/api/images/verify', async (req: Request, res: Response) => {
   const imageUrl = typeof req.body?.imageUrl === 'string' ? req.body.imageUrl : '';
@@ -2541,15 +2164,13 @@ app.post('/api/images/verify', async (req: Request, res: Response) => {
   const explanation = typeof req.body?.explanation === 'string' ? req.body.explanation.trim().slice(0, 3000) : '';
   const boardPearl = typeof req.body?.boardPearl === 'string' ? req.body.boardPearl.trim().slice(0, 1000) : '';
   const bodyPart = typeof req.body?.bodyPart === 'string' ? req.body.bodyPart.trim().slice(0, 60) : '';
+  const provider = typeof req.body?.provider === 'string' ? req.body.provider : 'gemini';
+  const model = typeof req.body?.model === 'string' ? req.body.model : '';
   if (!imageUrl || !claim) {
     return res.status(400).json({ error: 'imageUrl and claim are required.' });
   }
-  const key = nvidiaKey();
-  if (!key) {
-    return res.json({ pass: false, reason: 'No vision provider connected — image skipped.' });
-  }
   try {
-    const verdict = await visionVerify(imageUrl, claim, modality, key, { questionStem, questionText, correctAnswer, explanation, boardPearl, bodyPart });
+    const verdict = await visionVerify(imageUrl, claim, modality, { questionStem, questionText, correctAnswer, explanation, boardPearl, bodyPart }, provider, model);
     return res.json(verdict);
   } catch (err: any) {
     return res.json({ pass: false, reason: err?.message || 'Vision check failed — image skipped.' });
@@ -2571,14 +2192,16 @@ app.get('/api/images/bank', (_req: Request, res: Response) => {
 app.post('/api/images/bank/build', async (req: Request, res: Response) => {
   try {
     const wantVerify = req.body?.verify === true;
-    const key = wantVerify ? nvidiaKey() : null;
+    const provider = typeof req.body?.provider === 'string' ? req.body.provider : 'gemini';
+    const model = typeof req.body?.model === 'string' ? req.body.model : '';
+    const canVerify = wantVerify && provider === 'gemini' && Boolean(geminiKey());
     const summary = await buildImageBank({
       limitPerSeed: Number(req.body?.limitPerSeed) || 3,
-      verify: wantVerify && key
+      verify: canVerify
         ? async (entry: any) => {
             const claim = `${entry.ground_truth}${entry.modality ? ` (${entry.modality})` : ''}`;
             try {
-              const verdict = await visionVerify(entry.imageUrl, claim, entry.modality, key);
+              const verdict = await visionVerify(entry.imageUrl, claim, entry.modality, {}, provider, model);
               return verdict.pass === true;
             } catch {
               return false;
@@ -2586,7 +2209,7 @@ app.post('/api/images/bank/build', async (req: Request, res: Response) => {
           }
         : undefined,
     });
-    return res.json({ success: true, ...summary, verified: Boolean(wantVerify && key) });
+    return res.json({ success: true, ...summary, verified: Boolean(canVerify) });
   } catch (err: any) {
     return res.status(502).json({ error: err?.message || 'Image-bank build failed.' });
   }
@@ -2630,6 +2253,8 @@ app.get('/api/images/bank/entries', (req: Request, res: Response) => {
   }
 });
 
+
+
 // POST /api/images/find-for-explanation -> one VERIFIED illustration for an explanation.
 //
 // Flow (same safety rules as the question pipeline):
@@ -2643,22 +2268,20 @@ app.post('/api/images/find-for-explanation', async (req: Request, res: Response)
   const body = req.body || {};
   const cue = typeof body.cue === 'string' ? body.cue.trim().slice(0, 300) : '';
   const subject = typeof body.subject === 'string' ? body.subject : '';
+  const provider = typeof body.provider === 'string' ? body.provider : 'gemini';
+  const model = typeof body.model === 'string' ? body.model : '';
   if (!cue) return res.json({ found: false, reason: 'No image cue was supplied.' });
   try {
     const candidates = searchBankByText(cue, { subject, limit: 4 });
     if (!candidates.length) {
       return res.json({ found: false, reason: 'No bank image matches that description.' });
     }
-    const key = nvidiaKey();
-    if (!key) {
-      return res.json({ found: false, reason: 'No vision provider connected — image skipped.' });
-    }
     // Try candidates in score order; the first that passes verification wins.
     for (const entry of candidates) {
       const claim = `${entry.ground_truth}${entry.modality ? ` (${entry.modality})` : ''}`;
       let verdict: { pass: boolean; reason: string };
       try {
-        verdict = await visionVerify(entry.imageUrl, claim, entry.modality, key);
+        verdict = await visionVerify(entry.imageUrl, claim, entry.modality, {}, provider, model);
       } catch (err: any) {
         verdict = { pass: false, reason: err?.message || 'Vision check failed.' };
       }
@@ -2679,7 +2302,7 @@ app.post('/api/images/find-for-explanation', async (req: Request, res: Response)
           verification: verdict.reason,
         });
       }
-      aiLog({ provider: 'nvidia', route: 'images/find-for-explanation', pass: false, reason: verdict.reason.slice(0, 160), image_id: entry.image_id });
+      aiLog({ provider, route: 'images/find-for-explanation', pass: false, reason: verdict.reason.slice(0, 160), image_id: entry.image_id });
     }
     return res.json({ found: false, reason: 'No bank image passed verification for that description.' });
   } catch (err: any) {
@@ -2695,12 +2318,17 @@ app.post('/api/images/generate-question', async (req: Request, res: Response) =>
   const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl : '';
   const groundTruth = typeof body.groundTruth === 'string' ? body.groundTruth.trim() : '';
   const imageId = typeof body.imageId === 'string' ? body.imageId : '';
+  const provider = typeof body.provider === 'string' ? body.provider : 'gemini';
+  const model = typeof body.model === 'string' ? body.model : DEFAULT_MODELS.gemini;
   if (!imageUrl || !groundTruth) {
     return res.status(400).json({ error: 'imageUrl and groundTruth are required.' });
   }
-  const key = nvidiaKey();
+  if (provider !== 'gemini') {
+    return res.status(400).json({ error: 'The selected model cannot check images. Use Gemini for image questions.' });
+  }
+  const key = geminiKey();
   if (!key) {
-    return res.status(401).json({ error: notConnectedMessage('nvidia') });
+    return res.status(401).json({ error: notConnectedMessage('gemini') });
   }
   try {
     const writeOnce = () => generateQuestionFromImage({
@@ -2713,7 +2341,8 @@ app.post('/api/images/generate-question', async (req: Request, res: Response) =>
       difficultyTier: typeof body.difficultyTier === 'string' ? body.difficultyTier : 'MEDIUM',
       optionCount: Number(body.optionCount) === 5 ? 5 : 4,
       apiKey: key,
-      model: typeof body.model === 'string' ? body.model : process.env.VISION_MODEL || DEFAULT_MODELS.nvidia,
+      model,
+      url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
     });
     let question;
     try {
@@ -2724,7 +2353,7 @@ app.post('/api/images/generate-question', async (req: Request, res: Response) =>
       if (!/did not return usable JSON/i.test(String(firstErr?.message || ''))) throw firstErr;
       question = await writeOnce();
     }
-    return res.json({ success: true, question, model: process.env.VISION_MODEL || DEFAULT_MODELS.nvidia });
+    return res.json({ success: true, question, model });
   } catch (err: any) {
     const msg = String(err?.message || 'Image-first generation failed.');
     // A model-declared mismatch means this image genuinely does not show the claimed
@@ -2733,7 +2362,7 @@ app.post('/api/images/generate-question', async (req: Request, res: Response) =>
     if (msg === 'image_mismatch' && imageId) {
       try { rejectImage(imageId, groundTruth, msg); } catch { /* bookkeeping only */ }
     }
-    aiLog({ provider: 'nvidia', route: 'images/generate-question', error: true, status, reason: msg.slice(0, 200) });
+    aiLog({ provider: 'gemini', route: 'images/generate-question', error: true, status, reason: msg.slice(0, 200) });
     return res.status(status).json({ error: msg });
   }
 });
@@ -2981,7 +2610,7 @@ app.get('/api/providers/status', (req: Request, res: Response) => {
   const customEndpoints = readCustomEndpoints();
   res.json({
     providers: [
-      ...(['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'nvidia', 'vyce', 'deeprelay'] as string[]).map((id) => ({
+      ...(['gemini', 'chatgpt', 'claude', 'grok', 'opencode', 'deeprelay'] as string[]).map((id) => ({
         id,
         model: DEFAULT_MODELS[id],
         connected: isProviderConnected(id),

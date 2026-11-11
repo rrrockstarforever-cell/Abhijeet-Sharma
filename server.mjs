@@ -1,5 +1,40 @@
 // server.ts
 import express from "express";
+
+// src/lib/scopeRules.ts
+var SCOPE_RULE = [
+  "Scope lock: the requested subject, topic and subtopic are the examination boundary, in that order.",
+  "A related concept, a same-disease question or a neighbouring subject is not in scope.",
+  "Test only the knowledge domain requested; every answer option must belong to that same domain.",
+  "A question is out of scope if it tests another subject, topic, subtopic or domain, or if answering it needs knowledge outside the boundary."
+].join(" ");
+var SUBJECT_BOUNDARIES = [
+  "Anatomy: structure, relations, blood, nerve and lymph supply, variations, applied and surface anatomy. Not physiological or pathological mechanisms, drugs or diagnostic investigations.",
+  "Physiology: normal mechanisms, organ-system function, regulation, normal values. Not pathology, histopathology, drug treatment or microbiology.",
+  "Biochemistry: biomolecules, enzymes, metabolic pathways and regulation, molecular biology, vitamins, inborn errors. Not histopathology, clinical management or drug treatment.",
+  "Pathology: cell injury, inflammation, neoplasia, haematology, morphology, histopathology, specimens. Not organism identification, drug treatment or complete clinical management.",
+  "Pharmacology: drug classes, mechanism, pharmacokinetics, indications, dose, adverse effects, interactions, resistance, toxicity, antidotes. Not disease diagnosis, microbiological identification, laboratory diagnosis, histopathology or etiology.",
+  "Microbiology: organism morphology, culture, staining, identification, virulence, laboratory diagnosis, susceptibility testing. Not drug mechanisms, pharmacokinetics or clinical management.",
+  "Forensic medicine and toxicology: medical jurisprudence, injuries, identification, postmortem changes, poisons and their medicolegal aspects. Not general pharmacology or routine clinical diagnosis.",
+  "Community medicine (PSM): epidemiology, biostatistics, screening, prevention, national programmes, health indicators. Not individual diagnosis, individual prescription or drug mechanisms.",
+  "General medicine: for a diagnosis topic, criteria and investigations; for a treatment topic, therapy and monitoring; for a clinical-features topic, signs and presentation. Not the other phases of the disease.",
+  "General surgery: surgical principles, anatomy, indications, techniques, complications, trauma. Not pharmacological mechanisms or internal medicine management.",
+  "Orthopaedics: fractures, dislocations, bone and joint disorders, classification, reduction and fixation. Not general rheumatology or unrelated pharmacology.",
+  "ENT: ear, nose, throat, hearing and balance, ENT investigations and surgery. Not general neurology or unrelated pharmacology.",
+  "Ophthalmology: eye anatomy, ocular disease, examination, visual fields, ocular surgery. Not general neurology or systemic medical management.",
+  "Dermatology and STD: skin morphology, skin disease diagnosis, dermatological treatment, sexually transmitted infections. Not general microbiology or unrelated systemic medicine.",
+  "Psychiatry: symptoms, classification, diagnostic criteria, psychotherapy, psychotropic drugs when requested. Not general neurology or unrelated medical diagnosis.",
+  "Radiodiagnosis: imaging findings, signs, modality choice and interpretation. Not pharmacological treatment, surgery or radiotherapy protocols.",
+  "Anaesthesiology: anaesthetic technique, agents, airway, monitoring, perioperative management. Not complete surgical procedures or unrelated drug pharmacology.",
+  "Obstetrics and gynaecology: pregnancy, labour, puerperium, gynaecological disorders, contraception. Not paediatric management or unrelated pharmacology.",
+  "Paediatrics: growth, development, neonatology, paediatric clinical features, diagnosis, immunisation, paediatric management. Not adult or obstetric management."
+];
+var DRUG_TOPIC_RULE = "A drug or drug-class topic is pharmacology only: test the drug itself, never the disease diagnosis, the microbiology, the clinical signs, the infection control or the nursing around it, even when the same disease is involved.";
+function scopeInstruction() {
+  return `${SCOPE_RULE} ${DRUG_TOPIC_RULE} Subject boundaries: ${SUBJECT_BOUNDARIES.join(" ")}`;
+}
+
+// server.ts
 import path3 from "path";
 import os3 from "os";
 import fs3 from "fs";
@@ -1310,6 +1345,223 @@ var REFERENCE_SOURCES = [
   { name: "CDC PHIL", url: "https://wwwn.cdc.gov/phil/", note: "Public-health images; many are public domain, surfaced here via Wikimedia Commons." }
 ];
 
+// server/visionQuestion.mjs
+var EXAM_LABEL2 = {
+  NEET_PG: "NEET-PG (NBEMS, India)",
+  INI_CET: "INI-CET (AIIMS, India)"
+};
+var SYSTEM = [
+  "You are a senior item writer for Indian postgraduate medical entrance exams (NEET-PG, INI-CET).",
+  "You are shown a REAL clinical image. The image is the primary source of truth.",
+  "Write questions that DISCRIMINATE between well-prepared candidates: exactly one defensible best answer, and distractors that are real, plausible close mimics of the same category \u2014 never absurd, never obviously wrong.",
+  "Always respond with ONLY a single valid JSON object (no markdown fences, no commentary)."
+].join(" ");
+var buildImageQuestionInstruction = (o) => [
+  `You are shown a real clinical image (modality: ${o.modality || "clinical image"}; subject: ${o.subject || "medicine"}; trusted body-part metadata: ${o.bodyPart || "unspecified"}).`,
+  `The authoritative diagnosis/finding this image shows is: "${o.groundTruth}". You MUST keep this exact diagnosis \u2014 never change, soften or replace it.`,
+  `Exam: ${o.examLabel}. Write ONE image-only exam-standard MCQ whose correct answer can be reached ONLY by interpreting THIS image and its trusted metadata. No patient chart or case history is supplied.`,
+  "Rules:",
+  "- The stem may describe only findings visible in the image or explicitly listed in trusted image metadata. Do NOT invent patient age, sex, symptoms, history, timeline, physical examination findings, laboratory results, or mucosal status.",
+  '- Do NOT state a skin surface (palmar, dorsal, plantar), laterality (left, right, bilateral), scan plane (axial, sagittal, coronal), or contrast phase unless the trusted metadata above states it. Describe the finding instead ("the lesion", "the scan", "the image"). A detail you can only guess from the pixels must be left out; a wrong detail gets the question rejected.',
+  "- Do not name the diagnosis directly in the stem. Ask the learner to interpret the visual finding.",
+  "- Exactly one option must be the correct diagnosis/finding; every other option must be a plausible close mimic of the SAME category (no obviously wrong fillers).",
+  "- The explanation must reference features actually visible in THIS image. It may give general differential teaching, but must not claim absent or unshown features (for example mucosal sparing) as facts about this image.",
+  `- Return exactly ${o.optionCount} options, keyed "A".."${"ABCDE"[o.optionCount - 1]}", with a single correct one.`,
+  '- If the image does not clearly support the claimed finding or an image-only question cannot be written without inventing context, return exactly {"error":"image_mismatch"}.',
+  "Return ONLY this JSON object:",
+  `{"stem":"...","questionText":"...","options":{${Array.from({ length: o.optionCount }, (_, i) => `"${"ABCDE"[i]}":"..."`).join(",")}},"correctOption":"A","explanation":"...","boardPearl":"...","citations":["..."]}`
+].join("\n");
+function parseLooseJson(text) {
+  if (!text || typeof text !== "string") return null;
+  let t = text.trim();
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) t = fence[1].trim();
+  const start = t.search(/[[{]/);
+  if (start > 0) t = t.slice(start);
+  const end = Math.max(t.lastIndexOf("}"), t.lastIndexOf("]"));
+  if (end > -1) t = t.slice(0, end + 1);
+  try {
+    return JSON.parse(t);
+  } catch {
+  }
+  const first = t.indexOf("{");
+  if (first >= 0) {
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let i = first; i < t.length; i++) {
+      const c = t[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') {
+        inStr = true;
+        continue;
+      }
+      if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            return JSON.parse(t.slice(first, i + 1));
+          } catch {
+          }
+          break;
+        }
+      }
+    }
+  }
+  const patched = t.replace(/:\s*([A-Za-z][^,{}\[\]"]*?)(?=\s*[,}])/g, (_m, v) => `: ${JSON.stringify(v.trim())}`);
+  try {
+    return JSON.parse(patched);
+  } catch {
+    return null;
+  }
+}
+function contentToText(message) {
+  const content = message?.content;
+  if (typeof content === "string" && content.trim()) return content;
+  if (Array.isArray(content)) {
+    const joined = content.map((p) => typeof p === "string" ? p : p?.text || "").join("");
+    if (joined.trim()) return joined;
+  }
+  if (typeof message?.reasoning_content === "string") return message.reasoning_content;
+  return "";
+}
+async function generateQuestionFromImage(opts) {
+  const {
+    imageUrl,
+    groundTruth,
+    modality = "",
+    subject = "",
+    bodyPart = "",
+    exam = "NEET_PG",
+    difficultyTier = "MEDIUM",
+    optionCount = 4,
+    url,
+    apiKey,
+    model,
+    timeoutMs = Number(process.env.VISION_TIMEOUT_MS || 18e4)
+  } = opts || {};
+  if (!imageUrl) throw new Error("imageUrl is required.");
+  if (!groundTruth || !String(groundTruth).trim()) throw new Error("groundTruth is required.");
+  if (!url) throw new Error("Vision provider URL (opts.url) is required.");
+  if (!model) throw new Error("Vision model (opts.model) is required.");
+  if (!apiKey) throw new Error("No vision provider connected \u2014 cannot write from image.");
+  const count = optionCount === 5 ? 5 : 4;
+  const { buffer, type } = await fetchImage(imageUrl);
+  if (!/^image\/(jpeg|png|webp)$/i.test(type)) {
+    throw new Error(`Unsupported image type (${type}) for vision generation.`);
+  }
+  const dataUrl = `data:${type};base64,${buffer.toString("base64")}`;
+  const instruction = buildImageQuestionInstruction({
+    groundTruth: String(groundTruth).slice(0, 300),
+    modality: String(modality || "").slice(0, 40),
+    subject: String(subject || "").slice(0, 60),
+    bodyPart: String(bodyPart || "").slice(0, 60),
+    examLabel: EXAM_LABEL2[exam] || exam,
+    optionCount: count
+  });
+  const messages = [
+    { role: "system", content: SYSTEM },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: instruction },
+        { type: "image_url", image_url: { url: dataUrl } }
+      ]
+    }
+  ];
+  const callVision = async (maxTokens) => {
+    const payload = JSON.stringify({
+      model,
+      messages,
+      // The vision model card recommends temperature 0.6 / top_p 0.95 for images.
+      temperature: 0.6,
+      top_p: 0.95,
+      max_tokens: maxTokens
+    });
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: payload,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    const raw = await res.text();
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+    }
+    if (!res.ok) {
+      const err = new Error(`Vision generation failed (HTTP ${res.status}): ${body?.error?.message || body?.message || raw.slice(0, 160)}`);
+      err.status = res.status;
+      throw err;
+    }
+    const choice = body?.choices?.[0];
+    return { text: contentToText(choice?.message), finish: choice?.finish_reason };
+  };
+  const isTransient = (err) => err?.status >= 500 || /inference connection|ECONNRESET|socket hang up|fetch failed|EAI_AGAIN/i.test(String(err?.message || ""));
+  const callVisionWithRetry = async (maxTokens) => {
+    try {
+      return await callVision(maxTokens);
+    } catch (err) {
+      if (!isTransient(err)) throw err;
+      await new Promise((r) => setTimeout(r, 1500));
+      return await callVision(maxTokens);
+    }
+  };
+  let budget = Number(process.env.VISION_MAX_TOKENS || 8192);
+  let { text, finish } = await callVisionWithRetry(budget);
+  let parsed = parseLooseJson(text);
+  if ((!parsed || typeof parsed !== "object" || parsed.error === "image_mismatch") && finish === "length") {
+    budget *= 2;
+    ({ text, finish } = await callVisionWithRetry(budget));
+    parsed = parseLooseJson(text);
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(
+      finish === "length" ? `Vision model ran out of tokens before answering (even at ${budget}).` : "Vision model did not return usable JSON."
+    );
+  }
+  if (parsed.error === "image_mismatch") {
+    throw new Error("image_mismatch");
+  }
+  const stem = typeof parsed.stem === "string" ? parsed.stem.trim() : "";
+  if (!stem) throw new Error("Vision model returned no stem.");
+  const options = {};
+  if (parsed.options && typeof parsed.options === "object" && !Array.isArray(parsed.options)) {
+    for (const [k, v] of Object.entries(parsed.options)) {
+      if (typeof v === "string" && v.trim()) options[String(k).trim().toUpperCase()] = v.trim();
+    }
+  } else if (Array.isArray(parsed.options)) {
+    for (const o of parsed.options) {
+      if (o && typeof o.text === "string" && o.text.trim()) {
+        options[String(o.id ?? "").trim().toUpperCase()] = o.text.trim();
+      }
+    }
+  }
+  const keys = ["A", "B", "C", "D", "E"].slice(0, count);
+  for (const k of keys) {
+    if (!options[k]) throw new Error(`Vision model returned an incomplete option set (missing ${k}).`);
+  }
+  const correctOption = String(parsed.correctOption || "").trim().toUpperCase();
+  if (!keys.includes(correctOption)) throw new Error("Vision model returned an invalid correctOption.");
+  const citations = Array.isArray(parsed.citations) ? parsed.citations.filter((c) => typeof c === "string" && c.trim()).map((c) => c.trim()).slice(0, 5) : [];
+  return {
+    stem,
+    questionText: typeof parsed.questionText === "string" && parsed.questionText.trim() ? parsed.questionText.trim() : stem,
+    options: Object.fromEntries(keys.map((k) => [k, options[k]])),
+    correctOption,
+    explanation: typeof parsed.explanation === "string" ? parsed.explanation.trim() : "",
+    boardPearl: typeof parsed.boardPearl === "string" ? parsed.boardPearl.trim() : "",
+    citations
+  };
+}
+
 // server/imageBank.mjs
 import { mkdirSync as mkdirSync3, existsSync as existsSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3, renameSync } from "node:fs";
 import { join as join3 } from "node:path";
@@ -1672,245 +1924,7 @@ function bankStats() {
   return { total: entries.length, bySubject, byModality, builtAt };
 }
 
-// server/visionQuestion.mjs
-var DEFAULT_VISION_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b";
-var NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
-var EXAM_LABEL2 = {
-  NEET_PG: "NEET-PG (NBEMS, India)",
-  INI_CET: "INI-CET (AIIMS, India)",
-  AMC_CAT: "AMC CAT (Australia)"
-};
-var SYSTEM = [
-  "You are a senior item writer for Indian and Australian postgraduate medical entrance exams (NEET-PG, INI-CET, AMC CAT).",
-  "You are shown a REAL clinical image. The image is the primary source of truth.",
-  "Write questions that DISCRIMINATE between well-prepared candidates: exactly one defensible best answer, and distractors that are real, plausible close mimics of the same category \u2014 never absurd, never obviously wrong.",
-  "Always respond with ONLY a single valid JSON object (no markdown fences, no commentary)."
-].join(" ");
-var buildImageQuestionInstruction = (o) => [
-  `You are shown a real clinical image (modality: ${o.modality || "clinical image"}; subject: ${o.subject || "medicine"}; trusted body-part metadata: ${o.bodyPart || "unspecified"}).`,
-  `The authoritative diagnosis/finding this image shows is: "${o.groundTruth}". You MUST keep this exact diagnosis \u2014 never change, soften or replace it.`,
-  `Exam: ${o.examLabel}. Write ONE image-only exam-standard MCQ whose correct answer can be reached ONLY by interpreting THIS image and its trusted metadata. No patient chart or case history is supplied.`,
-  "Rules:",
-  "- The stem may describe only findings visible in the image or explicitly listed in trusted image metadata. Do NOT invent patient age, sex, symptoms, history, timeline, physical examination findings, laboratory results, or mucosal status.",
-  '- Do NOT state a skin surface (palmar, dorsal, plantar), laterality (left, right, bilateral), scan plane (axial, sagittal, coronal), or contrast phase unless the trusted metadata above states it. Describe the finding instead ("the lesion", "the scan", "the image"). A detail you can only guess from the pixels must be left out; a wrong detail gets the question rejected.',
-  "- Do not name the diagnosis directly in the stem. Ask the learner to interpret the visual finding.",
-  "- Exactly one option must be the correct diagnosis/finding; every other option must be a plausible close mimic of the SAME category (no obviously wrong fillers).",
-  "- The explanation must reference features actually visible in THIS image. It may give general differential teaching, but must not claim absent or unshown features (for example mucosal sparing) as facts about this image.",
-  `- Return exactly ${o.optionCount} options, keyed "A".."${"ABCDE"[o.optionCount - 1]}", with a single correct one.`,
-  '- If the image does not clearly support the claimed finding or an image-only question cannot be written without inventing context, return exactly {"error":"image_mismatch"}.',
-  "Return ONLY this JSON object:",
-  `{"stem":"...","questionText":"...","options":{${Array.from({ length: o.optionCount }, (_, i) => `"${"ABCDE"[i]}":"..."`).join(",")}},"correctOption":"A","explanation":"...","boardPearl":"...","citations":["..."]}`
-].join("\n");
-function parseLooseJson(text) {
-  if (!text || typeof text !== "string") return null;
-  let t = text.trim();
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) t = fence[1].trim();
-  const start = t.search(/[[{]/);
-  if (start > 0) t = t.slice(start);
-  const end = Math.max(t.lastIndexOf("}"), t.lastIndexOf("]"));
-  if (end > -1) t = t.slice(0, end + 1);
-  try {
-    return JSON.parse(t);
-  } catch {
-  }
-  const first = t.indexOf("{");
-  if (first >= 0) {
-    let depth = 0;
-    let inStr = false;
-    let esc = false;
-    for (let i = first; i < t.length; i++) {
-      const c = t[i];
-      if (inStr) {
-        if (esc) esc = false;
-        else if (c === "\\") esc = true;
-        else if (c === '"') inStr = false;
-        continue;
-      }
-      if (c === '"') {
-        inStr = true;
-        continue;
-      }
-      if (c === "{") depth++;
-      else if (c === "}") {
-        depth--;
-        if (depth === 0) {
-          try {
-            return JSON.parse(t.slice(first, i + 1));
-          } catch {
-          }
-          break;
-        }
-      }
-    }
-  }
-  const patched = t.replace(/:\s*([A-Za-z][^,{}\[\]"]*?)(?=\s*[,}])/g, (_m, v) => `: ${JSON.stringify(v.trim())}`);
-  try {
-    return JSON.parse(patched);
-  } catch {
-    return null;
-  }
-}
-function contentToText(message) {
-  const content = message?.content;
-  if (typeof content === "string" && content.trim()) return content;
-  if (Array.isArray(content)) {
-    const joined = content.map((p) => typeof p === "string" ? p : p?.text || "").join("");
-    if (joined.trim()) return joined;
-  }
-  if (typeof message?.reasoning_content === "string") return message.reasoning_content;
-  return "";
-}
-async function generateQuestionFromImage(opts) {
-  const {
-    imageUrl,
-    groundTruth,
-    modality = "",
-    subject = "",
-    bodyPart = "",
-    exam = "NEET_PG",
-    difficultyTier = "MEDIUM",
-    optionCount = 4,
-    apiKey,
-    model,
-    timeoutMs = Number(process.env.VISION_TIMEOUT_MS || 18e4)
-  } = opts || {};
-  if (!imageUrl) throw new Error("imageUrl is required.");
-  if (!groundTruth || !String(groundTruth).trim()) throw new Error("groundTruth is required.");
-  if (!apiKey) throw new Error("No vision provider connected \u2014 cannot write from image.");
-  const count = optionCount === 5 ? 5 : 4;
-  const { buffer, type } = await fetchImage(imageUrl);
-  if (!/^image\/(jpeg|png|webp)$/i.test(type)) {
-    throw new Error(`Unsupported image type (${type}) for vision generation.`);
-  }
-  const dataUrl = `data:${type};base64,${buffer.toString("base64")}`;
-  const instruction = buildImageQuestionInstruction({
-    groundTruth: String(groundTruth).slice(0, 300),
-    modality: String(modality || "").slice(0, 40),
-    subject: String(subject || "").slice(0, 60),
-    bodyPart: String(bodyPart || "").slice(0, 60),
-    examLabel: EXAM_LABEL2[exam] || exam,
-    optionCount: count
-  });
-  const messages = [
-    { role: "system", content: SYSTEM },
-    {
-      role: "user",
-      content: [
-        { type: "text", text: instruction },
-        { type: "image_url", image_url: { url: dataUrl } }
-      ]
-    }
-  ];
-  const callVision = async (maxTokens) => {
-    const payload = JSON.stringify({
-      model: model || DEFAULT_VISION_MODEL,
-      messages,
-      // The vision model card recommends temperature 0.6 / top_p 0.95 for images.
-      temperature: 0.6,
-      top_p: 0.95,
-      max_tokens: maxTokens,
-      // This is a reasoning model whose hidden trace is billed against max_tokens, which
-      // is exactly why a modest cap produced finish_reason:"length" and empty content.
-      // Writing a full clinical MCQ does benefit from some reasoning, so keep the trace
-      // but trim it with medium_effort rather than letting it run unbounded.
-      chat_template_kwargs: { enable_thinking: true, medium_effort: true }
-    });
-    const res = await fetch(NVIDIA_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: payload,
-      signal: AbortSignal.timeout(timeoutMs)
-    });
-    const raw = await res.text();
-    let body = {};
-    try {
-      body = raw ? JSON.parse(raw) : {};
-    } catch {
-    }
-    if (!res.ok) {
-      const err = new Error(`Vision generation failed (HTTP ${res.status}): ${body?.error?.message || body?.message || raw.slice(0, 160)}`);
-      err.status = res.status;
-      throw err;
-    }
-    const choice = body?.choices?.[0];
-    return { text: contentToText(choice?.message), finish: choice?.finish_reason };
-  };
-  const isTransient = (err) => err?.status >= 500 || /inference connection|ECONNRESET|socket hang up|fetch failed|EAI_AGAIN/i.test(String(err?.message || ""));
-  const callVisionWithRetry = async (maxTokens) => {
-    try {
-      return await callVision(maxTokens);
-    } catch (err) {
-      if (!isTransient(err)) throw err;
-      await new Promise((r) => setTimeout(r, 1500));
-      return await callVision(maxTokens);
-    }
-  };
-  let budget = Number(process.env.VISION_MAX_TOKENS || 8192);
-  let { text, finish } = await callVisionWithRetry(budget);
-  let parsed = parseLooseJson(text);
-  if ((!parsed || typeof parsed !== "object" || parsed.error === "image_mismatch") && finish === "length") {
-    budget *= 2;
-    ({ text, finish } = await callVisionWithRetry(budget));
-    parsed = parseLooseJson(text);
-  }
-  if (!parsed || typeof parsed !== "object") {
-    throw new Error(
-      finish === "length" ? `Vision model ran out of tokens before answering (even at ${budget}).` : "Vision model did not return usable JSON."
-    );
-  }
-  if (parsed.error === "image_mismatch") {
-    throw new Error("image_mismatch");
-  }
-  const stem = typeof parsed.stem === "string" ? parsed.stem.trim() : "";
-  if (!stem) throw new Error("Vision model returned no stem.");
-  const options = {};
-  if (parsed.options && typeof parsed.options === "object" && !Array.isArray(parsed.options)) {
-    for (const [k, v] of Object.entries(parsed.options)) {
-      if (typeof v === "string" && v.trim()) options[String(k).trim().toUpperCase()] = v.trim();
-    }
-  } else if (Array.isArray(parsed.options)) {
-    for (const o of parsed.options) {
-      if (o && typeof o.text === "string" && o.text.trim()) {
-        options[String(o.id ?? "").trim().toUpperCase()] = o.text.trim();
-      }
-    }
-  }
-  const keys = ["A", "B", "C", "D", "E"].slice(0, count);
-  for (const k of keys) {
-    if (!options[k]) throw new Error(`Vision model returned an incomplete option set (missing ${k}).`);
-  }
-  const correctOption = String(parsed.correctOption || "").trim().toUpperCase();
-  if (!keys.includes(correctOption)) throw new Error("Vision model returned an invalid correctOption.");
-  const citations = Array.isArray(parsed.citations) ? parsed.citations.filter((c) => typeof c === "string" && c.trim()).map((c) => c.trim()).slice(0, 5) : [];
-  return {
-    stem,
-    questionText: typeof parsed.questionText === "string" && parsed.questionText.trim() ? parsed.questionText.trim() : stem,
-    options: Object.fromEntries(keys.map((k) => [k, options[k]])),
-    correctOption,
-    explanation: typeof parsed.explanation === "string" ? parsed.explanation.trim() : "",
-    boardPearl: typeof parsed.boardPearl === "string" ? parsed.boardPearl.trim() : "",
-    citations
-  };
-}
-
 // server/qa/examProfiles.ts
-var AMC_CAT = {
-  id: "AMC_CAT",
-  edition: "2026",
-  label: "AMC CAT MCQ",
-  options: 5,
-  multipleCorrect: false,
-  allowedQuestionTypes: ["single-best-answer"],
-  guidelineJurisdiction: "Australia",
-  learningObjectives: ["data gathering", "data interpretation", "management"],
-  curriculum: ["adult health", "child health", "women\u2019s health", "mental health", "emergency medicine", "Aboriginal and Torres Strait Islander health"],
-  difficultyRequirements: { easy: 20, medium: 45, hard: 35 },
-  scoring: "+1 correct, no negative marking",
-  metadata: { references: "Therapeutic Guidelines (eTG), AMH, RACGP Red Book, Murtagh\u2019s General Practice, NIP" },
-  permittedMedia: ["image", "table"],
-  version: 1
-};
 var NEET_PG = {
   id: "NEET_PG",
   edition: "2026",
@@ -1943,7 +1957,7 @@ var INI_CET = {
   permittedMedia: ["image", "table", "lab-report"],
   version: 1
 };
-var REGISTRY = { AMC_CAT, NEET_PG, INI_CET };
+var REGISTRY = { NEET_PG, INI_CET };
 function getExamProfile(examType) {
   return REGISTRY[examType] ?? null;
 }
@@ -2356,7 +2370,7 @@ async function refineQuestion(q, complete) {
   if (!signals.needsRefinement) {
     return { ...q, changes: [], refined: false };
   }
-  const system = "You are a meticulous medical MCQ editor for postgraduate exams (NEET-PG / INI-CET / AMC CAT). You receive a machine-generated single-best-answer MCQ. Rewrite ONLY its presentation to remove answer leakage and obvious hints, and to make the option set structurally neutral. Never change the tested concept or the correct answer meaning.";
+  const system = "You are a meticulous medical MCQ editor for postgraduate exams (NEET-PG / INI-CET). You receive a machine-generated single-best-answer MCQ. Rewrite ONLY its presentation to remove answer leakage and obvious hints, and to make the option set structurally neutral. Never change the tested concept or the correct answer meaning.";
   const prompt = [
     `Question (subject: ${q.subject ?? "unknown"}, subtopic: ${q.subtopic ?? "unknown"}):`,
     `Stem: ${q.stem ?? ""}`,
@@ -2481,6 +2495,7 @@ function serverDebugLog(hypothesis, message) {
 
 // src/lib/ai.ts
 var RESEARCH_TTL_MS = 5 * 6e4;
+var PLAN_FACTS_SYSTEM = 'You list distinct, high-yield, exam-testable facts about one subtopic that the sources state. Do not repeat a fact already planned. Each fact must be a definite statement a student can be tested on (a cause, a feature, a number, a test, a drug effect, a warning), never an uncertain or open one ("may", "remains uncertain", "has been evaluated"). Prefer statements from an official drug label or textbook over research papers. ' + scopeInstruction() + ' Every fact must sit inside that boundary. Copy the supporting words exactly from one source. Reply with ONLY JSON: {"facts":[{"fact":"one sentence","quote":"exact words from that source","source":<source number>}]}. Give at most the number of facts asked for; give fewer if the sources do not support that many.';
 var stageLog = [];
 globalThis.__stageLog = stageLog;
 function extractJson(raw) {
@@ -2517,9 +2532,8 @@ try {
 } catch {
 }
 app.use("/api/ai/complete-images", express.json({ limit: "30mb" }));
-app.use("/api/ocr/nemotron", express.json({ limit: "1mb" }));
 app.use("/api/export/questions", express.json({ limit: "5mb" }));
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
 var OPENCODE_DEFAULT_MODEL = "deepseek-v4.1-flash";
 var DEFAULT_MODELS = {
   gemini: "gemini-3.8-flash",
@@ -2528,8 +2542,7 @@ var DEFAULT_MODELS = {
   grok: "grok-4.7",
   opencode: OPENCODE_DEFAULT_MODEL,
   custom: "gpt-4o-mini",
-  nvidia: "nvidia/nemotron-3.5-super-vl-120b-a12b",
-  vyce: "deepseek-v4.1"
+  deeprelay: "deeprelay/deepseek-v4.1-flash"
 };
 var INTERNAL_PROVIDER = {
   chatgpt: "codex",
@@ -2545,28 +2558,9 @@ var ApiError = class extends Error {
 function geminiKey() {
   return (process.env.GEMINI_API_KEY || "").trim();
 }
-function nvidiaKey() {
-  return (process.env.NVIDIA_API_KEY || "").trim();
-}
-var VYCE_BASE_URL = "https://vyceai.com/v1";
-function vyceKey() {
-  return (process.env.VYCE_API_KEY || "").trim();
-}
-function nvidiaReasoningKwargs(effort) {
-  const level = String(effort || "").trim().toLowerCase();
-  if (level === "min" || level === "minimal") return { enable_thinking: false };
-  if (level === "low" || level === "brief") return { enable_thinking: true, medium_effort: true };
-  if (level === "high") return { enable_thinking: true };
-  if (level === "ultra") return { enable_thinking: true };
-  return { enable_thinking: true, medium_effort: true };
-}
-function nvidiaTokenBudget(effort) {
-  const level = String(effort || "").trim().toLowerCase();
-  if (level === "min" || level === "minimal") return 2048;
-  if (level === "low" || level === "brief") return 4096;
-  if (level === "high") return 16384;
-  if (level === "ultra") return 24e3;
-  return 8192;
+var DEEPRELAY_BASE_URL = "https://api.deeprelay.ai/v1";
+function deepRelayKey() {
+  return (process.env.DEEPRELAY_API_KEY || "").trim();
 }
 var geminiClient = null;
 function getGemini() {
@@ -2651,8 +2645,8 @@ function providerErrorText(body, status2) {
 function isProviderConnected(providerId) {
   if (providerId === "gemini") return Boolean(geminiKey());
   if (providerId === "opencode") return Boolean(opencodeKey());
-  if (providerId === "nvidia") return Boolean(nvidiaKey());
-  if (providerId === "vyce") return Boolean(vyceKey());
+  if (providerId === "deeprelay") return Boolean(deepRelayKey());
+  if (providerId === "deeprelay") return Boolean(deepRelayKey());
   if (providerId === "custom") return Boolean(getActiveCustomEndpoint());
   try {
     const s = status();
@@ -2670,69 +2664,13 @@ function notConnectedMessage(providerId) {
   if (providerId === "opencode") {
     return "OpenCode is not connected. Paste your OpenCode Console API key in Settings \u2192 AI Subscription Hub.";
   }
-  if (providerId === "nvidia") {
-    return "NVIDIA is not connected. Paste your NVIDIA API key in Settings \u2192 AI Subscription Hub.";
-  }
-  if (providerId === "vyce") {
-    return "VyceAI is not connected. Paste your VyceAI API key in Settings \u2192 AI Subscription Hub.";
-  }
+  if (providerId === "deeprelay") return "Deep Relay is not connected. Paste your Deep Relay API key in Settings \u2192 AI Subscription Hub.";
   if (providerId === "custom") {
     return "Custom provider is not connected. Add a custom endpoint in Settings \u2192 AI Subscription Hub.";
   }
   return `${providerId.charAt(0).toUpperCase() + providerId.slice(1)} is not signed in. Connect an AI provider in Settings \u2192 AI Subscription Hub.`;
 }
-var nvidiaNoJsonFormat = /* @__PURE__ */ new Set();
-var NVIDIA_SPREAD_MODELS = [
-  "nvidia/nemotron-3.5-super-vl-120b-a12b"
-];
-var nvidiaSpreadCursor = 0;
-var nvidiaStats = {
-  started: 0,
-  inFlight: 0,
-  finished: { ok: 0, failed: 0, stopped: 0 },
-  // Questions the app kept, and those it dropped by reason (after the model replied).
-  accepted: 0,
-  dropped: {},
-  // Repair outcomes for rejected drafts: attempted (sent), accepted (kept after its checks), failed (no repair returned).
-  repairs: {},
-  tokens: { input: 0, output: 0, total: 0, calls: 0, unreported: 0 },
-  tokenStages: {},
-  byModel: {},
-  events: []
-};
-function nvidiaEvent(model, outcome, detail = "") {
-  nvidiaStats.events.push({ at: (/* @__PURE__ */ new Date()).toISOString().slice(11, 19), model: model.replace("nvidia/", ""), outcome, detail });
-  if (nvidiaStats.events.length > 40) nvidiaStats.events.shift();
-}
-function nvidiaAttempt(model, outcome, detail = "") {
-  const counts = nvidiaStats.byModel[model] ??= { ok: 0, refused: 0, error: 0, timeout: 0 };
-  counts[outcome] += 1;
-  nvidiaEvent(model, outcome, detail);
-}
-function recordTokenUsage(purpose, body) {
-  const usage = body?.usage ?? body?.token_usage ?? body?.usageMetadata;
-  const input = Number(usage?.prompt_tokens ?? usage?.input_tokens ?? usage?.promptTokenCount ?? 0);
-  const output = Number(usage?.completion_tokens ?? usage?.output_tokens ?? usage?.candidatesTokenCount ?? 0);
-  const total = Number(usage?.total_tokens ?? usage?.totalTokenCount ?? input + output);
-  if (![input, output, total].every(Number.isFinite) || total <= 0) {
-    nvidiaStats.tokens.unreported += 1;
-    return;
-  }
-  const stage = String(purpose || "other").slice(0, 40);
-  const row = nvidiaStats.tokenStages[stage] ??= { calls: 0, input: 0, output: 0, total: 0 };
-  row.calls += 1;
-  row.input += input;
-  row.output += output;
-  row.total += total;
-  nvidiaStats.tokens.calls += 1;
-  nvidiaStats.tokens.input += input;
-  nvidiaStats.tokens.output += output;
-  nvidiaStats.tokens.total += total;
-}
-function nvidiaFinish(model, outcome, detail = "") {
-  nvidiaStats.inFlight = Math.max(0, nvidiaStats.inFlight - 1);
-  nvidiaStats.finished[outcome] += 1;
-  nvidiaEvent(model, `question ${outcome}`, detail);
+function recordTokenUsage(_purpose, _body) {
 }
 async function runCompletion(opts) {
   const { provider, model, system, messages, json, effort, search, signal, images } = opts;
@@ -2905,149 +2843,26 @@ async function runCompletion(opts) {
     }
     return text;
   }
-  if (provider === "vyce") {
-    const key = vyceKey();
-    if (!key) throw new ApiError(notConnectedMessage("vyce"), 401);
-    const model_ = model || DEFAULT_MODELS.vyce;
-    const payload = JSON.stringify({
-      model: model_,
-      messages: [
-        ...system ? [{ role: "system", content: system }] : [],
-        ...messages.map((m) => ({ role: m.role, content: m.content }))
-      ],
-      temperature: 0.7,
-      ...json ? { response_format: { type: "json_object" } } : {}
-    });
-    let r = null;
-    let raw = "";
+  if (provider === "deeprelay") {
+    const key = deepRelayKey();
+    if (!key) throw new ApiError(notConnectedMessage("deeprelay"), 401);
+    const model_ = model || DEFAULT_MODELS.deeprelay;
+    const r = await fetch(`${DEEPRELAY_BASE_URL}/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, body: JSON.stringify({ model: model_, messages: [...system ? [{ role: "system", content: system }] : [], ...messages.map((m) => ({ role: m.role, content: m.content }))], temperature: 0.7, ...json ? { response_format: { type: "json_object" } } : {} }), ...signal ? { signal } : {} });
+    const raw = await r.text();
     let body = {};
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      r = await fetch(`${VYCE_BASE_URL}/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: payload,
-        ...signal ? { signal } : {}
-      });
-      raw = await r.text();
-      body = {};
-      try {
-        body = raw ? JSON.parse(raw) : {};
-      } catch {
-      }
-      if (r.ok || r.status < 500) break;
-      aiLog({ provider: "vyce", model: model_, status: r.status, error: true, retry: attempt });
-      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 1e3 * attempt));
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
     }
     if (!r.ok) {
-      aiLog({ provider: "vyce", model: model_, status: r.status, error: true });
-      throw new ApiError(`VyceAI: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
+      aiLog({ provider: "deeprelay", model: model_, status: r.status, error: true });
+      throw new ApiError(`Deep Relay: ${providerErrorText(body, r.status)}`, r.status === 401 ? 401 : 502);
     }
     const content = body?.choices?.[0]?.message?.content;
     const text = typeof content === "string" ? content : "";
-    aiLog({ provider: "vyce", model: model_, status: r.status, text_len: text.length, json: !!json });
+    aiLog({ provider: "deeprelay", model: model_, status: r.status, text_len: text.length, json: !!json });
     recordTokenUsage(opts.purpose, body);
-    if (!text.trim()) {
-      throw new ApiError(`VyceAI returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || "unknown"}).`, 502);
-    }
-    return text;
-  }
-  if (provider === "nvidia") {
-    const key = nvidiaKey();
-    if (!key) throw new ApiError(notConnectedMessage("nvidia"), 401);
-    nvidiaStats.started += 1;
-    nvidiaStats.inFlight += 1;
-    const pinned = Boolean(model);
-    const spreadStart = nvidiaSpreadCursor++ % NVIDIA_SPREAD_MODELS.length;
-    let spreadIndex = spreadStart;
-    let model_ = pinned ? String(model) : images?.length ? DEFAULT_MODELS.nvidia : NVIDIA_SPREAD_MODELS[spreadIndex];
-    const payloadMessages = [
-      ...system ? [{ role: "system", content: system }] : [],
-      ...messages.map((m, i) => ({
-        role: m.role,
-        content: images?.length && i === messages.length - 1 ? [{ type: "text", text: m.content }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))] : m.content
-      }))
-    ];
-    const buildPayload = (withFormat2) => JSON.stringify({
-      model: model_,
-      messages: payloadMessages,
-      // Reading pages is transcription as much as writing, so keep it close to the source.
-      temperature: images?.length ? 0.3 : 0.7,
-      // Let a long clinical answer finish rather than starving the reasoning trace.
-      max_tokens: nvidiaTokenBudget(effort),
-      chat_template_kwargs: nvidiaReasoningKwargs(effort),
-      ...json && withFormat2 ? { response_format: { type: "json_object" } } : {}
-    });
-    let withFormat = Boolean(json) && !nvidiaNoJsonFormat.has(model_);
-    let payload = buildPayload(withFormat);
-    let httpRes = null;
-    let raw = "";
-    let body = {};
-    for (let attempt = 1; attempt <= 6; attempt++) {
-      try {
-        httpRes = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-          body: payload,
-          // A call that never returns would hold its question forever; give up after 60 seconds, or sooner if the client stops.
-          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(6e4)]) : AbortSignal.timeout(6e4)
-        });
-      } catch (err) {
-        if (signal?.aborted) {
-          nvidiaFinish(model_, "stopped");
-          throw err;
-        }
-        nvidiaAttempt(model_, err?.name === "TimeoutError" ? "timeout" : "error", err?.name ?? "error");
-        console.log(`[nvidia] ${(/* @__PURE__ */ new Date()).toISOString().slice(11, 23)} ${opts.purpose ?? "unlabelled"} model=${model_} failed=${err?.name ?? "error"}`);
-        httpRes = null;
-        if (attempt >= 3) break;
-        await new Promise((resolve) => setTimeout(resolve, 2e3 * attempt));
-        continue;
-      }
-      raw = await httpRes.text();
-      console.log(`[nvidia] ${(/* @__PURE__ */ new Date()).toISOString().slice(11, 23)} ${opts.purpose ?? "unlabelled"} model=${model_} attempt=${attempt} status=${httpRes.status}`);
-      body = {};
-      try {
-        body = raw ? JSON.parse(raw) : {};
-      } catch {
-      }
-      if (httpRes.status === 400 && withFormat && /response_format/i.test(raw)) {
-        nvidiaNoJsonFormat.add(model_);
-        withFormat = false;
-        payload = buildPayload(false);
-        attempt -= 1;
-        continue;
-      }
-      const rateLimited = httpRes.status === 429;
-      nvidiaAttempt(model_, httpRes.ok ? "ok" : rateLimited ? "refused" : "error", String(httpRes.status));
-      if (httpRes.ok || httpRes.status < 500 && !rateLimited) break;
-      aiLog({ provider: "nvidia", model: model_, status: httpRes.status, error: true, retry: attempt });
-      if (!rateLimited && attempt >= 3) break;
-      if (rateLimited && !images?.length && !pinned) {
-        spreadIndex = (spreadIndex + 1) % NVIDIA_SPREAD_MODELS.length;
-        model_ = NVIDIA_SPREAD_MODELS[spreadIndex];
-        withFormat = Boolean(json) && !nvidiaNoJsonFormat.has(model_);
-        payload = buildPayload(withFormat);
-        if (spreadIndex !== spreadStart) continue;
-      }
-      if (attempt < 6) await new Promise((resolve) => setTimeout(resolve, rateLimited ? 5e3 : 1200 * attempt));
-    }
-    if (!httpRes || !httpRes.ok) {
-      const status2 = httpRes?.status ?? 502;
-      aiLog({ provider: "nvidia", model: model_, status: status2, error: true });
-      nvidiaFinish(model_, "failed", String(status2));
-      const detail = providerErrorText(body, status2);
-      const extra = detail === `HTTP ${status2}` && raw ? ` \u2014 ${raw.replace(/s+/g, " ").slice(0, 160)}` : "";
-      throw new ApiError(`NVIDIA: ${detail}${extra}`, status2 === 401 ? 401 : 502);
-    }
-    const content = body?.choices?.[0]?.message?.content;
-    const text = typeof content === "string" ? content : "";
-    aiLog({ provider: "nvidia", model: model_, status: httpRes.status, text_len: text.length, json: !!json });
-    recordTokenUsage(opts.purpose, body);
-    if (!text.trim()) {
-      nvidiaFinish(model_, "failed", "empty");
-      throw new ApiError(`NVIDIA returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || "unknown"}).`, 502);
-    }
-    nvidiaFinish(model_, "ok");
+    if (!text.trim()) throw new ApiError(`Deep Relay returned no text (finishReason: ${body?.choices?.[0]?.finish_reason || "unknown"}).`, 502);
     return text;
   }
   const internal = INTERNAL_PROVIDER[provider];
@@ -3069,7 +2884,7 @@ async function runCompletion(opts) {
       throw new ApiError(notConnectedMessage(provider), 401);
     }
     if (provider === "claude" && /not allowed for this organization/i.test(msg)) {
-      throw new ApiError("Claude subscription sign-in is restricted for your organisation. Use Claude via OpenCode (Claude Haiku 5.5) or add a Gemini API key instead.", 401);
+      throw new ApiError("Claude subscription sign-in is restricted for your organisation. Use Claude via OpenCode or add a Gemini API key instead.", 401);
     }
     if (provider === "opencode" && /unavailable/i.test(msg)) {
       throw new ApiError("OpenCode: this model is not on your plan. Pick one from \u201CFind models\u201D (Go-included: deepseek-v4.1-flash, grok-4.7, qwen3.8-flash, glm-5.3-flash \u2026).", 400);
@@ -3086,8 +2901,7 @@ app.get("/api/oauth/status", (req, res) => {
       claude: { connected: isProviderConnected("claude") },
       grok: { connected: isProviderConnected("grok") },
       opencode: { connected: isProviderConnected("opencode") },
-      nvidia: { connected: isProviderConnected("nvidia") },
-      vyce: { connected: isProviderConnected("vyce") },
+      deeprelay: { connected: isProviderConnected("deeprelay") },
       custom: { connected: isProviderConnected("custom") }
     },
     defaults: DEFAULT_MODELS
@@ -3123,6 +2937,7 @@ ${evidence}` : "No evidence was found, so list the subtopics an exam would test.
     `Split the topic "${topic}" into its distinct subtopics, sorted as an examiner would sort them:`,
     "for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. List every distinct subtopic an examiner tests on this topic: a narrow topic may have only two or three, a broad one thirty or more. Do not stop at a fixed number.",
     "Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.",
+    `Subtopic lock: list only subtopics inside the boundary. ${scopeInstruction()} Do not broaden a narrow topic to its whole chapter.`,
     "Give each subtopic a priority from 1 to 10 for how often it is tested.",
     'Give each subtopic "facts": the number of high-yield, exam-testable facts in it (1 to 6). Count only facts an examiner would ask, not background detail.',
     // JSON mode returns one object, so the list sits inside it under "subtopics".
@@ -3147,8 +2962,10 @@ ${evidence}` : "No evidence was found, so list the subtopics an exam would test.
     return unique;
   };
   try {
-    let subtopics = await splitWith(model || void 0).catch(() => []);
-    if (!subtopics.length && provider === "nvidia") subtopics = await splitWith(DEFAULT_MODELS.nvidia).catch(() => []);
+    let subtopics = await splitWith(model || void 0).catch((e) => {
+      console.log("[split-topic] first attempt failed:", e?.message || e);
+      return [];
+    });
     if (subtopics.length < 4) {
       const strict = [
         prompt,
@@ -3157,12 +2974,11 @@ ${evidence}` : "No evidence was found, so list the subtopics an exam would test.
         "For a disease, cover its causes, clinical features, investigations, treatment, complications and prognosis.",
         "A single subtopic is not acceptable."
       ].join("\n");
-      const more = await splitWith(model || void 0, strict).catch(() => []);
+      const more = await splitWith(model || void 0, strict).catch((e) => {
+        console.log("[split-topic] strict attempt failed:", e?.message || e);
+        return [];
+      });
       if (more.length > subtopics.length) subtopics = more;
-    }
-    if (subtopics.length < 4 && provider === "vyce") {
-      const alt = await splitWith(DEFAULT_MODELS.nvidia, prompt, "nvidia").catch(() => []);
-      if (alt.length > subtopics.length) subtopics = alt;
     }
     const thin = subtopics.length < 4;
     if (!subtopics.length) subtopics = [{ subtopic: topic, priority: 10, facts: 1 }];
@@ -3208,7 +3024,6 @@ async function listDistinctTopics(subjectSubtopics, count, exam, provider, model
   ].filter(Boolean).join("\n");
   const raw = await runCompletion({
     provider: provider || "gemini",
-    model: model || DEFAULT_MODELS.nvidia,
     messages: [{ role: "user", content: prompt }],
     json: true,
     effort: "min"
@@ -3265,7 +3080,6 @@ app.post("/api/ai/plan-topics", async (req, res) => {
     if (!raw) {
       raw = await runCompletion({
         provider: provider || "gemini",
-        model: model || DEFAULT_MODELS.nvidia,
         messages: [{ role: "user", content: planPrompt }],
         json: true,
         // Ranking subtopics is a short judgement, so it runs without reasoning, like the rest of the pipeline.
@@ -3423,14 +3237,6 @@ app.post("/api/oauth/complete", async (req, res) => {
 });
 app.post("/api/oauth/logout", (req, res) => {
   const { provider } = req.body || {};
-  if (provider === "vyce") {
-    try {
-      clearEnvValue("VYCE_API_KEY");
-      return res.json({ ok: true, connected: false, provider });
-    } catch (err) {
-      return res.status(500).json({ error: err?.message || "Could not remove the VyceAI key." });
-    }
-  }
   if (provider === "opencode") {
     try {
       clearEnvValue("OPENCODE_API_KEY");
@@ -3475,28 +3281,14 @@ app.post("/api/settings/opencode-key", (req, res) => {
     return res.status(500).json({ error: err?.message || "Could not save the OpenCode API key." });
   }
 });
-app.post("/api/settings/nvidia-key", (req, res) => {
+app.post("/api/settings/deeprelay-key", (req, res) => {
   const key = String(req.body?.apiKey || "").trim();
-  if (!/^[A-Za-z0-9_\-]{10,}$/.test(key)) {
-    return res.status(400).json({ error: "That does not look like a valid NVIDIA API key." });
-  }
+  if (!/^[A-Za-z0-9_.\-]{10,}$/.test(key)) return res.status(400).json({ error: "That does not look like a valid Deep Relay API key." });
   try {
-    writeEnvValue("NVIDIA_API_KEY", key);
+    writeEnvValue("DEEPRELAY_API_KEY", key);
     return res.json({ ok: true, connected: true });
   } catch (err) {
-    return res.status(500).json({ error: err?.message || "Could not save the NVIDIA API key." });
-  }
-});
-app.post("/api/settings/vyce-key", (req, res) => {
-  const key = String(req.body?.apiKey || "").trim();
-  if (!/^[A-Za-z0-9_.\-]{10,}$/.test(key)) {
-    return res.status(400).json({ error: "That does not look like a valid VyceAI API key." });
-  }
-  try {
-    writeEnvValue("VYCE_API_KEY", key);
-    return res.json({ ok: true, connected: true });
-  } catch (err) {
-    return res.status(500).json({ error: err?.message || "Could not save the VyceAI API key." });
+    return res.status(500).json({ error: err?.message || "Could not save the Deep Relay API key." });
   }
 });
 var CUSTOM_ENDPOINTS_FILE = path3.join(DATA_DIR2, "custom-endpoints.json");
@@ -3517,6 +3309,184 @@ function writeCustomEndpoints(endpoints) {
 function findCustomEndpoint(id) {
   return readCustomEndpoints().find((e) => e.id === id);
 }
+var PULSE_SYNC_FILE_NAME = "pulse-med-sync.json";
+async function pulseSyncConfigPaths() {
+  const os4 = await import("node:os");
+  const path4 = await import("node:path");
+  const configDir = path4.join(os4.homedir(), ".pulse-med");
+  return {
+    configDir,
+    configFile: path4.join(configDir, "sync-config.json")
+  };
+}
+async function readPulseSyncStoredConfig() {
+  const fs4 = await import("node:fs/promises");
+  const { configFile } = await pulseSyncConfigPaths();
+  try {
+    const raw = await fs4.readFile(configFile, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && "folder" in parsed) {
+      const folder = parsed.folder;
+      if (folder === null || typeof folder === "string") {
+        return { folder };
+      }
+    }
+  } catch {
+  }
+  return { folder: null };
+}
+async function writePulseSyncStoredConfig(folder) {
+  const fs4 = await import("node:fs/promises");
+  const { configDir, configFile } = await pulseSyncConfigPaths();
+  await fs4.mkdir(configDir, { recursive: true });
+  await fs4.writeFile(configFile, JSON.stringify({ folder }, null, 2), "utf8");
+}
+async function getPulseSyncConfigResponse(folder) {
+  if (!folder) {
+    return { folder: null, file: null, exists: false, modifiedAt: null };
+  }
+  const fs4 = await import("node:fs/promises");
+  const path4 = await import("node:path");
+  const file = path4.join(folder, PULSE_SYNC_FILE_NAME);
+  try {
+    const stat = await fs4.stat(file);
+    if (!stat.isFile()) {
+      return { folder, file, exists: false, modifiedAt: null };
+    }
+    return {
+      folder,
+      file,
+      exists: true,
+      modifiedAt: stat.mtime.toISOString()
+    };
+  } catch (error) {
+    const code = error.code;
+    if (code === "ENOENT") {
+      return { folder, file, exists: false, modifiedAt: null };
+    }
+    throw error;
+  }
+}
+app.get("/api/sync/config", async (_req, res) => {
+  try {
+    const stored = await readPulseSyncStoredConfig();
+    const config = await getPulseSyncConfigResponse(stored.folder);
+    res.json(config);
+  } catch {
+    res.status(500).json({ error: "Could not read sync configuration." });
+  }
+});
+app.post("/api/sync/config", async (req, res) => {
+  try {
+    const body = req.body;
+    const rawFolder = body?.folder;
+    if (typeof rawFolder !== "string" || rawFolder.trim().length === 0) {
+      res.status(400).json({ error: "A non-empty folder path is required." });
+      return;
+    }
+    const fs4 = await import("node:fs/promises");
+    const path4 = await import("node:path");
+    const folder = path4.resolve(rawFolder.trim());
+    let stat;
+    try {
+      stat = await fs4.stat(folder);
+    } catch (error) {
+      const code = error.code;
+      if (code === "ENOENT") {
+        res.status(400).json({ error: "The selected folder does not exist." });
+        return;
+      }
+      throw error;
+    }
+    if (!stat.isDirectory()) {
+      res.status(400).json({ error: "The selected path is not a directory." });
+      return;
+    }
+    await writePulseSyncStoredConfig(folder);
+    const config = await getPulseSyncConfigResponse(folder);
+    res.json(config);
+  } catch {
+    res.status(500).json({ error: "Could not save sync configuration." });
+  }
+});
+app.post("/api/sync/push", async (req, res) => {
+  try {
+    const body = req.body;
+    const payload = body?.payload;
+    if (typeof payload !== "string" || payload.length > 5e7) {
+      res.status(400).json({
+        error: "Payload must be a string up to 50,000,000 characters."
+      });
+      return;
+    }
+    const stored = await readPulseSyncStoredConfig();
+    if (!stored.folder) {
+      res.status(400).json({ error: "No sync folder is configured." });
+      return;
+    }
+    const fs4 = await import("node:fs/promises");
+    const path4 = await import("node:path");
+    const target = path4.join(stored.folder, PULSE_SYNC_FILE_NAME);
+    const temp = path4.join(
+      stored.folder,
+      `.${PULSE_SYNC_FILE_NAME}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
+    );
+    let tempWritten = false;
+    try {
+      await fs4.writeFile(temp, payload, "utf8");
+      tempWritten = true;
+      await fs4.rename(temp, target);
+      tempWritten = false;
+    } finally {
+      if (tempWritten) {
+        try {
+          await fs4.unlink(temp);
+        } catch {
+        }
+      }
+    }
+    const stat = await fs4.stat(target);
+    res.json({
+      ok: true,
+      bytes: Buffer.byteLength(payload, "utf8"),
+      modifiedAt: stat.mtime.toISOString()
+    });
+  } catch {
+    res.status(500).json({ error: "Could not write the sync file." });
+  }
+});
+app.get("/api/sync/pull", async (_req, res) => {
+  try {
+    const stored = await readPulseSyncStoredConfig();
+    if (!stored.folder) {
+      res.status(404).json({ error: "No sync file is available yet." });
+      return;
+    }
+    const fs4 = await import("node:fs/promises");
+    const path4 = await import("node:path");
+    const file = path4.join(stored.folder, PULSE_SYNC_FILE_NAME);
+    try {
+      const [payload, stat] = await Promise.all([
+        fs4.readFile(file, "utf8"),
+        fs4.stat(file)
+      ]);
+      res.json({
+        ok: true,
+        payload,
+        modifiedAt: stat.mtime.toISOString()
+      });
+    } catch (error) {
+      const code = error.code;
+      if (code === "ENOENT") {
+        res.status(404).json({ error: "No sync file is available yet." });
+        return;
+      }
+      throw error;
+    }
+  } catch {
+    res.status(500).json({ error: "Could not read the sync file." });
+  }
+});
 app.get("/api/settings/custom-endpoints", (_req, res) => {
   const endpoints = readCustomEndpoints().map((e) => ({ ...e, apiKey: "***" }));
   return res.json({ endpoints });
@@ -3633,35 +3603,6 @@ app.post("/api/settings/custom-endpoints/:id/test", async (req, res) => {
 });
 app.get("/api/models/custom", async (_req, res) => {
   const provider = String(_req.query.provider || "").trim();
-  if (provider === "nvidia") {
-    const key = nvidiaKey();
-    if (!key) {
-      return res.status(401).json({ error: "NVIDIA API key not configured. Add it in Settings \u2192 AI Subscription Hub." });
-    }
-    try {
-      const r = await fetch("https://integrate.api.nvidia.com/v1/models", {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${key}`
-        }
-      });
-      const raw = await r.text();
-      let body = {};
-      try {
-        body = raw ? JSON.parse(raw) : {};
-      } catch {
-      }
-      if (!r.ok) {
-        return res.status(502).json({ error: `NVIDIA model discovery failed: ${providerErrorText(body, r.status)}` });
-      }
-      const rows = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
-      const models = rows.map((m) => ({ id: String(m?.id ?? m?.name ?? ""), name: String(m?.name || m?.id || ""), source: "nvidia" })).filter((m) => m.id);
-      return res.json({ models, fetchedAt: (/* @__PURE__ */ new Date()).toISOString(), provider: "nvidia" });
-    } catch (err) {
-      return res.status(502).json({ error: err?.message || "Could not discover NVIDIA models." });
-    }
-  }
   const endpoints = readCustomEndpoints();
   const activeEndpoint = endpoints.find((e) => e.useForNewChats) || endpoints[0];
   if (!activeEndpoint) {
@@ -3813,58 +3754,23 @@ async function listGeminiModels() {
     return { models: [], error: e?.message || "Could not list Gemini models." };
   }
 }
-async function listNvidiaModels() {
-  if (!isProviderConnected("nvidia")) return { models: [], error: "No NVIDIA API key saved." };
+async function listDeepRelayModels() {
+  if (!isProviderConnected("deeprelay")) return { models: [], error: "No Deep Relay API key saved." };
   try {
-    const key = nvidiaKey();
-    const r = await fetch("https://integrate.api.nvidia.com/v1/models", {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`
-      }
-    });
-    const b = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(b?.error?.message || `HTTP ${r.status}`);
-    const rows = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
-    const verifiedModels = [
-      "nvidia/nemotron-3.5-super-vl-120b-a12b",
-      "nvidia/nemotron-3-ultra-550b-a55b",
-      "nvidia/nemotron-3.5-lightning-30b-a3b",
-      "nvidia/nemotron-3.5-bolt-e4b",
-      "nvidia/nemotron-3.5-content-safety",
-      "nvidia/nemotron-parse-2.0",
-      "meta/llama-guard-4-12b"
-    ];
-    return {
-      models: rows.map((m) => ({ id: String(m?.id ?? m?.name ?? ""), name: String(m?.name || m?.id || ""), source: "account" })).filter((m) => m.id && verifiedModels.includes(m.id))
-    };
-  } catch (e) {
-    return { models: [], error: e?.message || "Could not list NVIDIA models." };
-  }
-}
-async function listVyceModels() {
-  if (!isProviderConnected("vyce")) return { models: [], error: "No VyceAI API key saved." };
-  try {
-    const r = await fetch(`${VYCE_BASE_URL}/models`, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${vyceKey()}` }
-    });
+    const r = await fetch(`${DEEPRELAY_BASE_URL}/models`, { method: "GET", headers: { Authorization: `Bearer ${deepRelayKey()}` } });
     const b = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(providerErrorText(b, r.status));
     const rows = Array.isArray(b?.data) ? b.data : Array.isArray(b?.models) ? b.models : [];
-    return {
-      models: rows.map((m) => ({ id: String(m?.id ?? m?.name ?? ""), name: String(m?.name || m?.id || ""), source: "account" })).filter((m) => m.id)
-    };
+    return { models: rows.map((m) => ({ id: String(m?.id ?? m?.name ?? ""), name: String(m?.name || m?.id || ""), source: "account" })).filter((m) => m.id) };
   } catch (e) {
-    return { models: [], error: e?.message || "Could not list VyceAI models." };
+    return { models: [], error: e?.message || "Could not list Deep Relay models." };
   }
 }
 app.get("/api/models/available", async (req, res) => {
   const refresh = req.query.refresh === "1" || req.query.refresh === "true";
   const probe = req.query.probe === "1" || req.query.probe === "true";
   const only = String(req.query.provider || "").trim();
-  if (only && !["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "nvidia", "vyce"].includes(only)) {
+  if (only && !["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "deeprelay"].includes(only)) {
     return res.status(400).json({ error: `Unknown provider: ${only}` });
   }
   if (!only && !probe && !refresh && availableModelsCache && Date.now() - availableModelsCache.at < 3e5) {
@@ -3901,15 +3807,10 @@ app.get("/api/models/available", async (req, res) => {
     providers.opencode = oc.models;
     if (oc.error) errors.opencode = oc.error;
   }
-  if (!only || only === "nvidia") {
-    const nv = await listNvidiaModels();
-    providers.nvidia = nv.models;
-    if (nv.error) errors.nvidia = nv.error;
-  }
-  if (!only || only === "vyce") {
-    const vy = await listVyceModels();
-    providers.vyce = vy.models;
-    if (vy.error) errors.vyce = vy.error;
+  if (!only || only === "deeprelay") {
+    const dr = await listDeepRelayModels();
+    providers.deeprelay = dr.models;
+    if (dr.error) errors.deeprelay = dr.error;
   }
   const payload = {
     providers,
@@ -3924,7 +3825,7 @@ app.get("/api/models/available", async (req, res) => {
 app.post("/api/models/probe", async (req, res) => {
   const provider = String(req.body?.provider || "").trim();
   const model = String(req.body?.model || "").trim();
-  if (!["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "nvidia", "vyce"].includes(provider)) {
+  if (!["gemini", "chatgpt", "claude", "grok", "opencode", "custom", "deeprelay"].includes(provider)) {
     return res.status(400).json({ error: "Choose a provider to test." });
   }
   if (!model || model.length > 200) {
@@ -4003,9 +3904,6 @@ ${String(s.text).slice(0, 1200)}`).join("\n\n");
 Internet sources found for this topic. Read them, then check the keyed option against them before you answer: """${block}"""` }
   ];
 }
-app.get("/nvidia-progress", (_req, res) => {
-  res.type("html").send(fs3.readFileSync(path3.join(process.cwd(), "server", "nvidia-progress.html"), "utf8"));
-});
 app.post("/api/ai/verify-item", async (req, res) => {
   const { provider, model, question, groundOn } = req.body || {};
   if (!provider || !question || typeof question !== "object") {
@@ -4061,68 +3959,7 @@ app.post("/api/export/questions", (req, res) => {
   fs3.writeFileSync(path3.join(dir, name), JSON.stringify(req.body, null, 2), "utf8");
   res.json({ ok: true, file: path3.join("exports", name) });
 });
-app.post("/api/ai/nvidia-stats/reset", (_req, res) => {
-  nvidiaStats.started = 0;
-  nvidiaStats.inFlight = 0;
-  nvidiaStats.finished = { ok: 0, failed: 0, stopped: 0 };
-  nvidiaStats.byModel = {};
-  nvidiaStats.events = [];
-  nvidiaStats.accepted = 0;
-  nvidiaStats.dropped = {};
-  nvidiaStats.repairs = {};
-  nvidiaStats.tokens = { input: 0, output: 0, total: 0, calls: 0, unreported: 0 };
-  nvidiaStats.tokenStages = {};
-  res.json({ ok: true });
-});
-app.post("/api/ai/nvidia-stats/question", (req, res) => {
-  const { outcome, reason, draft } = req.body || {};
-  if (outcome === "accepted") nvidiaStats.accepted += 1;
-  else if (outcome === "dropped") {
-    const key = String(reason || "other");
-    nvidiaStats.dropped[key] = (nvidiaStats.dropped[key] ?? 0) + 1;
-    if (draft && typeof draft === "object") {
-      try {
-        const dir = path3.join(process.cwd(), "tools", "quality", "out");
-        fs3.mkdirSync(dir, { recursive: true });
-        fs3.appendFileSync(path3.join(dir, "dropped-questions.jsonl"), JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), reason: key, draft }) + "\n");
-      } catch {
-      }
-    }
-  }
-  res.json({ ok: true });
-});
-app.post("/api/ai/nvidia-stats/repair", (req, res) => {
-  const { outcome } = req.body || {};
-  if (outcome === "attempted" || outcome === "accepted" || outcome === "failed") {
-    nvidiaStats.repairs[outcome] = (nvidiaStats.repairs[outcome] ?? 0) + 1;
-  }
-  res.json({ ok: true });
-});
 var lastEngine = null;
-app.get("/api/ai/nvidia-stats", (_req, res) => {
-  const f = nvidiaStats.finished;
-  const totals = Object.values(nvidiaStats.byModel).reduce(
-    (sum, m) => ({ ok: sum.ok + m.ok, refused: sum.refused + m.refused, error: sum.error + m.error, timeout: sum.timeout + m.timeout }),
-    { ok: 0, refused: 0, error: 0, timeout: 0 }
-  );
-  res.json({
-    started: nvidiaStats.started,
-    inFlight: nvidiaStats.inFlight,
-    questionsOk: f.ok,
-    questionsFailed: f.failed,
-    questionsStopped: f.stopped,
-    accepted: nvidiaStats.accepted,
-    repairs: nvidiaStats.repairs,
-    tokens: nvidiaStats.tokens,
-    tokenStages: nvidiaStats.tokenStages,
-    dropped: nvidiaStats.dropped,
-    attempts: totals,
-    byModel: Object.fromEntries(Object.entries(nvidiaStats.byModel).map(([k, v]) => [k.replace("nvidia/", ""), v])),
-    events: nvidiaStats.events.slice(-25).reverse(),
-    engine: lastEngine,
-    serverTime: (/* @__PURE__ */ new Date()).toISOString()
-  });
-});
 app.post("/api/ai/complete", async (req, res) => {
   const { provider, model, system, messages, json, effort, groundOn } = req.body || {};
   if (!provider) {
@@ -4168,11 +4005,6 @@ app.post("/api/ai/jobs", (req, res) => {
   completionJobs.set(id, job);
   const session = req.header("x-opencode-session") || void 0;
   lastEngine = { provider: String(provider), model: String(model || DEFAULT_MODELS[provider] || provider), at: (/* @__PURE__ */ new Date()).toISOString() };
-  const countHere = provider !== "nvidia";
-  if (countHere) {
-    nvidiaStats.started += 1;
-    nvidiaStats.inFlight += 1;
-  }
   void (async () => {
     try {
       const grounded = groundOn && typeof groundOn === "object" ? await withInternetSources(messages, groundOn) : messages;
@@ -4189,13 +4021,6 @@ app.post("/api/ai/jobs", (req, res) => {
       job.body = { error: err?.message || "AI request failed." };
     } finally {
       job.done = true;
-      if (countHere) {
-        nvidiaAttempt(String(model || DEFAULT_MODELS[provider] || provider), job.status === 200 ? "ok" : "error", String(job.status));
-        nvidiaStats.inFlight = Math.max(0, nvidiaStats.inFlight - 1);
-        if (job.status === 200) nvidiaStats.finished.ok += 1;
-        else if (job.controller.signal.aborted) nvidiaStats.finished.stopped += 1;
-        else nvidiaStats.finished.failed += 1;
-      }
     }
   })();
   return res.json({ id });
@@ -4214,106 +4039,6 @@ app.delete("/api/ai/jobs/:id", (req, res) => {
     completionJobs.delete(String(req.params.id));
   }
   res.json({ ok: true });
-});
-function nemotronWords(body) {
-  const out = [];
-  const visit = (node) => {
-    if (!node || typeof node !== "object") return;
-    if (Array.isArray(node)) {
-      node.forEach(visit);
-      return;
-    }
-    const text = typeof node.text === "string" ? node.text : node.text_prediction?.text;
-    const shape = node.bounding_box ?? node.bbox ?? node.points ?? node.bounding_box?.points;
-    const pts = Array.isArray(shape) ? shape : Array.isArray(shape?.points) ? shape.points : void 0;
-    if (typeof text === "string" && text.trim() && pts && pts.length) {
-      const xs = [];
-      const ys = [];
-      if (pts.every((v) => typeof v === "number")) {
-        pts.forEach((v, i) => (i % 2 === 0 ? xs : ys).push(v));
-      } else {
-        for (const p of pts) {
-          const x = Array.isArray(p) ? p[0] : p?.x;
-          const y = Array.isArray(p) ? p[1] : p?.y;
-          if (typeof x === "number" && typeof y === "number") {
-            xs.push(x);
-            ys.push(y);
-          }
-        }
-      }
-      if (xs.length && ys.length) {
-        const conf = Number(node.confidence ?? node.text_prediction?.confidence);
-        out.push({
-          text: text.trim(),
-          confidence: Number.isFinite(conf) ? conf * (conf <= 1 ? 100 : 1) : 90,
-          bbox: { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) }
-        });
-      }
-      return;
-    }
-    Object.values(node).forEach(visit);
-  };
-  visit(body);
-  return out;
-}
-app.post("/api/ocr/nemotron", async (req, res) => {
-  const image = req.body?.image;
-  if (typeof image !== "string" || !/^data:image\/(jpeg|png|webp);base64,/.test(image)) {
-    return res.status(400).json({ error: "image must be a JPEG, PNG or WebP data URL." });
-  }
-  const key = nvidiaKey();
-  if (!key) return res.status(401).json({ error: notConnectedMessage("nvidia") });
-  if (image.split(",")[1].length > 18e4) {
-    return res.status(413).json({ error: "The page image is too large for the NVIDIA OCR API. Use a smaller image." });
-  }
-  try {
-    const r = await fetch("https://ai.api.nvidia.com/v1/cv/nvidia/nemotron-ocr-v2", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ input: [{ type: "image_url", url: image }] }),
-      signal: AbortSignal.timeout(12e4)
-    });
-    const raw = await r.text();
-    let body = {};
-    try {
-      body = raw ? JSON.parse(raw) : {};
-    } catch {
-    }
-    if (!r.ok) return res.status(r.status === 429 ? 429 : 502).json({ error: `NVIDIA OCR: ${providerErrorText(body, r.status)}` });
-    const words2 = nemotronWords(body);
-    if (process.env.OCR_DEBUG) console.log("[ocr/nemotron] raw response:", raw.slice(0, 2e3));
-    return res.json({ text: words2.map((w) => w.text).join("\n"), words: words2 });
-  } catch (err) {
-    return res.status(502).json({ error: err?.message || "The NVIDIA OCR request failed." });
-  }
-});
-app.post("/api/ai/complete-images", async (req, res) => {
-  const { provider, model, system, messages, json, effort, images } = req.body || {};
-  if (provider !== "nvidia") {
-    return res.status(400).json({ error: `Reading page images is not available with ${provider || "this provider"}.` });
-  }
-  if (!Array.isArray(messages) || messages.length === 0 || messages.some((m) => !m || typeof m.content !== "string")) {
-    return res.status(400).json({ error: "messages must be an array of {role, content}." });
-  }
-  if (!Array.isArray(images) || images.length === 0 || images.some((u) => typeof u !== "string" || !/^data:image\/(jpeg|png|webp);base64,/.test(u))) {
-    return res.status(400).json({ error: "images must be JPEG, PNG or WebP data URLs." });
-  }
-  const controller = new AbortController();
-  res.on("close", () => {
-    if (!res.writableFinished) controller.abort();
-  });
-  try {
-    const text = await runCompletion({ provider, model, system, messages, json, effort, images, signal: controller.signal });
-    if (controller.signal.aborted) return;
-    if (!text || !text.trim()) {
-      return res.status(502).json({ error: "The AI provider returned an empty response. Try again." });
-    }
-    return res.json({ success: true, text });
-  } catch (err) {
-    if (controller.signal.aborted) return;
-    const status2 = err instanceof ApiError ? err.status : 502;
-    if (!res.headersSent) return res.status(status2).json({ error: err?.message || "AI request failed." });
-  }
 });
 var PERSONA_PROMPTS = {
   BOARD_MASTER: "You are the PULSE MED Board Exam Master for NEET-PG / INI-CET / AMC CAT: razor-sharp high-yield clinical breakdowns, distractor (trap) dissection, and exam-board pearls.",
@@ -4345,7 +4070,7 @@ app.post("/api/ai/tutor-chat", async (req, res) => {
   }
   let provider = typeof body.provider === "string" ? body.provider : "";
   if (!provider) {
-    const candidates = ["nvidia", "chatgpt", "claude", "grok", "opencode", "gemini"];
+    const candidates = ["chatgpt", "claude", "grok", "opencode", "gemini"];
     provider = candidates.find((p) => isProviderConnected(p)) || "";
   }
   if (!provider) {
@@ -4447,13 +4172,15 @@ app.get("/api/images/proxy", async (req, res) => {
     return res.status(502).json({ error: err?.message || "Could not load that image." });
   }
 });
-async function visionVerify(imageUrl, claim, modality, key, questionContext = {}, attempt = 0) {
+async function visionVerify(imageUrl, claim, modality, questionContext = {}, provider = "gemini", model = "", attempt = 0) {
+  if (provider === "gemini" && !geminiKey()) {
+    return { pass: false, reason: notConnectedMessage("gemini") };
+  }
   const { buffer, type } = await fetchImage(imageUrl);
   if (!/^image\/(jpeg|png|webp)$/i.test(type)) {
     return { pass: false, reason: `Unsupported image type (${type}) \u2014 image skipped.` };
   }
   const dataUrl = `data:${type};base64,${buffer.toString("base64")}`;
-  const model_ = process.env.VISION_MODEL || DEFAULT_MODELS.nvidia;
   const instruction = buildVisionVerificationPrompt({
     claim,
     modality,
@@ -4464,6 +4191,10 @@ async function visionVerify(imageUrl, claim, modality, key, questionContext = {}
     boardPearl: questionContext.boardPearl,
     bodyPart: questionContext.bodyPart
   });
+  if (provider !== "gemini") {
+    return { pass: false, reason: "The selected model cannot check images. Use Gemini for image questions." };
+  }
+  const model_ = model || DEFAULT_MODELS.gemini;
   const payload = JSON.stringify({
     model: model_,
     messages: [
@@ -4477,20 +4208,13 @@ async function visionVerify(imageUrl, claim, modality, key, questionContext = {}
       }
     ],
     temperature: 0,
-    // This is a reasoning model: a small budget is spent entirely on hidden
-    // reasoning (finish_reason "length") and returns empty content. Give it room.
     max_tokens: Number(process.env.VISION_MAX_TOKENS || 2048),
-    // A yes/no verification needs no deliberation at all, and the reasoning trace was
-    // what silently ate the budget and produced empty verdicts. Turn it off outright.
-    chat_template_kwargs: { enable_thinking: false },
     stream: false
   });
-  const r = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+  const r = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${geminiKey()}` },
     body: payload,
-    // The reasoning model occasionally takes a very long time on a hard image; too
-    // short a timeout silently discards a perfectly good image. Overridable.
     signal: AbortSignal.timeout(Number(process.env.VISION_TIMEOUT_MS || 18e4))
   });
   const raw = await r.text();
@@ -4502,9 +4226,9 @@ async function visionVerify(imageUrl, claim, modality, key, questionContext = {}
   if (!r.ok) {
     if (r.status >= 500 && attempt < 1) {
       await new Promise((resolve) => setTimeout(resolve, 1500));
-      return visionVerify(imageUrl, claim, modality, key, questionContext, attempt + 1);
+      return visionVerify(imageUrl, claim, modality, questionContext, provider, model, attempt + 1);
     }
-    aiLog({ provider: "nvidia", model: model_, status: r.status, error: true, route: "images/verify" });
+    aiLog({ provider: "gemini", model: model_, status: r.status, error: true, route: "images/verify" });
     return { pass: false, reason: `Vision check failed (HTTP ${r.status}) \u2014 image skipped.` };
   }
   const msg = body?.choices?.[0]?.message;
@@ -4515,7 +4239,7 @@ async function visionVerify(imageUrl, claim, modality, key, questionContext = {}
   const verdict = parseVisionVerdict(text);
   const pass = verdict?.pass === true;
   const reason = verdict?.reason || (pass ? "Verified." : finish === "length" ? "Vision model ran out of tokens before answering \u2014 image skipped." : "Model did not return a complete structured verdict \u2014 image skipped.");
-  aiLog({ provider: "nvidia", model: model_, status: r.status, route: "images/verify", pass, finish, text_len: text.length });
+  aiLog({ provider: "gemini", model: model_, status: r.status, route: "images/verify", pass, finish, text_len: text.length });
   return process.env.VISION_DEBUG ? { pass, reason, debug: { raw: text.slice(0, 1500), finish } } : { pass, reason };
 }
 app.post("/api/images/verify", async (req, res) => {
@@ -4528,15 +4252,13 @@ app.post("/api/images/verify", async (req, res) => {
   const explanation = typeof req.body?.explanation === "string" ? req.body.explanation.trim().slice(0, 3e3) : "";
   const boardPearl = typeof req.body?.boardPearl === "string" ? req.body.boardPearl.trim().slice(0, 1e3) : "";
   const bodyPart = typeof req.body?.bodyPart === "string" ? req.body.bodyPart.trim().slice(0, 60) : "";
+  const provider = typeof req.body?.provider === "string" ? req.body.provider : "gemini";
+  const model = typeof req.body?.model === "string" ? req.body.model : "";
   if (!imageUrl || !claim) {
     return res.status(400).json({ error: "imageUrl and claim are required." });
   }
-  const key = nvidiaKey();
-  if (!key) {
-    return res.json({ pass: false, reason: "No vision provider connected \u2014 image skipped." });
-  }
   try {
-    const verdict = await visionVerify(imageUrl, claim, modality, key, { questionStem, questionText, correctAnswer, explanation, boardPearl, bodyPart });
+    const verdict = await visionVerify(imageUrl, claim, modality, { questionStem, questionText, correctAnswer, explanation, boardPearl, bodyPart }, provider, model);
     return res.json(verdict);
   } catch (err) {
     return res.json({ pass: false, reason: err?.message || "Vision check failed \u2014 image skipped." });
@@ -4552,20 +4274,22 @@ app.get("/api/images/bank", (_req, res) => {
 app.post("/api/images/bank/build", async (req, res) => {
   try {
     const wantVerify = req.body?.verify === true;
-    const key = wantVerify ? nvidiaKey() : null;
+    const provider = typeof req.body?.provider === "string" ? req.body.provider : "gemini";
+    const model = typeof req.body?.model === "string" ? req.body.model : "";
+    const canVerify = wantVerify && provider === "gemini" && Boolean(geminiKey());
     const summary = await buildImageBank({
       limitPerSeed: Number(req.body?.limitPerSeed) || 3,
-      verify: wantVerify && key ? async (entry) => {
+      verify: canVerify ? async (entry) => {
         const claim = `${entry.ground_truth}${entry.modality ? ` (${entry.modality})` : ""}`;
         try {
-          const verdict = await visionVerify(entry.imageUrl, claim, entry.modality, key);
+          const verdict = await visionVerify(entry.imageUrl, claim, entry.modality, {}, provider, model);
           return verdict.pass === true;
         } catch {
           return false;
         }
       } : void 0
     });
-    return res.json({ success: true, ...summary, verified: Boolean(wantVerify && key) });
+    return res.json({ success: true, ...summary, verified: Boolean(canVerify) });
   } catch (err) {
     return res.status(502).json({ error: err?.message || "Image-bank build failed." });
   }
@@ -4602,21 +4326,19 @@ app.post("/api/images/find-for-explanation", async (req, res) => {
   const body = req.body || {};
   const cue = typeof body.cue === "string" ? body.cue.trim().slice(0, 300) : "";
   const subject = typeof body.subject === "string" ? body.subject : "";
+  const provider = typeof body.provider === "string" ? body.provider : "gemini";
+  const model = typeof body.model === "string" ? body.model : "";
   if (!cue) return res.json({ found: false, reason: "No image cue was supplied." });
   try {
     const candidates = searchBankByText(cue, { subject, limit: 4 });
     if (!candidates.length) {
       return res.json({ found: false, reason: "No bank image matches that description." });
     }
-    const key = nvidiaKey();
-    if (!key) {
-      return res.json({ found: false, reason: "No vision provider connected \u2014 image skipped." });
-    }
     for (const entry of candidates) {
       const claim = `${entry.ground_truth}${entry.modality ? ` (${entry.modality})` : ""}`;
       let verdict;
       try {
-        verdict = await visionVerify(entry.imageUrl, claim, entry.modality, key);
+        verdict = await visionVerify(entry.imageUrl, claim, entry.modality, {}, provider, model);
       } catch (err) {
         verdict = { pass: false, reason: err?.message || "Vision check failed." };
       }
@@ -4637,7 +4359,7 @@ app.post("/api/images/find-for-explanation", async (req, res) => {
           verification: verdict.reason
         });
       }
-      aiLog({ provider: "nvidia", route: "images/find-for-explanation", pass: false, reason: verdict.reason.slice(0, 160), image_id: entry.image_id });
+      aiLog({ provider, route: "images/find-for-explanation", pass: false, reason: verdict.reason.slice(0, 160), image_id: entry.image_id });
     }
     return res.json({ found: false, reason: "No bank image passed verification for that description." });
   } catch (err) {
@@ -4649,12 +4371,17 @@ app.post("/api/images/generate-question", async (req, res) => {
   const imageUrl = typeof body.imageUrl === "string" ? body.imageUrl : "";
   const groundTruth = typeof body.groundTruth === "string" ? body.groundTruth.trim() : "";
   const imageId = typeof body.imageId === "string" ? body.imageId : "";
+  const provider = typeof body.provider === "string" ? body.provider : "gemini";
+  const model = typeof body.model === "string" ? body.model : DEFAULT_MODELS.gemini;
   if (!imageUrl || !groundTruth) {
     return res.status(400).json({ error: "imageUrl and groundTruth are required." });
   }
-  const key = nvidiaKey();
+  if (provider !== "gemini") {
+    return res.status(400).json({ error: "The selected model cannot check images. Use Gemini for image questions." });
+  }
+  const key = geminiKey();
   if (!key) {
-    return res.status(401).json({ error: notConnectedMessage("nvidia") });
+    return res.status(401).json({ error: notConnectedMessage("gemini") });
   }
   try {
     const writeOnce = () => generateQuestionFromImage({
@@ -4667,7 +4394,8 @@ app.post("/api/images/generate-question", async (req, res) => {
       difficultyTier: typeof body.difficultyTier === "string" ? body.difficultyTier : "MEDIUM",
       optionCount: Number(body.optionCount) === 5 ? 5 : 4,
       apiKey: key,
-      model: typeof body.model === "string" ? body.model : process.env.VISION_MODEL || DEFAULT_MODELS.nvidia
+      model,
+      url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
     });
     let question;
     try {
@@ -4676,7 +4404,7 @@ app.post("/api/images/generate-question", async (req, res) => {
       if (!/did not return usable JSON/i.test(String(firstErr?.message || ""))) throw firstErr;
       question = await writeOnce();
     }
-    return res.json({ success: true, question, model: process.env.VISION_MODEL || DEFAULT_MODELS.nvidia });
+    return res.json({ success: true, question, model });
   } catch (err) {
     const msg = String(err?.message || "Image-first generation failed.");
     const status2 = msg === "image_mismatch" ? 422 : 502;
@@ -4686,7 +4414,7 @@ app.post("/api/images/generate-question", async (req, res) => {
       } catch {
       }
     }
-    aiLog({ provider: "nvidia", route: "images/generate-question", error: true, status: status2, reason: msg.slice(0, 200) });
+    aiLog({ provider: "gemini", route: "images/generate-question", error: true, status: status2, reason: msg.slice(0, 200) });
     return res.status(status2).json({ error: msg });
   }
 });
@@ -4888,7 +4616,7 @@ app.get("/api/providers/status", (req, res) => {
   const customEndpoints = readCustomEndpoints();
   res.json({
     providers: [
-      ...["gemini", "chatgpt", "claude", "grok", "opencode", "nvidia", "vyce"].map((id) => ({
+      ...["gemini", "chatgpt", "claude", "grok", "opencode", "deeprelay"].map((id) => ({
         id,
         model: DEFAULT_MODELS[id],
         connected: isProviderConnected(id)
@@ -4954,6 +4682,3 @@ async function startServer() {
   }
 }
 startServer();
-export {
-  nemotronWords
-};

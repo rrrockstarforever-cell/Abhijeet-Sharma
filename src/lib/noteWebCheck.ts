@@ -28,17 +28,17 @@ const MAX_CLAIMS = 8;
 const squeeze = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 
 const PICK_CLAIMS_SYSTEM =
-  `You choose which facts in a medical revision note most need checking. Pick up to ${MAX_CLAIMS} specific claims that would do the most harm if wrong: ` +
-  'numbers, age and weight bands, lines of therapy, drugs of choice, exceptions, enzyme and gene names, contraindications, and sentences marked †. ' +
-  'Copy each claim as one standalone sentence that names its subject. Write a short web search query for each. ' +
-  'Reply with ONLY JSON: {"claims":[{"claim":"...","query":"..."}]}';
+ `You choose which facts in a medical revision note most need checking. Pick up to ${MAX_CLAIMS} specific claims that would do the most harm if wrong: ` +
+ 'numbers, age and weight bands, lines of therapy, drugs of choice, exceptions, enzyme and gene names, contraindications, and sentences marked †. ' +
+ 'Copy each claim as one standalone sentence that names its subject. Write a short web search query for each. ' +
+ 'Reply with ONLY JSON: {"claims":[{"claim":"...","query":"..."}]}';
 
 const JUDGE_SYSTEM =
-  'You compare claims from a medical revision note with web sources. Use ONLY the source text given, never your own memory. ' +
-  'For each claim choose: "confirmed" if a source states the same fact; "conflict" if a source states something different; "no-evidence" if the sources do not settle it. ' +
-  'For confirmed or conflict, give the source id and "quote": words copied exactly from that source that show it. ' +
-  '"explanation" is one plain sentence; for a conflict, say what the source says instead. ' +
-  'Reply with ONLY JSON: {"results":[{"claim":1,"verdict":"confirmed","source":"1.2","quote":"...","explanation":"..."}]}';
+ 'You compare claims from a medical revision note with web sources. Use ONLY the source text given, never your own memory. ' +
+ 'For each claim choose: "confirmed" if a source states the same fact; "conflict" if a source states something different; "no-evidence" if the sources do not settle it. ' +
+ 'For confirmed or conflict, give the source id and "quote": words copied exactly from that source that show it. ' +
+ '"explanation" is one plain sentence; for a conflict, say what the source says instead. ' +
+ 'Reply with ONLY JSON: {"results":[{"claim":1,"verdict":"confirmed","source":"1.2","quote":"...","explanation":"..."}]}';
 
 async function search(query: string, claim: string): Promise<Source[]> {
   const res = await fetch('/api/web/research', {

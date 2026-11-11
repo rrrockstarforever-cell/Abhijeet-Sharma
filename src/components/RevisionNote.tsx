@@ -35,7 +35,7 @@ function renderInline(text: string, keyPrefix: string, onOpenPage?: (page: numbe
           <button
             key={`${keyPrefix}-p${i}-${match.index}`}
             onClick={() => onOpenPage(pageNum)}
-            className="mx-0.5 inline-flex items-center gap-1 rounded-full border border-[#0f8b8d]/30 bg-teal-50 px-2 py-0.5 text-[11px] font-semibold text-[#00696b] transition hover:bg-teal-100"
+            className="mx-0.5 inline-flex items-center gap-1 rounded-full border  bg-teal-50 px-2 py-0.5 text-[11px] font-semibold  transition hover:bg-teal-100"
             title={`Open page ${pageNum} in the reader`}
           >
             <FileText className="h-3 w-3" /> {match[0]}
@@ -90,11 +90,11 @@ export const RevisionNote: React.FC<RevisionNoteProps> = ({ text, topic, onOpenP
         <div
           key={`callout${index}`}
           className={`relative overflow-hidden rounded-xl border p-3.5 shadow-sm ${isMnemonic
-            ? 'border-amber-200 bg-gradient-to-br from-amber-50 to-white'
-            : 'border-teal-200 bg-gradient-to-br from-teal-50 to-white'}`}
+            ? 'border-amber-200 from-amber-50 to-white'
+            : 'border-teal-200 from-teal-50 to-white'}`}
         >
-          <span className={`absolute inset-y-0 left-0 w-1 ${isMnemonic ? 'bg-amber-400' : 'bg-[#0f8b8d]'}`} />
-          <div className={`mb-1.5 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider ${isMnemonic ? 'text-amber-800' : 'text-[#00696b]'}`}>
+          <span className={`absolute inset-y-0 left-0 w-1 ${isMnemonic ? 'bg-amber-400' : ''}`} />
+          <div className={`mb-1.5 flex items-center gap-2 text-[10px] font-medium uppercase tracking-wider ${isMnemonic ? 'text-amber-800' : ''}`}>
             <span className={`flex h-5 w-5 items-center justify-center rounded-full ${isMnemonic ? 'bg-amber-200/70' : 'bg-teal-100'}`}>
               {isMnemonic ? <Brain className="h-3 w-3" /> : <Sparkles className="h-3 w-3" />}
             </span>
@@ -110,8 +110,8 @@ export const RevisionNote: React.FC<RevisionNoteProps> = ({ text, topic, onOpenP
       flushAll(`h${index}`);
       const heading = trimmed.replace(/^#{1,4}\s+/, '');
       blocks.push(
-        <h3 key={`h${index}`} className="flex items-center gap-2 pt-2 text-[14px] font-bold text-slate-900 first:pt-0">
-          <span className="h-4 w-1 shrink-0 rounded-full bg-[#0f8b8d]" />
+        <h3 key={`h${index}`} className="flex items-center gap-2 pt-2 text-[14px] font-medium text-slate-900 first:pt-0">
+          <span className="h-4 w-1 shrink-0 rounded-full " />
           {renderInline(heading, `h${index}`, onOpenPage)}
         </h3>,
       );
@@ -122,7 +122,7 @@ export const RevisionNote: React.FC<RevisionNoteProps> = ({ text, topic, onOpenP
       flushParagraph(`li${index}-p`);
       items.push(
         <li key={`li${index}`} className="flex items-start gap-2.5 text-[13px] leading-6 text-slate-700">
-          <span className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-[#0f8b8d]" />
+          <span className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full " />
           <span>{renderInline(trimmed.replace(/^[-*•]\s+/, ''), `li${index}`, onOpenPage)}</span>
         </li>,
       );
@@ -176,7 +176,7 @@ export function downloadNotesPdf(title: string, text: string, providerLabel?: st
     .note { white-space: pre-wrap; font-size: 14px; }
     .footer { margin-top: 32px; border-top: 1px solid #ccc; padding-top: 8px; font-size: 11px; color: #666; }
     @media print { body { margin: 16mm; } }
-  `;
+ `;
   head.appendChild(meta);
   head.appendChild(style);
   doc.head.replaceWith(head);

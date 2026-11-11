@@ -75,7 +75,7 @@ export const TopicPickerModal: React.FC<TopicPickerModalProps> = ({
         className="relative w-full max-w-md bg-white rounded-xl shadow-2xl border border-slate-200 flex flex-col max-h-[80vh]"
       >
         <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-3">
-          <h2 className="text-base font-bold text-slate-900 leading-snug">
+          <h2 className="text-base font-medium text-slate-900 leading-snug">
             Select topics for {subject.toLowerCase()}
           </h2>
           <button
@@ -109,13 +109,13 @@ export const TopicPickerModal: React.FC<TopicPickerModalProps> = ({
             />
             <span className="text-xs font-semibold text-slate-700">Choose</span>
             {mode === 'CHOOSE' && chosen.length > 0 && (
-              <span className="text-[10px] text-[#0f8b8d] font-bold">({chosen.length})</span>
+              <span className="text-[10px]  font-medium">({chosen.length})</span>
             )}
           </label>
           {mode === 'CHOOSE' && (
             <button
               onClick={mode === 'CHOOSE' && allChecked ? pickNone : pickAll}
-              className="ml-auto text-[10px] font-bold text-[#0f8b8d] hover:underline"
+              className="ml-auto text-[10px] font-medium  hover:underline"
             >
               {mode === 'CHOOSE' && allChecked ? 'Clear all' : 'Select all'}
             </button>
@@ -135,7 +135,7 @@ export const TopicPickerModal: React.FC<TopicPickerModalProps> = ({
               >
                 <span
                   className={`mt-0.5 h-4 w-4 shrink-0 rounded border flex items-center justify-center ${
-                    checked ? 'bg-[#0f8b8d] border-[#0f8b8d]' : 'bg-white border-slate-300'
+                    checked ? ' ' : 'bg-white border-slate-300'
                   }`}
                 >
                   {checked && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
@@ -162,7 +162,7 @@ export const TopicPickerModal: React.FC<TopicPickerModalProps> = ({
           </p>
           <button
             onClick={done}
-            className="px-6 py-2 rounded-lg bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold transition-colors shadow-sm"
+            className="px-6 py-2 rounded-lg   text-white text-xs font-medium transition-colors shadow-sm"
           >
             Done
           </button>

@@ -26,10 +26,6 @@ export const GRID = [
   { id: 'mx-ini-urea', topic: 'urea cycle and its disorders', exam: 'INI_CET', count: 10, style: 'mix' },
   { id: 'mx-ini-obg', topic: 'pre-eclampsia', exam: 'INI_CET', count: 10, style: 'mix' },
   { id: 'mx-ini-lung', topic: 'lung chapter', exam: 'INI_CET', count: 10, style: 'mix' },
-  { id: 'mx-amc-chest', topic: 'chest pain in general practice', exam: 'AMC_CAT', count: 10, style: 'mix' },
-  { id: 'mx-amc-asthma', topic: 'asthma in adults', exam: 'AMC_CAT', count: 10, style: 'mix' },
-  { id: 'mx-amc-depr', topic: 'depression in general practice', exam: 'AMC_CAT', count: 10, style: 'mix' },
-  { id: 'mx-amc-dm', topic: 'type 2 diabetes management', exam: 'AMC_CAT', count: 10, style: 'mix' },
   // ---- topic shapes ----
   { id: 'tp-drug', topic: 'anticoagulants', exam: 'NEET_PG', count: 8, style: 'mix' },
   { id: 'tp-medicine', topic: 'thyroid disorders', exam: 'NEET_PG', count: 8, style: 'mix' },

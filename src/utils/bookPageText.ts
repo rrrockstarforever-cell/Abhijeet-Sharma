@@ -40,7 +40,7 @@ export async function extractBookPageText(docId: string, pageNumber: number): Pr
     const text = await readPdfPageText(pdf, pageNumber);
     if (!text) {
       throw new Error(
-        `Page ${pageNumber} has no selectable text — it is probably a scan. Open it in the PDF Reader and run OCR, then attach it again.`,
+ `Page ${pageNumber} has no selectable text — it is probably a scan. Open it in the PDF Reader and run OCR, then attach it again.`,
       );
     }
     await savePageText(docId, pageNumber, text).catch(() => undefined);
@@ -142,7 +142,7 @@ export async function extractBookRangeText(
 
   if (!pieces.length) {
     throw new Error(
-      `No selectable text found in pages ${from}–${to}. They may be scans — open them in the PDF Reader and run OCR first.`,
+ `No selectable text found in pages ${from}–${to}. They may be scans — open them in the PDF Reader and run OCR first.`,
     );
   }
 

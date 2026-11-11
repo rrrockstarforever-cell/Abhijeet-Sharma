@@ -1,4 +1,5 @@
 import { debugLog } from './debugLog.ts';
+import { getActiveProvider, getEffectiveModel } from '../lib/ai.ts';
 // Live clinical-image lookup for image-based questions.
 // The local server queries Open-i (NLM) and Wikimedia Commons and returns only
 // explicit CC0/Public Domain licences, proxied through /api/images/proxy so the
@@ -54,10 +55,17 @@ async function verifyImageMatches(image: LiveImage, claim: string, timeoutMs = 4
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const provider = getActiveProvider();
+    const model = provider ? getEffectiveModel(provider) : undefined;
     const res = await fetch('/api/images/verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageUrl: image.imageUrl, claim, modality: image.modality || '' }),
+      body: JSON.stringify({
+        imageUrl: image.imageUrl,
+        claim,
+        modality: image.modality || '',
+        ...(provider ? { provider, model } : {}),
+      }),
       signal: controller.signal,
     });
     const body: any = await res.json().catch(() => ({}));
@@ -168,7 +176,7 @@ export async function findLiveImage(
       const expanded = tryQ.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 3 || ['ecg', 'ct', 'mri', 'xray'].includes(t));
       const MODALITY_ALIASES: Record<string, string[]> = {
         ecg: ['ecg', 'ekg', 'electrocardiogram', 'electrocardiography'],
-        'x-ray': ['x-ray', 'xray', 'radiograph', 'chest film'],
+ 'x-ray': ['x-ray', 'xray', 'radiograph', 'chest film'],
         xray: ['x-ray', 'xray', 'radiograph'],
         ct: ['ct', 'computed tomography'],
         mri: ['mri', 'magnetic resonance'],
@@ -179,7 +187,7 @@ export async function findLiveImage(
       const expandedTokens = expanded.flatMap((t) => [t, ...(MODALITY_ALIASES[t] ?? [])]);
       const modalityTokens = expandedTokens.filter((t) =>
         ['ecg', 'ekg', 'electrocardiogram', 'electrocardiography', 'x-ray', 'xray',
-         'radiograph', 'ct', 'mri', 'ultrasound', 'histology', 'fundus', 'retina'].includes(t),
+ 'radiograph', 'ct', 'mri', 'ultrasound', 'histology', 'fundus', 'retina'].includes(t),
       );
       const relevant = (row: LiveImage) => {
         const hay = `${row.title} ${row.caption}`.toLowerCase();

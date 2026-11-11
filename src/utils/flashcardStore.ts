@@ -1,8 +1,8 @@
 // FSRS-style flashcard scheduling for Pulse Med (PARITY section 9 / 12).
 //
 // Cards are built from REAL saved material only:
-//   - user highlights / AI notes (localStorage `pulse.userHighlights.v1`)
-//   - captured mistake-notebook questions (`pulse.mistakes.v1`)
+// - user highlights / AI notes (localStorage `pulse.userHighlights.v1`)
+// - captured mistake-notebook questions (`pulse.mistakes.v1`)
 // There is no mock schedule. New cards are due immediately; ratings reschedule them.
 //
 // Scheduling is a compact FSRS-inspired model: stability grows with successful
@@ -328,7 +328,7 @@ function isReviewSchedule(value: unknown): value is ReviewSchedule {
 /**
  * Merge a backup into the current data.
  * - Schedules are only applied to card keys that do not already have one, so a
- *   restore can never overwrite the learner's current scheduling progress.
+ * restore can never overwrite the learner's current scheduling progress.
  * - Items are matched by id; duplicates are skipped.
  */
 export function importBackup(raw: string): ImportResult {

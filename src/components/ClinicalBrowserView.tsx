@@ -3,6 +3,7 @@
 // "Ask AI about these results" summarises ONLY the returned sources via /api/ai/complete.
 // No canned results anywhere; every failure is surfaced.
 import React, { useState, useRef, useEffect } from 'react';
+import { motion, useReducedMotion } from 'motion/react';
 import {
   Globe,
   Search,
@@ -58,6 +59,7 @@ function loadScratch(): ScratchNote[] {
 }
 
 export const ClinicalBrowserView: React.FC<ClinicalBrowserViewProps> = ({ onNavigate }) => {
+  const reduceMotion = useReducedMotion();
   const [query, setQuery] = useState<string>(() => {
     // The global header search hands its query over through sessionStorage.
     try {
@@ -175,10 +177,10 @@ export const ClinicalBrowserView: React.FC<ClinicalBrowserViewProps> = ({ onNavi
         .join('\n\n');
       const text = await aiComplete({
         system:
-          'You are a clinical evidence assistant for a postgraduate medical exam student. ' +
-          'Answer using ONLY the numbered sources provided by the user. Cite sources as [n] like PubMed citation markers. ' +
-          'If the sources do not cover something, say so explicitly instead of guessing. ' +
-          'Structure the answer in markdown: 1-2 sentence bottom line first, then key findings with citations, then any conflicting evidence, then one clinical takeaway for exams.',
+ 'You are a clinical evidence assistant for a postgraduate medical exam student. ' +
+ 'Answer using ONLY the numbered sources provided by the user. Cite sources as [n] like PubMed citation markers. ' +
+ 'If the sources do not cover something, say so explicitly instead of guessing. ' +
+ 'Structure the answer in markdown: 1-2 sentence bottom line first, then key findings with citations, then any conflicting evidence, then one clinical takeaway for exams.',
         messages: [
           {
             role: 'user',
@@ -205,137 +207,216 @@ export const ClinicalBrowserView: React.FC<ClinicalBrowserViewProps> = ({ onNavi
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* Header */}
-      <div className="bg-[#001432] rounded-2xl p-6 text-white border border-[#13294b] shadow-md relative overflow-hidden">
-        <div className="absolute right-0 top-0 bottom-0 w-96 bg-gradient-to-l from-[#0f8b8d]/20 to-transparent pointer-events-none" />
-        <div className="relative z-10">
-          <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-[#0f8b8d]/20 text-[#8ff3f4] text-xs font-semibold uppercase tracking-wider mb-2 border border-[#0f8b8d]/30">
-            <Globe className="w-3.5 h-3.5" />
-            Live Evidence Retrieval
+      <div className="relative overflow-hidden rounded-[24px] border p-5  dark:">
+        <div className="pointer-events-none absolute inset-0  bg-[length:9px_9px] opacity-[0.10]" />
+        <div className="pointer-events-none absolute inset-0 hidden  opacity-[0.05] [mask-image:radial-gradient(circle_at_center,transparent_0,transparent_38%,black_76%)] md:block" />
+        <div className="relative z-10 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <div className="mb-2 inline-flex items-center gap-2 rounded-full border   px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] ">
+              <Globe className="h-3.5 w-3.5" />
+              Evidence Radar
+            </div>
+            <h1 className="text-xl font-medium tracking-tight  ">Clinical Evidence Browser</h1>
+            <p className="mt-1 flex items-center gap-2 text-sm ">
+              <Search className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">{query.trim() ? query : 'Awaiting clinical query — live web + PubMed retrieval'}</span>
+            </p>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">Clinical Evidence Browser</h1>
-          <p className="text-slate-300 text-sm mt-1 max-w-2xl">
-            Searches the live web (DuckDuckGo) and PubMed abstracts at query time. Sources are fetched with their URLs — ask the AI to summarise exactly what was found.
-          </p>
+          <div className="shrink-0 self-start sm:self-center">
+            {searching ? (
+              <span className="inline-flex items-center gap-1.5 rounded-xl border  px-3 py-2 font-[''] text-sm uppercase tracking-[0.12em]   [text-shadow:2px_2px_0_rgba(255,255,255,0.7)] ">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Scanning live sources
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 rounded-xl border   px-3 py-2 text-[11px] font-semibold ">
+                <ShieldCheck className="h-4 w-4 text-emerald-600" />
+                Live retrieval
+              </span>
+            )}
+          </div>
         </div>
+        <p className="relative z-10 mt-2 max-w-2xl text-xs leading-relaxed ">
+          Searches the live web (DuckDuckGo) and PubMed abstracts at query time. Sources are fetched with their URLs — ask the AI to summarise exactly what was found.
+        </p>
       </div>
 
       {/* Search bar */}
-      <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-3">
-        <div className="flex items-center gap-2">
-          <div className="flex-1 flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 focus-within:ring-2 focus-within:ring-[#0f8b8d]">
-            <Search className="w-4 h-4 text-slate-400 shrink-0" />
-            <input
-              ref={inputRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={handleKeyDown}
-              disabled={searching}
-              placeholder="e.g. vanA enterococcus teicoplanin susceptibility OR glucagon-like peptide 1 renal outcomes"
-              className="flex-1 bg-transparent text-xs text-slate-800 placeholder-slate-400 focus:outline-none"
-            />
-            {query && !searching && (
-              <button onClick={() => setQuery('')} className="text-slate-400 hover:text-slate-600">
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-          <button
-            onClick={runResearch}
-            disabled={searching || !query.trim()}
-            className="px-4 py-2.5 rounded-xl bg-[#0f8b8d] hover:bg-[#00696b] disabled:opacity-40 text-white text-xs font-bold flex items-center gap-2 transition-colors shrink-0"
-          >
-            {searching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-            {searching ? 'Searching…' : 'Search Live Sources'}
-          </button>
-        </div>
-
-        {searchError && (
-          <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-xl flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-            <span>{searchError}</span>
-          </div>
-        )}
-
-        <div className="flex items-center justify-between text-[11px] text-slate-500">
-          <span className="flex items-center gap-1.5">
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-            Only public pages are fetched; results ranked with trusted medical domains first
-          </span>
-          <div className="flex items-center gap-3">
+      <div className="relative overflow-hidden rounded-[20px] border   p-4 dark:">
+        <div className="pointer-events-none absolute inset-0  bg-[length:10px_10px] opacity-[0.08]" />
+        <div className="relative z-10 space-y-3">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="flex min-h-[52px] flex-1 items-center gap-2 rounded-[14px] border   px-4 py-3 focus-within:ring-2 focus-within: focus-within:ring-offset-2 ">
+              <Search className="h-4 w-4 shrink-0 " />
+              <input
+                ref={inputRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={handleKeyDown}
+                disabled={searching}
+                placeholder="e.g. vanA enterococcus teicoplanin susceptibility OR glucagon-like peptide 1 renal outcomes"
+                className="flex-1 min-w-0 bg-transparent text-sm   focus:outline-none disabled:opacity-60 "
+              />
+              {query && !searching && (
+                <button
+                  type="button"
+                  onClick={() => setQuery('')}
+                  aria-label="Clear query"
+                  className="rounded-full p-1  transition-colors   focus:outline-none focus-visible:ring-2 focus-visible: "
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
             <button
+              type="button"
+              onClick={runResearch}
+              disabled={searching || !query.trim()}
+              className="flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-[16px] px-5 py-3 text-sm font-medium  transition-transform hover:-translate-y-0.5 hover:scale-[1.01] focus:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2  disabled:translate-y-0 disabled:scale-100 disabled:opacity-40"
+            >
+              {searching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+              {searching ? 'Searching…' : 'Search Live Sources'}
+            </button>
+          </div>
+
+          {searchError && (
+            <div className="flex rotate-[-0.5deg] items-start gap-2 rounded-[16px] border  p-3  ">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <div className="font-[''] text-[11px] uppercase tracking-[0.14em] [text-shadow:1px_1px_0_rgba(255,255,255,0.55)]">Search failed</div>
+                <p className="text-sm leading-relaxed">{searchError}</p>
+              </div>
+            </div>
+          )}
+
+          <div className="flex flex-col gap-2 text-[11px]  sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 rounded-full border   px-2.5 py-1 font-medium">
+                <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
+                Public pages only · trusted medical domains first
+              </span>
+              {retrievedAt && sources.length > 0 && (
+                <>
+                  <span className="inline-flex items-center gap-1.5 rounded-full border   px-2.5 py-1 font-mono font-medium">
+                    <Layers className="h-3.5 w-3.5" />
+                    {sources.length} sources
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 rounded-full border   px-2.5 py-1 font-mono font-medium">
+                    <Clock className="h-3.5 w-3.5" />
+                    retrieved {retrievedAt}
+                  </span>
+                </>
+              )}
+            </div>
+            <button
+              id="scratch-toggle"
+              type="button"
               onClick={() => setShowScratch(!showScratch)}
-              className={`flex items-center gap-1.5 font-semibold px-2 py-1 rounded-lg border ${
-                showScratch ? 'bg-amber-50 border-amber-200 text-amber-800' : 'hover:bg-slate-100 text-slate-600 border-slate-200'
+              aria-expanded={showScratch}
+              className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border px-3 py-1.5 text-[11px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible: ${
+                showScratch
+                  ? '   '
+                  : ' bg-transparent  '
               }`}
             >
-              <StickyNote className="w-3.5 h-3.5" />
-              Scratchpad ({scratch.length})
-            </button>
-            {retrievedAt && sources.length > 0 && (
-              <span className="flex items-center gap-1.5 font-mono">
-                <Clock className="w-3.5 h-3.5" />
-                {sources.length} sources · retrieved {retrievedAt}
+              <StickyNote className="h-3.5 w-3.5" />
+              Scratchpad
+              <span className="inline-flex min-w-5 items-center justify-center rounded-full border border-current px-1 font-[''] text-[10px] leading-4">
+                {scratch.length}
               </span>
-            )}
+            </button>
           </div>
         </div>
       </div>
 
       {/* Scratchpad panel (saved research notes, separate from the browser results) */}
       {showScratch && (
-        <div className="bg-white rounded-2xl p-4 border border-amber-200 shadow-sm space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-              <StickyNote className="w-3.5 h-3.5 text-amber-500" /> Research scratchpad
-              <span className="text-[10px] font-normal text-slate-500">· saved locally ({scratch.length} notes)</span>
-            </div>
-            <div className="flex items-center gap-2">
-              {scratch.length > 0 && (
-                <button onClick={copyScratch} className="text-[11px] text-slate-600 hover:text-slate-900 flex items-center gap-1">
-                  {copied === 'scratch' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />} Copy all
-                </button>
-              )}
-              <button onClick={() => setShowScratch(false)} className="text-slate-400 hover:text-slate-600"><X className="w-3.5 h-3.5" /></button>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <input
-              value={scratchText}
-              onChange={(e) => setScratchText(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') addManualScratchNote(); }}
-              placeholder="Type a note and press Enter, or capture a result below…"
-              className="flex-1 text-xs px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
-            />
-            <button
-              onClick={addManualScratchNote}
-              disabled={!scratchText.trim()}
-              className="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white text-xs font-bold flex items-center gap-1"
-            >
-              <Plus className="w-3.5 h-3.5" /> Add
-            </button>
-          </div>
-
-          <div className="space-y-2 max-h-56 overflow-y-auto">
-            {scratch.length === 0 && (
-              <p className="text-[11px] text-slate-400">Empty — capture sources with the note icon, or add a manual note above.</p>
-            )}
-            {scratch.map((n) => (
-              <div key={n.id} className="group p-2.5 rounded-xl border border-slate-200 bg-slate-50 flex items-start gap-2">
-                <div className="flex-1 min-w-0">
-                  <div className="text-[11px] font-bold text-slate-800 truncate">
-                    {n.url ? <a href={n.url} target="_blank" rel="noopener noreferrer" className="hover:text-[#0f8b8d]">{n.title}</a> : n.title}
-                  </div>
-                  <p className="text-[11px] text-slate-600 leading-relaxed line-clamp-3 mt-0.5">{n.text}</p>
+        <div className="fixed inset-x-3 bottom-3 z-40 max-h-[75vh] overflow-y-auto rounded-[20px] border md:fixed md:bottom-auto md:left-auto md:right-6 md:top-24 md:w-[380px] md:max-h-[calc(100vh-7rem)]">
+          <div className="sticky top-0 z-10 overflow-hidden rounded-t-[17px] border-b   p-3 ">
+            <div className="pointer-events-none absolute inset-0 bg-[length:8px_8px] opacity-[0.10]" />
+            <div className="relative z-10 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-sm font-medium ">
+                  <StickyNote className="h-4 w-4" /> Case File · Scratchpad
+                  <span className="inline-flex items-center rounded-lg border   px-1.5 py-0.5 font-[''] text-[11px] uppercase tracking-[0.12em] ">
+                    {scratch.length}
+                  </span>
                 </div>
+                <p className="text-[10px] font-medium ">Saved locally · persists on this device</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                {scratch.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={copyScratch}
+                    className="inline-flex min-h-[32px] items-center gap-1 rounded-lg px-2 text-[11px] font-semibold  transition-colors   focus:outline-none focus-visible:ring-2 focus-visible:"
+                  >
+                    {copied === 'scratch' ? <Check className="h-3.5 w-3.5 text-emerald-700" /> : <Copy className="h-3.5 w-3.5" />} Copy all
+                  </button>
+                )}
                 <button
-                  onClick={() => deleteScratchNote(n.id)}
-                  className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-rose-600 shrink-0"
+                  type="button"
+                  aria-label="Close scratchpad"
+                  onClick={() => {
+                    setShowScratch(false);
+                    setTimeout(() => document.getElementById('scratch-toggle')?.focus(), 0);
+                  }}
+                  className="rounded-lg p-1.5  transition-colors   focus:outline-none focus-visible:ring-2 focus-visible:"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
+                  <X className="h-4 w-4" />
                 </button>
               </div>
-            ))}
+            </div>
+          </div>
+
+          <div className="space-y-3 p-3">
+            <div className="flex items-center gap-2">
+              <input
+                value={scratchText}
+                onChange={(e) => setScratchText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') addManualScratchNote(); }}
+                placeholder="Type a note and press Enter, or capture a result below…"
+                className="min-h-[44px] flex-1 rounded-[14px] border   px-4 py-3 text-sm   focus:outline-none focus:ring-2 focus: "
+              />
+              <button
+                type="button"
+                onClick={addManualScratchNote}
+                disabled={!scratchText.trim()}
+                className="flex min-h-[44px] items-center gap-1 rounded-[14px] border   px-3 py-2 text-xs font-medium  transition-colors  disabled:opacity-40 "
+              >
+                <Plus className="h-3.5 w-3.5" /> Add
+              </button>
+            </div>
+
+            <div className="max-h-64 space-y-2 overflow-y-auto pr-1 md:max-h-[calc(100vh-19rem)]">
+              {scratch.length === 0 && (
+                <p className="rounded-xl border border-dashed   p-3 text-[11px] leading-relaxed ">
+                  Empty — capture sources with the note icon, or add a manual note above.
+                </p>
+              )}
+              {scratch.map((n) => (
+                <div key={n.id} className="group rounded-[14px] border   p-3 ">
+                  <div className="flex items-start gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[12px] font-medium  ">
+                        {n.url ? <a href={n.url} target="_blank" rel="noopener noreferrer" className="">{n.title}</a> : n.title}
+                      </div>
+                      {n.url && <div className="mt-0.5 truncate font-mono text-[10px] ">{n.url}</div>}
+                      <p className="mt-1.5 line-clamp-4 text-[12px] leading-relaxed ">{n.text}</p>
+                      <div className="mt-1.5 font-mono text-[10px] ">added {n.addedAt}</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => deleteScratchNote(n.id)}
+                      aria-label="Delete note"
+                      className="shrink-0 rounded-lg p-1.5  opacity-60 transition-colors   group-hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -344,49 +425,54 @@ export const ClinicalBrowserView: React.FC<ClinicalBrowserViewProps> = ({ onNavi
       {sources.length > 0 && (
         <div className="space-y-4">
           {/* Ask AI banner */}
-          <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center shrink-0">
-                <Sparkles className="w-4 h-4 text-amber-600" />
+          <div className="rounded-[20px] border   p-4 dark:">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border    ">
+                  <Sparkles className="h-4 w-4" />
+                </div>
+                <div>
+                  <div className="text-sm font-medium  ">Ask AI about these results</div>
+                  <p className="text-[11px] leading-relaxed ">
+                    The model answers only from the {sources.length} sources above, citing them by number. Engine: {engineLabel}
+                  </p>
+                </div>
               </div>
-              <div>
-                <div className="text-sm font-bold text-slate-900">Ask AI about these results</div>
-                <p className="text-[11px] text-slate-500">
-                  The model answers only from the {sources.length} sources above, citing them by number. Engine: {engineLabel}
-                </p>
-              </div>
+              <button
+                onClick={askAboutResults}
+                disabled={aiBusy || !getActiveProvider()}
+                className="flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-[16px] px-4 py-2 text-sm font-medium  transition-transform hover:-translate-y-0.5 hover:scale-[1.01] focus:outline-none focus-visible:ring-2 focus-visible: disabled:translate-y-0 disabled:scale-100 disabled:opacity-40"
+              >
+                {aiBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                {aiBusy ? 'Reading sources…' : !getActiveProvider() ? 'Connect an AI provider' : 'Summarise Evidence'}
+              </button>
             </div>
-            <button
-              onClick={askAboutResults}
-              disabled={aiBusy || !getActiveProvider()}
-              className="px-4 py-2 rounded-xl bg-[#001432] hover:bg-[#13294b] disabled:opacity-40 text-white text-xs font-bold flex items-center gap-2 shrink-0"
-            >
-              {aiBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4 text-[#8ff3f4]" />}
-              {aiBusy ? 'Reading sources…' : !getActiveProvider() ? 'Connect an AI provider' : 'Summarise Evidence'}
-            </button>
           </div>
 
           {aiError && (
-            <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-xl flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-              <span>{aiError}</span>
+            <div className="flex rotate-[-0.5deg] items-start gap-2 rounded-[16px] border  p-3  ">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <div className="font-[''] text-[11px] uppercase tracking-[0.14em] [text-shadow:1px_1px_0_rgba(255,255,255,0.55)]">AI evidence check failed</div>
+                <p className="text-sm leading-relaxed">{aiError}</p>
+              </div>
             </div>
           )}
 
           {aiSummary && (
-            <div className="bg-white rounded-2xl p-5 border border-[#0f8b8d]/30 shadow-sm">
-              <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-3">
-                <div className="text-xs font-bold uppercase tracking-wider text-[#0f8b8d] flex items-center gap-1.5">
-                  <Layers className="w-3.5 h-3.5" /> Evidence Synthesis (source-anchored)
+            <div className="rounded-[20px] border   p-5 dark:">
+              <div className="mb-3 flex items-center justify-between border-b  pb-2">
+                <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider  ">
+                  <Layers className="h-3.5 w-3.5" /> Evidence Synthesis (source-anchored)
                 </div>
                 <button
                   onClick={() => navigator.clipboard.writeText(aiSummary)}
-                  className="text-[11px] text-slate-500 hover:text-slate-800 flex items-center gap-1"
+                  className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px]  transition-colors   focus:outline-none focus-visible:ring-2 focus-visible: "
                 >
-                  <Copy className="w-3.5 h-3.5" /> Copy
+                  <Copy className="h-3.5 w-3.5" /> Copy
                 </button>
               </div>
-              <div className="text-xs text-slate-800 leading-relaxed whitespace-pre-wrap font-sans">
+              <div className="whitespace-pre-wrap font-sans text-base leading-[1.7]  ">
                 {aiSummary}
               </div>
             </div>
@@ -394,15 +480,21 @@ export const ClinicalBrowserView: React.FC<ClinicalBrowserViewProps> = ({ onNavi
 
           {/* Source cards */}
           <div className="space-y-2.5">
-            {sources.map((s) => (
-              <div key={s.n} className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm hover:border-slate-300 transition-colors">
+            {sources.map((s, index) => (
+              <motion.div
+                key={s.n}
+                initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.22, ease: "easeOut", delay: reduceMotion ? 0 : Math.min(index * 0.03, 0.2) }}
+              >
+                <div className="rounded-[18px] border   p-4 transition-colors  dark:">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide ${
                         s.kind === 'pubmed'
-                          ? 'bg-blue-50 text-blue-700 border-blue-200'
-                          : 'bg-slate-100 text-slate-600 border-slate-200'
+                          ? '    '
+                          : '  '
                       }`}>
                         {s.kind === 'pubmed' ? 'PUBMED' : 'WEB'} [{s.n}]
                       </span>
@@ -410,43 +502,44 @@ export const ClinicalBrowserView: React.FC<ClinicalBrowserViewProps> = ({ onNavi
                         href={s.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-sm font-bold text-slate-900 hover:text-[#0f8b8d] truncate flex items-center gap-1"
+                        className="flex min-w-0 items-center gap-1 truncate text-sm font-medium   "
                       >
                         {s.title || s.url}
                       </a>
                     </div>
-                    <div className="text-[11px] text-slate-500 font-mono truncate mt-0.5">{s.url}</div>
-                    <p className="text-xs text-slate-700 mt-2 leading-relaxed line-clamp-4">
+                    <div className="mt-0.5 truncate font-mono text-[11px] ">{s.url}</div>
+                    <p className="mt-2 line-clamp-4 text-base leading-[1.7]  ">
                       {s.text}
                     </p>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex shrink-0 items-center gap-1">
                     <button
                       onClick={() => captureSourceToScratch(s)}
                       title="Capture to scratchpad"
-                      className="p-1.5 rounded-lg hover:bg-amber-50 text-slate-400 hover:text-amber-600"
+                      className="rounded-lg p-1.5  transition-colors   focus:outline-none focus-visible:ring-2 focus-visible: "
                     >
-                      <StickyNote className="w-4 h-4" />
+                      <StickyNote className="h-4 w-4" />
                     </button>
                     <button
                       onClick={() => copySource(s)}
                       title="Copy citation"
-                      className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-700"
+                      className="rounded-lg p-1.5  transition-colors   focus:outline-none focus-visible:ring-2 focus-visible: "
                     >
-                      {copied === String(s.n) ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+                      {copied === String(s.n) ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
                     </button>
                     <a
                       href={s.url}
                       target="_blank"
                       rel="noopener noreferrer"
                       title="Open source"
-                      className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-[#0f8b8d]"
+                      className="rounded-lg p-1.5  transition-colors   focus:outline-none focus-visible:ring-2 focus-visible:"
                     >
-                      <ExternalLink className="w-4 h-4" />
+                      <ExternalLink className="h-4 w-4" />
                     </a>
                   </div>
                 </div>
               </div>
+              </motion.div>
             ))}
           </div>
         </div>
@@ -454,34 +547,40 @@ export const ClinicalBrowserView: React.FC<ClinicalBrowserViewProps> = ({ onNavi
 
       {/* Empty state */}
       {!sources.length && !searching && !searchError && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center space-y-3">
-          <div className="w-12 h-12 rounded-2xl bg-slate-100 flex items-center justify-center mx-auto">
-            <Globe className="w-6 h-6 text-slate-400" />
-          </div>
-          <h3 className="text-sm font-bold text-slate-800">No sources loaded yet</h3>
-          <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
-            Type a clinical query and press Enter. Results come from a real DuckDuckGo search plus PubMed (NCBI E-utilities) at the moment you search — nothing is preloaded.
-          </p>
-          <div className="flex items-center justify-center gap-2 pt-1">
-            <button
-              onClick={() => { setQuery('latest guidelines management of community acquired pneumonia 2024'); inputRef.current?.focus(); }}
-              className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[11px] font-semibold text-slate-700"
-            >
-              Try: CAP guidelines 2024
-            </button>
-            <button
-              onClick={() => { setQuery('vancomycin resistant enterococcus-linezolid daptomycin bacteremia'); inputRef.current?.focus(); }}
-              className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[11px] font-semibold text-slate-700"
-            >
-              Try: VRE bacteremia
-            </button>
+        <div className="relative overflow-hidden rounded-[20px] border   p-10 text-center dark:">
+          <div className="pointer-events-none absolute inset-0  bg-[length:10px_10px] opacity-[0.08]" />
+          <div className="relative z-10 space-y-3">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl border  ">
+              <Globe className="h-6 w-6 " />
+            </div>
+            <div className="mx-auto inline-flex items-center rounded-xl border  px-3 py-1 font-[''] text-[12px] uppercase tracking-[0.14em]   ">
+              Ready to scan
+            </div>
+            <h3 className="text-sm font-medium  ">No sources loaded yet</h3>
+            <p className="mx-auto max-w-md text-sm leading-[1.7] ">
+              Type a clinical query and press Enter. Results come from a real DuckDuckGo search plus PubMed (NCBI E-utilities) at the moment you search — nothing is preloaded.
+            </p>
+            <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+              <button
+                onClick={() => { setQuery('latest guidelines management of community acquired pneumonia 2024'); inputRef.current?.focus(); }}
+                className="min-h-[36px] rounded-xl border   px-3 py-1.5 text-[11px] font-medium  transition-colors  focus:outline-none focus-visible:ring-2 focus-visible: "
+              >
+                Try: CAP guidelines 2024
+              </button>
+              <button
+                onClick={() => { setQuery('vancomycin resistant enterococcus-linezolid daptomycin bacteremia'); inputRef.current?.focus(); }}
+                className="min-h-[36px] rounded-xl border   px-3 py-1.5 text-[11px] font-medium  transition-colors  focus:outline-none focus-visible:ring-2 focus-visible: "
+              >
+                Try: VRE bacteremia
+              </button>
+            </div>
           </div>
         </div>
       )}
 
       {/* Footer note */}
-      <div className="flex items-center gap-2 text-[11px] text-slate-400 px-1 pb-2">
-        <FileText className="w-3.5 h-3.5" />
+      <div className="flex items-center gap-2 px-1 pb-2 text-[11px] ">
+        <FileText className="h-3.5 w-3.5" />
         <span>PubMed abstracts via NCBI E-utilities; web pages fetched for full text. Educational use — verify before clinical decisions.</span>
       </div>
     </div>

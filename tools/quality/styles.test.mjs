@@ -48,7 +48,6 @@ expect('described ok', pointsAtMissingPicture(mk({ stem: 'A chest X-ray shows a 
 expect('pointer with image', pointsAtMissingPicture(mk({ stem: 'Identify the condition shown in this image', image: 'x' })) ? 'pointer' : null, null);
 expect('pointer no image', pointsAtMissingPicture(mk({ stem: 'Identify the condition shown in this image' })) ? 'pointer' : null, 'pointer');
 expect('image style ok', styleProblem(mk({ stem: 'A chest X-ray shows a boot-shaped heart with oligaemic lung fields.', questionText: 'What is the diagnosis?', options: opts('a', 'b', 'c', 'd') }), slot('image'), 4), null);
-expect('option count AMC', styleProblem(mk({ stem: 'A 40-year-old woman presents to her GP with 3 weeks of low mood and poor sleep and loss of interest in her usual activities at work.', questionText: 'What is the most appropriate next step?', options: opts('a', 'b', 'c', 'd') }), slot('vignette', { leadIn: 'next-step' }), 5), 'wrong-option-count');
 expect('image style plain text', styleProblem(mk({ stem: 'Stable angina is assessed with a treadmill stress test and the physician wants to delay ischaemic changes.', questionText: 'Which drug class helps?', options: opts('a', 'b', 'c', 'd') }), slot('image'), 4), 'no-picture-description');
 expect('vignette needs a case', styleProblem(mk({ stem: 'Artemether-lumefantrine is an oral combination used for uncomplicated falciparum malaria and must be taken with fatty food for good absorption of the drug.', questionText: 'What is needed?', options: opts('a', 'b', 'c', 'd') }), slot('vignette'), 4), 'not-a-vignette');
 expect('negative only in question line', styleProblem(mk({ stem: 'Regarding isoniazid, it is not hepatotoxic in children.', questionText: 'Which statement is best?', options: opts('a', 'b', 'c', 'd') }), slot('negative'), 4), 'no-negative-lead-in');
@@ -69,8 +68,6 @@ const ini = planSlots(facts, 'INI_CET', [], [], 'ALL');
 expect('ini negative about 16%', String(count(ini, 'style').negative), '3');
 const anat = planSlots(facts.map((f) => ({ ...f, picturable: true })), 'NEET_PG', [], [], 'MEDIUM', 'Anatomy');
 expect('anatomy mostly picture', String((count(anat, 'style').image || 0) >= 5), 'true');
-const amc = planSlots(facts, 'AMC_CAT', [], [], 'MEDIUM');
-expect('amc all vignettes', JSON.stringify(count(amc, 'style')), '{"vignette":20}');
 const picked = planSlots(facts, 'INI_CET', stylesFromChips(['Match the following']), leadInsFromChips(['Next best step']), 'MEDIUM');
 expect('picked match', String(count(picked, 'style').match), '20');
 expect('picked related', String(picked[0].related.length > 0), 'true');

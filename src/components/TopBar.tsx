@@ -152,7 +152,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   };
 
   return (
-    <header className="h-14 bg-white border-b border-[#e3e7ee] px-5 flex items-center justify-between gap-4 shrink-0 shadow-xs z-10">
+    <header className="h-14 bg-white border-b  px-5 flex items-center justify-between gap-4 shrink-0 shadow-xs z-10">
       {/* Global Clinical Search Bar */}
       <div className="flex-1 max-w-2xl relative">
         <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -162,10 +162,10 @@ export const TopBar: React.FC<TopBarProps> = ({
           onChange={(e) => setSearchVal(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="Search diseases, high-yield clinical stems, Harrison / Robbins references..."
-          className="w-full pl-9 pr-16 py-1.5 bg-[#f6f7f9] border border-[#e3e7ee] rounded-lg text-xs text-[#1c2430] placeholder-slate-400 focus:outline-none focus:border-[#0f8b8d] focus:bg-white transition-all"
+          className="w-full pl-9 pr-16 py-1.5  border  rounded-lg text-xs  placeholder-slate-400 focus:outline-none focus: focus:bg-white transition-all"
         />
         <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
-          <kbd className="px-1.5 py-0.5 text-[10px] font-mono text-slate-400 bg-white border border-[#e3e7ee] rounded">
+          <kbd className="px-1.5 py-0.5 text-[10px] font-mono text-slate-400 bg-white border  rounded">
             ⌘K
           </kbd>
         </div>
@@ -174,27 +174,27 @@ export const TopBar: React.FC<TopBarProps> = ({
       {/* Right Tools & Profile Lockup */}
       <div className="flex items-center gap-4 shrink-0">
         {/* Mock Pace Tracker */}
-        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#e3f4f4] text-[#007072] text-xs font-semibold border border-[#8ff3f4]">
-          <Gauge className="w-3.5 h-3.5 text-[#0f8b8d]" />
+        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-md   text-xs font-semibold border ">
+          <Gauge className="w-3.5 h-3.5 " />
           <span>Mock Pace</span>
-          <span className="font-mono font-bold text-[#13294b]">{mockPace}</span>
+          <span className="font-mono font-medium ">{mockPace}</span>
         </div>
 
         {/* Notifications Bell */}
         <div className="relative" ref={notificationRef}>
           <button
             onClick={() => setShowNotificationToast(!showNotificationToast)}
-            className="p-1.5 text-slate-500 hover:text-[#13294b] rounded-lg hover:bg-slate-100 relative transition-colors"
+            className="p-1.5 text-slate-500  rounded-lg hover:bg-slate-100 relative transition-colors"
             title={unreadCount ? `${unreadCount} unread alerts` : 'Notifications'}
           >
             <Bell className="w-4 h-4" />
             {unreadCount > 0 && (
-              <span className="w-2 h-2 rounded-full bg-[#d64545] absolute top-1 right-1" />
+              <span className="w-2 h-2 rounded-full  absolute top-1 right-1" />
             )}
           </button>
 
           {showNotificationToast && (
-            <div className="absolute right-0 mt-2 w-72 bg-white rounded-lg shadow-xl border border-[#e3e7ee] p-3 text-xs z-50 animate-in fade-in slide-in-from-top-1">
+            <div className="absolute right-0 mt-2 w-72 bg-white rounded-lg shadow-xl border  p-3 text-xs z-50 animate-in fade-in slide-in-from-top-1">
               <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100 font-semibold text-slate-800">
                 <span>Clinical Alerts</span>
                 <button
@@ -228,9 +228,9 @@ export const TopBar: React.FC<TopBarProps> = ({
                         ? <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
                         : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />}
                       <div className="min-w-0">
-                        <span className="font-bold text-slate-800 flex items-center gap-1.5">
+                        <span className="font-medium text-slate-800 flex items-center gap-1.5">
                           {alert.title}
-                          {!isRead && <span className="w-1.5 h-1.5 rounded-full bg-[#0f8b8d]" />}
+                          {!isRead && <span className="w-1.5 h-1.5 rounded-full " />}
                         </span>
                         <p className="text-[11px] text-slate-500">{alert.body}</p>
                       </div>
@@ -252,21 +252,21 @@ export const TopBar: React.FC<TopBarProps> = ({
           >
             <div className="text-right hidden md:block">
               {profileName ? (
-                <div className="font-bold text-xs text-[#13294b] leading-tight group-hover:text-[#0f8b8d] transition-colors">
+                <div className="font-medium text-xs  leading-tight group-hover: transition-colors">
                   {profileName}
                 </div>
               ) : (
-                <div className="text-xs font-semibold text-[#0f8b8d] hover:underline">
+                <div className="text-xs font-semibold  hover:underline">
                   Add your name
                 </div>
               )}
             </div>
 
-            <div className="w-8 h-8 rounded-full bg-[#13294b] text-[#8ff3f4] font-bold text-xs flex items-center justify-center ring-2 ring-[#e3f4f4] group-hover:ring-[#8ff3f4] transition-all">
+            <div className="w-8 h-8 rounded-full   font-medium text-xs flex items-center justify-center ring-2  group-hover: transition-all">
               {profileName ? (
                 getInitials(profileName)
               ) : (
-                <User className="w-4 h-4 text-[#8ff3f4]" />
+                <User className="w-4 h-4 " />
               )}
             </div>
           </button>
@@ -278,11 +278,11 @@ export const TopBar: React.FC<TopBarProps> = ({
               className="absolute right-0 top-full mt-2 w-72 bg-white rounded-xl shadow-xl border border-slate-200 p-4 z-50 animate-in fade-in slide-in-from-top-1"
             >
               <div className="flex items-center justify-between pb-2 mb-3 border-b border-slate-100">
-                <span className="text-xs font-bold text-slate-800">Edit Profile Name</span>
+                <span className="text-xs font-medium text-slate-800">Edit Profile Name</span>
                 <button
                   type="button"
                   onClick={() => setIsEditingProfile(false)}
-                  className="text-slate-400 hover:text-slate-600 text-xs font-bold px-1"
+                  className="text-slate-400 hover:text-slate-600 text-xs font-medium px-1"
                 >
                   ✕
                 </button>
@@ -299,7 +299,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                     onChange={(e) => setNameInput(e.target.value)}
                     placeholder="e.g. Dr. Jane Smith"
                     autoFocus
-                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-[#0f8b8d] focus:ring-1 focus:ring-[#0f8b8d]"
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus: focus:ring-1 focus:"
                   />
                 </div>
 
@@ -322,7 +322,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                     </button>
                     <button
                       type="submit"
-                      className="px-3 py-1 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-bold rounded-lg transition-colors shadow-xs"
+                      className="px-3 py-1   text-white text-xs font-medium rounded-lg transition-colors shadow-xs"
                     >
                       Save
                     </button>

@@ -267,7 +267,7 @@ export default function App() {
   };
 
   return (
-    <div className={`min-h-screen bg-[#f8f9ff] text-slate-800 flex font-sans antialiased selection:bg-[#0f8b8d]/20 selection:text-[#001432] ${
+    <div className={`min-h-screen  text-slate-800 flex font-sans antialiased selection: selection: ${
       isDarkMode ? 'dark' : ''
     }`}>
       {/* Persistent Clinical Navy Sidebar */}
@@ -304,7 +304,7 @@ export default function App() {
               <span className="flex items-center gap-2">
                 <button
                   onClick={() => handleNavigate('test-runner')}
-                  className="rounded-lg bg-[#0f8b8d] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#00696b]"
+                  className="rounded-lg  px-3 py-1.5 text-xs font-medium text-white "
                 >
                   Open test
                 </button>

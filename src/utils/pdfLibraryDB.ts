@@ -1,8 +1,8 @@
 // IndexedDB persistence for the PDF library.
 // DB 'PulseMedFilesDB' (version 1):
-//   - 'files': imported PDF blobs + metadata (NOT parsed on import — pages render on demand)
-//   - 'pages': extracted page text cache (one store entry per page, written lazily
-//              when a page is visited or indexed for search)
+// - 'files': imported PDF blobs + metadata (NOT parsed on import — pages render on demand)
+// - 'pages': extracted page text cache (one store entry per page, written lazily
+// when a page is visited or indexed for search)
 
 import { OcrWord } from './ocr.ts';
 

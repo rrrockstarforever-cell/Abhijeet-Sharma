@@ -11,17 +11,13 @@
 // actually see the claimed finding in the image.
 import { fetchImage } from './images.mjs';
 
-export const DEFAULT_VISION_MODEL = 'nvidia/nemotron-3.5-super-vl-120b-a12b';
-const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
-
 const EXAM_LABEL = {
   NEET_PG: 'NEET-PG (NBEMS, India)',
   INI_CET: 'INI-CET (AIIMS, India)',
-  AMC_CAT: 'AMC CAT (Australia)',
 };
 
 const SYSTEM = [
-  'You are a senior item writer for Indian and Australian postgraduate medical entrance exams (NEET-PG, INI-CET, AMC CAT).',
+  'You are a senior item writer for Indian postgraduate medical entrance exams (NEET-PG, INI-CET).',
   'You are shown a REAL clinical image. The image is the primary source of truth.',
   'Write questions that DISCRIMINATE between well-prepared candidates: exactly one defensible best answer, and distractors that are real, plausible close mimics of the same category — never absurd, never obviously wrong.',
   'Always respond with ONLY a single valid JSON object (no markdown fences, no commentary).',
@@ -116,6 +112,7 @@ export async function generateQuestionFromImage(opts) {
     exam = 'NEET_PG',
     difficultyTier = 'MEDIUM',
     optionCount = 4,
+    url,
     apiKey,
     model,
     timeoutMs = Number(process.env.VISION_TIMEOUT_MS || 180000),
@@ -123,6 +120,8 @@ export async function generateQuestionFromImage(opts) {
 
   if (!imageUrl) throw new Error('imageUrl is required.');
   if (!groundTruth || !String(groundTruth).trim()) throw new Error('groundTruth is required.');
+  if (!url) throw new Error('Vision provider URL (opts.url) is required.');
+  if (!model) throw new Error('Vision model (opts.model) is required.');
   if (!apiKey) throw new Error('No vision provider connected — cannot write from image.');
 
   const count = optionCount === 5 ? 5 : 4;
@@ -155,19 +154,14 @@ export async function generateQuestionFromImage(opts) {
   /** One vision call. `maxTokens` only differs between the first try and the retry. */
   const callVision = async (maxTokens) => {
     const payload = JSON.stringify({
-      model: model || DEFAULT_VISION_MODEL,
+      model,
       messages,
       // The vision model card recommends temperature 0.6 / top_p 0.95 for images.
       temperature: 0.6,
       top_p: 0.95,
       max_tokens: maxTokens,
-      // This is a reasoning model whose hidden trace is billed against max_tokens, which
-      // is exactly why a modest cap produced finish_reason:"length" and empty content.
-      // Writing a full clinical MCQ does benefit from some reasoning, so keep the trace
-      // but trim it with medium_effort rather than letting it run unbounded.
-      chat_template_kwargs: { enable_thinking: true, medium_effort: true },
     });
-    const res = await fetch(NVIDIA_URL, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: payload,

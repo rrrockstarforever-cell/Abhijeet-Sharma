@@ -1,6 +1,6 @@
 // Utility for IndexedDB persistence, file validation, and 'seen' tracking for question banks
 
-export type BankId = 'emedici' | 'success' | 'amc';
+export type BankId = 'emedici';
 
 export interface BankQuestion {
   id: string;
@@ -62,7 +62,7 @@ export async function saveBankToIDB(bankId: BankId, questions: BankQuestion[], s
   
   const meta: BankMetadata = {
     bankId,
-    name: bankId === 'emedici' ? 'eMedici' : bankId === 'success' ? 'AMC Success' : 'AMC Recall',
+    name: 'eMedici',
     count: questions.length,
     skippedCount,
     importedAt: new Date().toLocaleDateString()

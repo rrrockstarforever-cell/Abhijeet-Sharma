@@ -55,7 +55,7 @@ export function reviewQuestion(question: ClinicalQuestion, runLlm = false): Prom
 
 
 /** Second mechanism: refine generated questions before QA. Removes answer leakage,
- *  obvious hints, and option-structure telegraphing. Falls back to the original list. */
+ * obvious hints, and option-structure telegraphing. Falls back to the original list. */
 export function refineBatch(questions: ClinicalQuestion[]): Promise<ClinicalQuestion[]> {
   return fetch('/api/qa/refine-batch', {
     method: 'POST',

@@ -1,5 +1,5 @@
 // Benchmark panel: compares the latest generated module with the imported reference banks
-// (eMedici, AMC SUCCESS, AMC Recall). The comparison is deterministic and shows its numbers,
+// (eMedici). The comparison is deterministic and shows its numbers,
 // so a reviewer can see why a set was flagged.
 import React, { useState } from 'react';
 import { Scale, RefreshCw, AlertTriangle, CheckCircle2, Info } from 'lucide-react';
@@ -10,15 +10,13 @@ import type { ClinicalQuestion } from '../types.ts';
 
 const BANKS: { id: BankId; label: string }[] = [
   { id: 'emedici', label: 'eMedici' },
-  { id: 'success', label: 'AMC SUCCESS' },
-  { id: 'amc', label: 'AMC Recall' },
 ];
 
 const verdictStyle: Record<BenchReport['verdict'], { text: string; tone: string }> = {
   empty: { text: 'No generated module found. Build a module first.', tone: 'border-slate-200 bg-slate-50 text-slate-700' },
-  'insufficient-reference': { text: `Reference too small to judge (need ${MIN_REFERENCE}+ items).`, tone: 'border-amber-200 bg-amber-50 text-amber-800' },
-  'needs-work': { text: 'Differs from the reference papers. Review the flagged rows.', tone: 'border-rose-200 bg-rose-50 text-rose-800' },
-  'close-to-reference': { text: 'Style and mix match the reference papers on every measured point.', tone: 'border-emerald-200 bg-emerald-50 text-emerald-800' },
+ 'insufficient-reference': { text: `Reference too small to judge (need ${MIN_REFERENCE}+ items).`, tone: 'border-amber-200 bg-amber-50 text-amber-800' },
+ 'needs-work': { text: 'Differs from the reference papers. Review the flagged rows.', tone: 'border-rose-200 bg-rose-50 text-rose-800' },
+ 'close-to-reference': { text: 'Style and mix match the reference papers on every measured point.', tone: 'border-emerald-200 bg-emerald-50 text-emerald-800' },
 };
 
 export const BenchmarkPanel: React.FC = () => {
@@ -51,18 +49,18 @@ export const BenchmarkPanel: React.FC = () => {
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <div className="text-sm font-bold text-slate-900 flex items-center gap-2">
-            <Scale className="w-4 h-4 text-[#0f8b8d]" /> Benchmark against reference papers
+          <div className="text-sm font-medium text-slate-900 flex items-center gap-2">
+            <Scale className="w-4 h-4 " /> Benchmark against reference papers
           </div>
           <div className="text-[11px] text-slate-500">
-            Compares the latest module with imported eMedici, AMC SUCCESS and AMC Recall items on stem length, vignettes,
+            Compares the latest module with imported eMedici items on stem length, vignettes,
             negative stems, giveaways and near-duplicates.
           </div>
         </div>
         <button
           onClick={run}
           disabled={busy}
-          className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 disabled:opacity-40 flex items-center gap-1"
+          className="text-xs font-medium px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700  disabled:opacity-40 flex items-center gap-1"
         >
           {busy ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Scale className="w-3 h-3" />}
           Compare latest module
@@ -107,7 +105,7 @@ export const BenchmarkPanel: React.FC = () => {
                       <td className="py-2 pr-3 font-mono text-slate-800">{row.generated}</td>
                       <td className="py-2 pr-3 font-mono text-slate-500">{row.reference}</td>
                       <td className="py-2 pr-3">
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${row.flag ? 'bg-rose-100 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${row.flag ? 'bg-rose-100 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>
                           {row.flag ? 'FLAG' : 'OK'}
                         </span>
                       </td>
@@ -120,7 +118,7 @@ export const BenchmarkPanel: React.FC = () => {
 
           {report.duplicates.length > 0 && (
             <div>
-              <div className="text-xs font-bold text-slate-700 mb-2">
+              <div className="text-xs font-medium text-slate-700 mb-2">
                 Near-duplicates of reference items ({report.duplicates.length})
               </div>
               <div className="space-y-2 max-h-72 overflow-y-auto">

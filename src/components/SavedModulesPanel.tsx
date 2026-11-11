@@ -1,7 +1,7 @@
 // Saved question banks: every generated module, kept whole, so it can be finished later.
 // Resuming reopens the same questions in the Test Runner, which restores the answers and position.
 import React, { useEffect, useState } from 'react';
-import { BookOpen, Play, Trash2, RefreshCw, Copy } from 'lucide-react';
+import { BookOpen, Play, Trash2, RefreshCw, Copy, AlertCircle, CheckCircle2, Loader2, X } from 'lucide-react';
 import { cleanQuestions } from '../lib/questionCleanup.ts';
 import type { ClinicalQuestion, ExamType } from '../types.ts';
 import {
@@ -9,7 +9,7 @@ import {
   storedQuestions, findDuplicates,
 } from '../utils/moduleStore.ts';
 
-const EXAM_LABEL: Record<string, string> = { NEET_PG: 'NEET-PG', INI_CET: 'INI-CET', AMC_CAT: 'AMC CAT' };
+const EXAM_LABEL: Record<string, string> = { NEET_PG: 'NEET-PG', INI_CET: 'INI-CET' };
 
 interface SavedModulesPanelProps {
   onLaunchTest: (questions: ClinicalQuestion[], mode: 'EXAM' | 'TUTOR', exam: ExamType) => void;
@@ -69,94 +69,162 @@ export const SavedModulesPanel: React.FC<SavedModulesPanelProps> = ({ onLaunchTe
   };
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="text-sm font-bold text-slate-900 flex items-center gap-2">
-            <BookOpen className="w-4 h-4 text-[#0f8b8d]" /> Saved question banks
-          </div>
-          <div className="text-[11px] text-slate-500">
-            Every generated bank is kept as it was. Resume to continue where you stopped.
+    <div className="relative overflow-hidden rounded-[20px] border   p-5    ">
+      <div className="absolute inset-x-0 top-0 h-[3px]  " />
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3 border-b  pb-4 ">
+        <div className="relative min-w-0 flex-1 overflow-hidden rounded-2xl  px-4 py-3 ">
+          <div aria-hidden="true" className="pointer-events-none absolute inset-0 opacity-60 dark:" />
+          <div className="relative">
+            <div className="flex items-center gap-2 text-base font-medium  ">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border      ">
+                <BookOpen className="h-5 w-5" />
+              </span>
+              <span className="truncate">Saved question banks</span>
+            </div>
+            <div className="mt-1 max-w-xl text-sm leading-relaxed  ">
+              Every generated bank is kept as it was. Resume to continue where you stopped.
+            </div>
           </div>
         </div>
-        <button onClick={findRepeats} className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 flex items-center gap-1">
-          <Copy className="w-3 h-3" /> Find duplicates
-        </button>
-        <button onClick={load} className="text-xs font-bold px-3 py-1.5 rounded-lg border bg-white border-slate-200 text-slate-700 hover:border-[#0f8b8d]/40 flex items-center gap-1">
-          <RefreshCw className="w-3 h-3" /> Refresh
-        </button>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={findRepeats}
+            className="flex min-h-[44px] items-center gap-2 rounded-2xl border   px-3 py-2 text-xs font-medium  transition hover:-translate-y-0.5 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 focus-visible:ring-offset-[#FAF3E0]     dark:focus-visible: dark:focus-visible:ring-offset-[#262D59]"
+            aria-label="Find duplicate saved questions"
+          >
+            <Copy className="h-4 w-4" /> Find duplicates
+          </button>
+          <button
+            type="button"
+            onClick={load}
+            className="flex min-h-[44px] items-center gap-2 rounded-2xl border   px-3 py-2 text-xs font-medium  transition hover:-translate-y-0.5 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 focus-visible:ring-offset-[#FAF3E0]     dark:focus-visible: dark:focus-visible:ring-offset-[#262D59]"
+            aria-label="Refresh saved question banks"
+          >
+            <RefreshCw className="h-4 w-4" /> Refresh
+          </button>
+        </div>
       </div>
 
-      {error && <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">{error}</div>}
-      {notice && <div className="text-xs text-teal-800 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2">{notice}</div>}
-
       {duplicates && (
-        <div className="rounded-xl border border-slate-200 p-3 space-y-2">
-          <div className="flex items-center justify-between">
-            <div className="text-xs font-bold text-slate-800">
-              {duplicates.length === 0 ? 'No repeated questions found.' : `${duplicates.length} repeated pair${duplicates.length === 1 ? '' : 's'} found`}
-            </div>
-            <button onClick={() => setDuplicates(null)} className="text-[10px] font-bold text-slate-500 hover:underline">Close</button>
-          </div>
-          {duplicates.slice(0, 30).map((d, i) => (
-            <div key={i} className={`rounded-lg border p-2 text-[11px] ${d.sameAnswer ? 'border-slate-200' : 'border-rose-300 bg-rose-50/50'}`}>
-              <div className={`font-bold mb-1 ${d.sameAnswer ? 'text-slate-600' : 'text-rose-700'}`}>
-                {d.sameAnswer ? 'Same question, same answer' : 'Same question, DIFFERENT answers'} · {Math.round(d.similarity * 100)}% overlap
+        <section className="relative mb-4 overflow-hidden rounded-[18px] border  bg-white    ">
+          <div className="relative overflow-hidden border-b-2   px-3 py-2  ">
+            <div aria-hidden="true" className="pointer-events-none absolute inset-0 opacity-50 dark:" />
+            <div className="relative flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="rounded-lg border   px-2 py-0.5 text-sm font-medium uppercase tracking-wide  " style={{ fontFamily: ', system-ui, sans-serif' }}>
+                  DUPES!
+                </span>
+                <span className="text-xs font-medium  ">
+                  {duplicates.length === 0 ? 'No repeated questions found.' : `${duplicates.length} repeated pair${duplicates.length === 1 ? '' : 's'} found`}
+                </span>
               </div>
-              {[d.a, d.b].map((side, k) => (
-                <div key={k} className="mb-1">
-                  <div className="text-slate-700">{(side.question.stem || side.question.questionText || '').slice(0, 160)}</div>
-                  <div className="text-slate-500">
-                    From <span className="font-semibold">{side.source}</span> · Key {side.question.correctOption}: {side.question.options.find((o) => o.id === side.question.correctOption)?.text ?? '—'}
-                  </div>
-                </div>
-              ))}
+              <button
+                type="button"
+                onClick={() => setDuplicates(null)}
+                className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border  bg-white px-2 py-1 text-[11px] font-medium  transition  focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 focus-visible:ring-offset-[#FAF3E0]     dark:focus-visible: dark:focus-visible:ring-offset-[#262D59]"
+                aria-label="Close duplicate results"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
-          ))}
-          {duplicates.length > 30 && <div className="text-[10px] text-slate-400">Showing 30 of {duplicates.length}.</div>}
+          </div>
+          <div className="max-h-[360px] space-y-2 overflow-y-auto p-3">
+            {duplicates.slice(0, 30).map((d, i) => (
+              <div key={i} className={`rounded-xl border p-2 text-[11px] leading-relaxed ${d.sameAnswer ? '   ' : 'border-rose-300 bg-rose-50 text-rose-950 dark:border-rose-400/60 dark:bg-rose-950/50 dark:text-rose-50'}`}>
+                <div className={`mb-1 font-medium ${d.sameAnswer ? ' ' : 'text-rose-800 dark:text-rose-100'}`}>
+                  {d.sameAnswer ? 'Same question, same answer' : 'Same question, DIFFERENT answers'} · {Math.round(d.similarity * 100)}% overlap
+                </div>
+                {[d.a, d.b].map((side, k) => (
+                  <div key={k} className="mb-1">
+                    <div className=" ">{(side.question.stem || side.question.questionText || '').slice(0, 160)}</div>
+                    <div className=" ">
+                      From <span className="font-semibold">{side.source}</span> · Key {side.question.correctOption}: {side.question.options.find((o) => o.id === side.question.correctOption)?.text ?? '—'}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))}
+            {duplicates.length > 30 && <div className="text-[10px] font-semibold  ">Showing 30 of {duplicates.length}.</div>}
+          </div>
+        </section>
+      )}
+
+      {error && (
+        <div role="alert" className="mb-3 flex items-start gap-2 rounded-2xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-800 dark:border-rose-400/50 dark:bg-rose-950/50 dark:text-rose-100">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+      {notice && (
+        <div role="status" className="mb-3 flex items-start gap-2 rounded-2xl border border-teal-300 bg-teal-50 px-3 py-2 text-sm font-semibold text-teal-900 dark:border-teal-400/50 dark:bg-teal-950/40 dark:text-teal-100">
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{notice}</span>
+        </div>
+      )}
+
+      {modules === null && (
+        <div className="mb-3 flex min-h-[54px] items-center gap-2 rounded-2xl border  bg-white px-3 py-2 text-xs font-semibold    ">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading saved banks…
         </div>
       )}
 
       {modules && modules.length === 0 && (
-        <div className="text-xs text-slate-500">No saved question banks yet. Build a module in the Practice Builder and it will be kept here.</div>
+        <div className="mb-3 flex items-start gap-2 rounded-2xl border border-dashed  bg-white px-4 py-3 text-sm    ">
+          <BookOpen className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>No saved question banks yet. You have not built one in the Practice Builder. Build a module there and it will show up here.</span>
+        </div>
       )}
 
       <div className="space-y-2">
         {(modules ?? []).map((m) => {
           const done = m.count > 0 && m.answered >= m.count;
           const pct = m.count ? Math.round((m.answered / m.count) * 100) : 0;
+          const status = done ? 'Completed' : m.answered > 0 ? `${m.answered}/${m.count} answered` : 'Not started';
           return (
-            <div key={m.id} className="rounded-xl border border-slate-200 p-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="text-sm font-bold text-slate-900 truncate">{m.title}</div>
-                <div className="text-[11px] text-slate-500">
-                  {EXAM_LABEL[m.exam] ?? m.exam} · {m.count} questions · {m.mode === 'EXAM' ? 'Exam mode' : 'Tutor mode'} · {new Date(m.createdAt).toLocaleString()}
-                </div>
-                <div className="mt-2 flex items-center gap-2">
-                  <div className="h-1.5 w-40 rounded-full bg-slate-100 overflow-hidden">
-                    <div className="h-full bg-[#0f8b8d]" style={{ width: `${pct}%` }} />
+            <div key={m.id} className="rounded-2xl border  bg-white p-3  ">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium  ">{m.title}</div>
+                  <div className="mt-0.5 text-[11px] leading-relaxed  ">
+                    {EXAM_LABEL[m.exam] ?? m.exam} · {m.count} questions · {m.mode === 'EXAM' ? 'Exam mode' : 'Tutor mode'} · {new Date(m.createdAt).toLocaleString()}
                   </div>
-                  <span className="text-[10px] font-semibold text-slate-600">
-                    {done ? 'Completed' : m.answered > 0 ? `${m.answered}/${m.count} answered` : 'Not started'}
-                    {m.answered > 0 ? ` · ${m.correct} correct` : ''}
-                  </span>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <div className="h-2.5 w-40 max-w-full rounded-full border  bg-transparent p-[1px] " aria-hidden="true">
+                      <div className="h-full rounded-full  transition-all" style={{ width: `${pct}%` }} />
+                    </div>
+                    <span className={`inline-flex min-h-[22px] items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${done ? '  ' : m.answered > 0 ? '  ' : '     '}`}>
+                      {status}
+                    </span>
+                    {m.answered > 0 && (
+                      <span className="text-[10px] font-semibold  ">{m.correct} correct</span>
+                    )}
+                  </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => resume(m.id)}
-                  disabled={busyId === m.id}
-                  className="text-xs font-bold px-3 py-1.5 rounded-lg bg-[#0f8b8d] text-white hover:bg-[#00696b] disabled:opacity-40 flex items-center gap-1"
-                >
-                  <Play className="w-3 h-3" /> {done ? 'Review' : m.answered > 0 ? 'Continue' : 'Start'}
-                </button>
-                <button
-                  onClick={() => remove(m.id)}
-                  title="Delete this saved question bank"
-                  className="text-xs px-2.5 py-1.5 rounded-lg border border-rose-200 text-rose-700 hover:bg-rose-50 flex items-center gap-1"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => resume(m.id)}
+                    disabled={busyId === m.id}
+                    className="flex min-h-[44px] min-w-[44px] items-center justify-center gap-1.5 rounded-[16px] px-4 py-2.5 text-xs font-medium  transition hover:-translate-y-[3px] hover:scale-[1.03] hover:disabled:translate-y-0 disabled:scale-100 disabled:opacity-60 disabled:shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 focus-visible:ring-offset-[#FAF3E0] dark:focus-visible: dark:focus-visible:ring-offset-[#262D59]"
+                    aria-label={busyId === m.id ? 'Opening saved question bank' : `${done ? 'Review' : m.answered > 0 ? 'Continue' : 'Start'} ${m.title}`}
+                  >
+                    {busyId === m.id ? (
+                      <><Loader2 className="h-4 w-4 animate-spin" /> Opening…</>
+                    ) : (
+                      <><Play className="h-4 w-4" /> {done ? 'Review' : m.answered > 0 ? 'Continue' : 'Start'}</>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => remove(m.id)}
+                    title="Delete this saved question bank"
+                    aria-label="Delete this saved question bank"
+                    className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-2xl border border-rose-500 bg-rose-50 text-rose-700 transition hover:-translate-y-0.5 hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 focus-visible:ring-offset-[#FAF3E0] dark:border-rose-400/80 dark:bg-rose-950/40 dark:text-rose-200 dark:hover:bg-rose-900/50 dark:focus-visible: dark:focus-visible:ring-offset-[#262D59]"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
             </div>
           );
