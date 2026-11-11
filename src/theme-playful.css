@@ -1,0 +1,32 @@
+/* TEMPORARY SAMPLE: a playful colour theme, switched on by adding class "theme-playful" to <html>.
+   It only overrides the teal accent used across the app; layout and components are unchanged. */
+.theme-playful .bg-\[\#0f8b8d\],
+.theme-playful [class~="bg-[#0f8b8d]"] {
+  background-color: #7c3aed !important;
+}
+.theme-playful .border-\[\#0f8b8d\],
+.theme-playful [class~="border-[#0f8b8d]"] {
+  border-color: #7c3aed !important;
+}
+.theme-playful .text-\[\#0f8b8d\],
+.theme-playful [class~="text-[#0f8b8d]"],
+.theme-playful .text-\[\#00696b\],
+.theme-playful [class~="text-[#00696b]"] {
+  color: #6d28d9 !important;
+}
+.theme-playful .bg-\[\#00696b\],
+.theme-playful [class~="bg-[#00696b]"] {
+  background-color: #6d28d9 !important;
+}
+.theme-playful .bg-\[\#0f8b8d\]\/10,
+.theme-playful [class~="bg-[#0f8b8d]/10"] {
+  background-color: rgba(124, 58, 237, 0.12) !important;
+}
+.theme-playful .ring-\[\#0f8b8d\],
+.theme-playful [class~="ring-[#0f8b8d]"] {
+  --tw-ring-color: #7c3aed !important;
+}
+/* Playful touch: sidebar active item in solid violet (no gradient, so white text keeps strong contrast). */
+.theme-playful aside [class~="bg-[#0f8b8d]"] {
+  background-color: #6d28d9 !important;
+}

@@ -1,0 +1,22 @@
+node_modules/
+dist/
+release*/
+.env*
+*.log
+*.err
+.aistudio/
+Debug Center data directories
+
+# Scratch console output and one-off data dumps (not part of the app)
+dev_output.txt
+image-first-test-output.txt
+image-first-test-parallel.txt
+bank-build-result.json
+bank-build-2.json
+tools/image-first-results.json
+
+build/library/
+
+# quality test output
+tools/quality/out/
+quality-plans.json

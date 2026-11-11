@@ -1,0 +1,261 @@
+{
+ "INI-CET/AIIMS": {
+  "questions": 3817,
+  "style_share_pct": {
+   "vignette": 23.6,
+   "one-liner": 76.2,
+   "negative": 0.5,
+   "match": 0.1,
+   "multi-statement": 0.0,
+   "assertion-reason": 0.2,
+   "calculation": 0.8,
+   "image": 27.5,
+   "arrange-sequence": 1.8,
+   "fill-blank": 4.1
+  },
+  "lead_in_share_pct": {
+   "identify/image": 42.1,
+   "mechanism": 4.8,
+   "diagnosis": 9.5,
+   "investigation": 0.7,
+   "drug of choice": 1.5,
+   "next step": 3.2
+  },
+  "stem_words": {
+   "median": 14,
+   "p25": 10,
+   "p75": 27,
+   "p90": 39
+  },
+  "option_counts": {
+   "4": 3817
+  },
+  "correct_letter_pct": {
+   "A": 29.3,
+   "B": 27.7,
+   "C": 24.1,
+   "D": 18.9
+  },
+  "explanation_words_median": 185,
+  "explanation_mentions_other_options_pct": 48.3,
+  "by_year": {
+   "2017": 391,
+   "2018": 375,
+   "2019": 289,
+   "2020": 387,
+   "2021": 393,
+   "2022": 595,
+   "2023": 387,
+   "2024": 400,
+   "2025": 400,
+   "2026": 200
+  },
+  "top_subjects": [
+   [
+    "Medicine",
+    364
+   ],
+   [
+    "Pathology",
+    323
+   ],
+   [
+    "Pharmacology",
+    320
+   ],
+   [
+    "Surgery",
+    315
+   ],
+   [
+    "Microbiology",
+    296
+   ],
+   [
+    "Obstetrics and Gynecology",
+    294
+   ],
+   [
+    "Community Medicine",
+    234
+   ],
+   [
+    "Anatomy",
+    227
+   ],
+   [
+    "Physiology",
+    226
+   ],
+   [
+    "Biochemistry",
+    197
+   ],
+   [
+    "Pediatrics",
+    167
+   ],
+   [
+    "Forensic Medicine",
+    164
+   ],
+   [
+    "Ophthalmology",
+    137
+   ],
+   [
+    "Orthopedics",
+    131
+   ],
+   [
+    "Dermatology",
+    104
+   ],
+   [
+    "ENT",
+    96
+   ],
+   [
+    "Psychiatry",
+    79
+   ],
+   [
+    "Radiology",
+    75
+   ],
+   [
+    "Anesthesia",
+    68
+   ]
+  ]
+ },
+ "NEET-PG": {
+  "questions": 2064,
+  "style_share_pct": {
+   "vignette": 38.9,
+   "one-liner": 61.1,
+   "negative": 0.1,
+   "calculation": 0.4,
+   "image": 32.9,
+   "arrange-sequence": 0.5,
+   "fill-blank": 4.5
+  },
+  "lead_in_share_pct": {
+   "identify/image": 44.5,
+   "mechanism": 5.2,
+   "diagnosis": 16.7,
+   "drug of choice": 1.6,
+   "next step": 4.2,
+   "investigation": 0.9
+  },
+  "stem_words": {
+   "median": 22.0,
+   "p25": 11,
+   "p75": 34,
+   "p90": 43
+  },
+  "option_counts": {
+   "4": 2064
+  },
+  "correct_letter_pct": {
+   "A": 32.7,
+   "B": 28.6,
+   "C": 22.5,
+   "D": 16.2
+  },
+  "explanation_words_median": 191.0,
+  "explanation_mentions_other_options_pct": 57.3,
+  "by_year": {
+   "2018": 295,
+   "2019": 291,
+   "2020": 280,
+   "2021": 200,
+   "2022": 199,
+   "2023": 199,
+   "2024": 400,
+   "2025": 200
+  },
+  "top_subjects": [
+   [
+    "Medicine",
+    204
+   ],
+   [
+    "Surgery",
+    197
+   ],
+   [
+    "Obstetrics and Gynecology",
+    189
+   ],
+   [
+    "Community Medicine",
+    152
+   ],
+   [
+    "Pathology",
+    150
+   ],
+   [
+    "Pharmacology",
+    143
+   ],
+   [
+    "Microbiology",
+    132
+   ],
+   [
+    "Biochemistry",
+    110
+   ],
+   [
+    "Anatomy",
+    89
+   ],
+   [
+    "Physiology",
+    89
+   ],
+   [
+    "Pediatrics",
+    87
+   ],
+   [
+    "Forensic Medicine",
+    79
+   ],
+   [
+    "Ophthalmology",
+    75
+   ],
+   [
+    "Orthopedics",
+    68
+   ],
+   [
+    "ENT",
+    61
+   ],
+   [
+    "Radiology",
+    58
+   ],
+   [
+    "Dermatology",
+    55
+   ],
+   [
+    "Psychiatry",
+    51
+   ],
+   [
+    "Anesthesia",
+    44
+   ],
+   [
+    "Obstetrics & Gynecology",
+    19
+   ]
+  ]
+ }
+}
