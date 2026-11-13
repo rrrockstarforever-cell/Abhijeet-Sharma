@@ -23,8 +23,9 @@ import {
 } from '../data/mockClinicalData.ts';
 import { SUBTOPICS } from '../data/subtopics.ts';
 import { PHARMACOLOGY_TOPICS, PHARMACOLOGY_CHAPTERS } from '../data/pharmacologyTopics.ts';
-import { topTopicsFor } from '../data/chapterTopics.ts';
-import { generateExamQuestions, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel, aiComplete, splitTopic, planTopicFacts, factKey, type AssignedFact, type GenerateQuestionsOptions } from '../lib/ai.ts';
+import { topTopicsFor, specialtyOf, topicMetaAny } from '../data/chapterTopics.ts';
+import { startRun, finishRun } from '../lib/diagnostics.ts';
+import { generateExamQuestions, balanceAnswerLetters, AiError, NOT_CONNECTED_MESSAGE, getActiveProvider, getEffectiveModel, aiComplete, splitTopic, planTopicFacts, factKey, type AssignedFact, type GenerateQuestionsOptions } from '../lib/ai.ts';
 import { generateImageFirstQuestion, imageBankSubjectsForLabels, selectImageBankCandidates, selectVerifiedImageQuestions, type BankImage, type ImageQuestionResult } from '../lib/imageFirst.ts';
 import { imageQuestionConcurrencyLimit } from '../lib/mcqConcurrency.ts';
 import { summarizeAttempts, attemptsToday, listAttempts } from '../utils/attemptStore.ts';
@@ -490,79 +491,158 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
     // Busy is set before the split, so the button is disabled at once and a second click cannot start another run.
     setPartial(null);
     setGenState({ busy: true, generated: 0, total: requestedCount, batch: 0, totalBatches: Math.ceil(requestedCount / 10), dropped: 0, error: null });
+    // Diagnostics for this run: every rejected and kept draft with its evidence, the plan steps and a summary
+    // (globalThis.__runReport; pulseRunReport() downloads it; a copy is saved under <data folder>/diagnostics/).
+    startRun({
+      exam: selectedExam, requested: requestedCount, topic: customTopic || null, specialities: customTopic ? [] : labelsFor(keys),
+      subtopicsChosen: customTopic ? null : topicsForKeys(keys).length, difficulty: difficultyTier, source: sourceMode, images: imageMode,
+      provider: getActiveProvider(), model: getActiveProvider() ? getEffectiveModel(getActiveProvider()!) : null,
+      questionTypes, stemPatterns, ignoreSaved: (() => { try { return localStorage.getItem('pulse.test.ignoreSaved') === '1'; } catch { return false; } })(),
+    });
     const split = customTopic && imageMode !== 'only' ? await splitTopic(customTopic, selectedExam) : { subtopics: [], priorities: [], facts: [] };
     const typedSubtopics: string[] = split.subtopics;
+    // A chosen chapter topic is looked up in the PYQ database for that subject, and its database topics are used in its place,
+    // so the questions follow what the research found is asked there. A name the database does not know stays as it is.
+    const expandFromDatabase = (label: string, names: string[]): string[] => {
+      const same = (sub: string) => sub.toLowerCase().replace(/[^a-z]/g, '').includes(label.toLowerCase().replace(/[^a-z]/g, '').slice(0, 7));
+      const out: string[] = [];
+      for (const n of names) {
+        // A chapter-style name ("Antimicrobial: Carbapenems, Aztreonam, Glycopeptides") is searched whole and in its parts.
+        const parts = n.split(/[:,;&()]| and /).map((x) => x.trim()).filter((x) => x.length >= 5 && !/^antimicrobial$/i.test(x));
+        const found = new Map<string, string>();
+        for (const q of [n, ...parts]) for (const h of lookupTopics(q, 25)) if (same(h.subject) && !found.has(h.topic)) found.set(h.topic, h.topic);
+        if (found.size) out.push(...found.keys()); else out.push(n);
+      }
+      return [...new Set(out)];
+    };
+    const subjectSubtopicsFor = (key: string, label: string): string[] => (selectedSubtopics[key]
+      ? expandFromDatabase(label, selectedSubtopics[key])
+      : [...new Set([...topTopicsFor(key, 40), ...(subjectList.find((r) => r.key === key)?.topics ?? SUBTOPICS[key] ?? [])])]);
+    // A speciality run (no typed topic) is planned fact by fact too, like a typed topic: each subtopic's facts are found
+    // first and each question gets its own fact. Without a plan the writer chose its own facts and kept returning to the
+    // same classics (the Pharmacology report: 38 repeat-fact rejections, the TB regimen 15 times). The subtopics are taken
+    // in turns from the chosen specialities, at most about 0.6 per question asked (and 60 in all), to keep the planning calls few.
+    const subjectPlan = !customTopic && imageMode !== 'only';
+    const planTopicLabel = customTopic || (subjectPlan ? labels.join(', ') : '');
+    let planSubtopics: string[] = typedSubtopics;
+    let planFactCounts: number[] = split.facts;
+    if (subjectPlan) {
+      const lists = keys.map((key, i) => subjectSubtopicsFor(key, labels[i]));
+      const limit = Math.min(60, Math.max(8, Math.ceil(requestedCount * 0.6)));
+      const picked: string[] = [];
+      for (let round = 0; picked.length < limit && lists.some((l) => l[round]); round++) for (const l of lists) if (l[round] && picked.length < limit && !picked.includes(l[round])) picked.push(l[round]);
+      planSubtopics = picked;
+      planFactCounts = picked.map((t) => {
+        const tier = topicMetaAny(t)?.tier;
+        return tier === 'Very high' ? 6 : tier === 'High' ? 5 : tier === 'Medium' ? 4 : 3;
+      });
+    }
+    const subtopicPriority: Record<string, number> = customTopic
+      ? Object.fromEntries(typedSubtopics.map((t, i) => [t, split.priorities[i] ?? 6]))
+      : Object.fromEntries(planSubtopics.map((t, i) => [t, Math.min(10, (planFactCounts[i] ?? 3) + 4)]));
     // Fact assignment: the important facts are planned from the sources before any question is written. Each planned
     // fact is one question slot, so the set is exactly as big as the facts the sources support.
     const planProvider = getActiveProvider();
     // The plan is kept per topic for a day, so the same topic gives the same facts and set size on each run.
     // Book plans get their own key (suffix), so a book plan and a web plan for the same topic never mix.
-    const planKey = customTopic ? `pulse.factPlan.v17.${selectedExam}.${requestedCount}.${customTopic.toLowerCase()}${sourceMode === 'MY_BOOKS' ? '.books' : ''}` : '';
+    // Change PLAN_CODE_VERSION whenever the planning code changes, so plans saved by older code are not reused.
+    const PLAN_CODE_VERSION = 'c2';
+    const planKey = planTopicLabel ? `pulse.factPlan.v21.${PLAN_CODE_VERSION}.${selectedExam}.${requestedCount}.${planTopicLabel.toLowerCase()}.${planSubtopics.length}${sourceMode === 'MY_BOOKS' ? '.books' : ''}` : '';
     let factPlan: AssignedFact[] = [];
-    if (customTopic && planProvider && typedSubtopics.length) {
+    // Every planning step records how many facts went in and came out, so a short plan can be explained
+    // (globalThis.__planSteps in the page console, and a table in the console).
+    const planSteps: { step: string; before: number; after: number }[] = [];
+    const logStep = (step: string, before: number, after: number) => planSteps.push({ step, before, after });
+    // Test switch: localStorage 'pulse.test.ignoreSaved' = '1' turns off "skip what saved questions already test" for a
+    // run, so repeated test runs on one topic are not each left with fewer fresh facts than the last.
+    let ignoreSaved = false;
+    try { ignoreSaved = localStorage.getItem('pulse.test.ignoreSaved') === '1'; } catch { /* storage unavailable */ }
+    // The specialty of a planned fact: the database topic's specialty, a "Pharmacology — ..." prefix, or the words of an
+    // outside top-up topic ("Second-line antitubercular drugs" → Pharmacology). Never the typed topic.
+    const specialty = (f: AssignedFact) => specialtyOf(f.subtopic, f.fact);
+    const capBySpecialty = (plan: AssignedFact[]): AssignedFact[] => {
+      const cap = Math.max(3, Math.ceil(requestedCount * 0.34));
+      const seen = new Map<string, number>();
+      return plan.filter((f) => { const sp = specialty(f); if (!sp) return true; const n = (seen.get(sp) ?? 0) + 1; seen.set(sp, n); return n <= cap; });
+    };
+    // Questions already saved in earlier modules or the QA list. A fact one of them already tests is not planned again,
+    // and the generator is told about them, so an older question does not come back in a new module.
+    let storedSeeds: ClinicalQuestion[] = [];
+    let oldFacts: string[] = [];
+    if (planTopicLabel && imageMode !== 'only' && !ignoreSaved) {
+      try {
+        const topicWords = (planTopicLabel + ' ' + planSubtopics.join(' ')).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3);
+        const stored = (await storedQuestions()).map((x) => x.question);
+        storedSeeds = stored.filter((q) => {
+          const text = `${q.stem ?? ''} ${q.questionText ?? ''} ${q.keyFact ?? ''}`.toLowerCase();
+          return topicWords.some((w) => text.includes(w));
+        });
+        oldFacts = storedSeeds.map((q) => factKey(q.keyFact || '')).filter((k) => k.length > 12);
+      } catch { /* saved questions unreadable: nothing is skipped */ }
+    }
+    const skipSaved = (plan: AssignedFact[]) => (oldFacts.length ? plan.filter((f) => !oldFacts.some((o) => stemSimilarity(o, factKey(f.fact)) >= 0.5)) : plan);
+    const budget = Math.ceil(requestedCount * 1.15);
+    if (planTopicLabel && planProvider && planSubtopics.length) {
       try {
         const saved = JSON.parse(localStorage.getItem(planKey) || 'null') as { at: number; plan: AssignedFact[] } | null;
-        if (saved && Date.now() - saved.at < 24 * 60 * 60 * 1000 && saved.plan.length) factPlan = saved.plan;
+        if (saved && Date.now() - saved.at < 24 * 60 * 60 * 1000 && saved.plan.length) { factPlan = saved.plan; logStep('cached plan (today)', 0, factPlan.length); }
       } catch {
         factPlan = [];
       }
       if (!factPlan.length) {
-        factPlan = await planTopicFacts(customTopic, typedSubtopics, split.facts, planProvider, sourceMode === 'MY_BOOKS', requestedCount);
-        // No single specialty may take more than about a third of a cross-specialty set: Pathology, which has the most
-        // topics, would otherwise fill it. Its lowest-ranked facts are dropped, and the others (and outside facts) fill up.
-        {
-          const bySpecialty = new Map<string, number>();
-          for (const f of factPlan) { const s = subjectOfTopic(f.subtopic); if (s) bySpecialty.set(s, (bySpecialty.get(s) ?? 0) + 1); }
-          if (bySpecialty.size >= 2) {
-            const cap = Math.max(3, Math.ceil(requestedCount * 0.34));
-            const seen = new Map<string, number>();
-            factPlan = factPlan.filter((f) => { const s = subjectOfTopic(f.subtopic); if (!s) return true; const n = (seen.get(s) ?? 0) + 1; seen.set(s, n); return n <= cap; });
-          }
-        }
-        // Database first. Only when its topics give fewer facts than asked for, the rest is searched outside (the web and
-        // papers) for what matters for the exam, and those facts are added after the database ones.
-        const extra = (split as { extra?: { subtopics: string[]; facts: number[] } }).extra;
-        if (factPlan.length < requestedCount && extra?.subtopics.length) {
-          try {
-            const more = await planTopicFacts(customTopic, extra.subtopics, extra.facts, planProvider, false, requestedCount - factPlan.length);
-            factPlan = [...factPlan, ...more];
-          } catch { /* the database facts alone are used */ }
-        }
+        factPlan = await planTopicFacts(planTopicLabel, planSubtopics, planFactCounts, planProvider, sourceMode === 'MY_BOOKS', requestedCount);
+        const summary = (globalThis as { __planSummary?: { found?: number; afterDedupe?: number } }).__planSummary;
+        if (summary?.found !== undefined) logStep('found in sources (after per-subtopic cap)', 0, summary.found);
+        if (summary?.afterDedupe !== undefined) logStep('duplicates and off-topic removed', summary.found ?? 0, summary.afterDedupe);
+        // No single specialty may take more than about a third of a cross-specialty set.
+        let before = factPlan.length;
+        // The cap is for cross-specialty topics only; a run on one chosen speciality has one specialty by design.
+        const singleSpecialityRun = !customTopic && keys.length <= 1;
+        if (!singleSpecialityRun) factPlan = capBySpecialty(factPlan);
+        logStep(singleSpecialityRun ? 'specialty cap skipped (single speciality)' : 'specialty cap (34%)', before, factPlan.length);
         if (factPlan.length) {
           try { localStorage.setItem(planKey, JSON.stringify({ at: Date.now(), plan: factPlan })); } catch { /* storage full: the plan is simply not kept */ }
         }
       }
+      let before = factPlan.length;
+      factPlan = skipSaved(factPlan);
+      logStep(ignoreSaved ? 'saved-question skip (switched off for testing)' : 'already tested by your saved questions', before, factPlan.length);
+      // Database first. Only when the plan is still short of the budget (1.15 x the count asked for) after every removal
+      // above, the rest is searched outside for exactly the shortfall (v3 asked the top-up for 13 before the removals).
+      const extra = (split as { extra?: { subtopics: string[]; facts: number[] } }).extra;
+      if (factPlan.length < budget && extra?.subtopics.length) {
+        try {
+          const shortfall = budget - factPlan.length;
+          const more = await planTopicFacts(planTopicLabel, extra.subtopics, extra.facts, planProvider, false, Math.ceil(shortfall / 1.15));
+          const known = factPlan.map((f) => factKey(f.fact));
+          const fresh = skipSaved(more).filter((m) => !known.some((k) => stemSimilarity(k, factKey(m.fact)) >= 0.5));
+          before = factPlan.length;
+          factPlan = capBySpecialty([...factPlan, ...fresh]);
+          logStep(`outside top-up for a shortfall of ${shortfall}`, before, factPlan.length);
+        } catch { /* the database facts alone are used */ }
+      }
     }
-    // Questions already saved in earlier modules or the QA list. A fact one of them already tests is not planned again,
-    // and the generator is told about them, so an older question does not come back in a new module.
-    let storedSeeds: ClinicalQuestion[] = [];
-    if (customTopic && imageMode !== 'only') {
-      try {
-        const topicWords = (customTopic + ' ' + typedSubtopics.join(' ')).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3);
-        const stored = (await storedQuestions()).map((x) => x.question);
-        const related = stored.filter((q) => {
-          const text = `${q.stem ?? ''} ${q.questionText ?? ''} ${q.keyFact ?? ''}`.toLowerCase();
-          return topicWords.some((w) => text.includes(w));
-        });
-        storedSeeds = related;
-        const oldFacts = related.map((q) => factKey(q.keyFact || '')).filter((k) => k.length > 12);
-        if (oldFacts.length && factPlan.length) {
-          const before = factPlan.length;
-          factPlan = factPlan.filter((f) => !oldFacts.some((o) => stemSimilarity(o, factKey(f.fact)) >= 0.5));
-          if (factPlan.length < before) console.info(`[modules] ${before - factPlan.length} planned fact(s) already had a saved question and were skipped.`);
-        }
-      } catch { /* saved questions unreadable: nothing is skipped */ }
-    }
+    (globalThis as { __planSteps?: unknown }).__planSteps = planSteps;
+    if (planSteps.length) console.table(planSteps);
+    const skippedForSaved = planSteps.find((p) => p.step.startsWith('already tested'));
+    const savedNote = skippedForSaved && skippedForSaved.before > skippedForSaved.after ? ` ${skippedForSaved.before - skippedForSaved.after} facts were skipped because your saved questions already test them.` : '';
     // The count follows what the sources support. A topic with few important facts gets a smaller set, and the note
     // says so, rather than forcing filler questions.
     let targetCount = requestedCount;
-    if (customTopic && imageMode !== 'only') {
+    // A speciality run is held to its plan too: two narrow topics cannot fill 100 questions, so the app says so instead of
+    // writing hundreds of drafts that repeat the same facts (the installed 2-topic run needed about 550 drafts for 100).
+    if ((customTopic || factPlan.length) && imageMode !== 'only') {
       // The target is the facts the sources support (not the spares kept for replacements).
-      const factsTotal = split.facts.reduce((sum, f) => sum + f, 0);
+      const factsTotal = planFactCounts.reduce((sum, f) => sum + f, 0);
       const supportable = Math.max(1, factPlan.length ? factPlan.length : factsTotal);
       if (requestedCount > supportable) {
         targetCount = supportable;
-        setHeldBackNote(`Only about ${supportable} relevant questions are available for "${customTopic}" (${typedSubtopics.length} important topics), so this set will have ${supportable} instead of the ${requestedCount} you asked for.`);
+        // A speciality run counts the topics the user chose (not the database topics they expand to).
+        const topicCount = customTopic ? `${planSubtopics.length} important topics` : `${chosenSubtopics.length} chosen topic${chosenSubtopics.length === 1 ? '' : 's'}`;
+        const sourceName = sourceMode === 'MY_BOOKS' ? 'Your books' : 'The sources';
+        setHeldBackNote(!customTopic && keys.length <= 1
+          ? `${sourceName} supplied only ${supportable} facts for "${planTopicLabel}" (${topicCount}), so this set will have ${supportable} instead of the ${requestedCount} you asked for.${savedNote}`
+          : `Only about ${supportable} relevant questions are available for "${planTopicLabel}" (${topicCount}), so this set will have ${supportable} instead of the ${requestedCount} you asked for.${savedNote}`);
       }
     }
     setGenState((prev) => ({ ...prev, total: targetCount, totalBatches: Math.ceil(targetCount / 10) }));
@@ -734,36 +814,20 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         return;
       }
 
-      // A chosen chapter topic is looked up in the PYQ database for that subject, and its database topics are used in its place,
-      // so the questions follow what the research found is asked there. A name the database does not know stays as it is.
-      const expandFromDatabase = (label: string, names: string[]): string[] => {
-        const same = (s: string) => s.toLowerCase().replace(/[^a-z]/g, '').includes(label.toLowerCase().replace(/[^a-z]/g, '').slice(0, 7));
-        const out: string[] = [];
-        for (const n of names) {
-          // A chapter-style name ("Antimicrobial: Carbapenems, Aztreonam, Glycopeptides") is searched whole and in its parts.
-          const parts = n.split(/[:,;&()]| and /).map((x) => x.trim()).filter((x) => x.length >= 5 && !/^antimicrobial$/i.test(x));
-          const found = new Map<string, string>();
-          for (const q of [n, ...parts]) for (const h of lookupTopics(q, 25)) if (same(h.subject) && !found.has(h.topic)) found.set(h.topic, h.topic);
-          if (found.size) out.push(...found.keys()); else out.push(n);
-        }
-        return [...new Set(out)];
-      };
-
       // Same settings for the first pass and for any replacement round; only the count and batches differ.
       const moduleUnits = new Set<string>();
       const genArgs = (count: number, batchPromises: Promise<void>[]): GenerateQuestionsOptions => ({
         exam: selectedExam,
         count,
-        requestedTopic: customTopic || undefined,
+        requestedTopic: customTopic || (factPlan.length ? planTopicLabel : undefined),
+        specialities: customTopic ? undefined : labels,
         booksOnly: sourceMode === 'MY_BOOKS',
+        subtopicPriority,
         // The whole plan is passed: its spare facts replace slots that fail their checks.
-        factPlan: customTopic && factPlan.length ? factPlan : undefined,
+        factPlan: factPlan.length ? factPlan : undefined,
         subjectSubtopics: customTopic
           ? [{ subject: customTopic, subtopics: typedSubtopics.length ? typedSubtopics : [customTopic] }]
-          : keys.map((key, i) => ({
-            subject: labels[i],
-            subtopics: selectedSubtopics[key] ? expandFromDatabase(labels[i], selectedSubtopics[key]) : [...new Set([...topTopicsFor(key, 40), ...(subjectList.find((r) => r.key === key)?.topics ?? SUBTOPICS[key] ?? [])])],
-          })),
+          : keys.map((key, i) => ({ subject: labels[i], subtopics: subjectSubtopicsFor(key, labels[i]) })),
         difficultyTier,
         difficultySubLevel,
         onProgress: (generated, total, batch, totalBatches) => {
@@ -796,7 +860,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
         setHeldBackNote(`Round ${round}: ${questions.length}/${targetCount} kept, writing more…`);
         const more = await generateExamQuestions({
           // A typed topic asks for exactly the missing number (each planned fact is a slot); other runs ask for twice as many to cover drops.
-          ...genArgs(customTopic ? targetCount - questions.length : Math.min(2 * (targetCount - questions.length), 100), batchPromises),
+          ...genArgs(customTopic || factPlan.length ? targetCount - questions.length : Math.min(2 * (targetCount - questions.length), 100), batchPromises),
           existing: [...storedSeeds, ...questions],
         });
         questions = [...questions, ...more.questions];
@@ -900,6 +964,9 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       // text-only questions fill the rest of the requested count.
       const combined = [...imageQuestions, ...questions];
       const merged = base ? [...base, ...combined] : combined;
+      // NEET PG / INI-CET: the correct letters of the whole module (image-first items, every round, a Continue run) are
+      // spread evenly at random, so the answer position is never a clue.
+      if (selectedExam === 'NEET_PG' || selectedExam === 'INI_CET') balanceAnswerLetters(merged);
 
       if (questions.length === 0) {
         const wasStopped = stopEarlyRef.current;
@@ -951,7 +1018,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       // questions kept, up to the number asked for. No separate answer check or QA review runs here.
       // A typed topic is answered from every specialty that asks it, so its questions carry their own specialty names
       // (Pathology, Surgery, Radiodiagnosis...). The "belongs to a selected specialty" filter is only for picked specialties.
-      launchWith(merged.slice(0, targetCount), labels, chosenSubtopics, Boolean(customTopic));
+      launchWith(merged.slice(0, targetCount), labels, chosenSubtopics, Boolean(customTopic) || factPlan.length > 0);
     } catch (err: any) {
       const aborted = controller.signal.aborted || (err instanceof AiError && err.kind === 'aborted');
       const message = aborted
@@ -961,6 +1028,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       // A 401 usually means the engine was signed out: refresh the banner immediately.
       if (!aborted && err instanceof AiError && err.kind === 'not_connected') refreshProviderStatus();
     } finally {
+      finishRun({ stoppedByUser: stopEarlyRef.current });
       abortRef.current = null;
       setStopping(false);
     }
@@ -975,7 +1043,14 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
       setGenState((st) => ({ ...st, error: 'No question was kept for this module, so nothing was opened.' }));
       return;
     }
-    questions = passed;
+    // The set opens in random order, not in the order the questions were written (which runs subtopic by subtopic).
+    // Fisher-Yates on a copy; the questions themselves, their answer letters and explanations are unchanged.
+    const shuffled = [...passed];
+    for (let i = shuffled.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    questions = shuffled;
     onLaunchModule(
       selectedExam,
       questions.length,
@@ -1261,7 +1336,7 @@ export const PracticeModuleBuilderView: React.FC<PracticeModuleBuilderViewProps>
                 checked={difficultyTier === 'ALL'}
                 onClick={() => { setDifficultyTier('ALL'); setDifficultySubLevel(undefined); }}
                 label="All"
-                hint="Realistic exam mix (~20% easy, 45% medium, 35% hard)"
+                hint={selectedExam === 'INI_CET' ? 'Harder than the real paper (~5% easy, 40% medium, 55% hard)' : selectedExam === 'NEET_PG' ? 'Harder than the real paper (~10% easy, 45% medium, 45% hard)' : 'Realistic exam mix (~20% easy, 45% medium, 35% hard)'}
               />
               <Radio
                 checked={difficultyTier !== 'ALL'}

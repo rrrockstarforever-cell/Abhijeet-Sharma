@@ -49,7 +49,15 @@ const stem = (w: string) => w.replace(/(ies)$/, 'y').replace(/(es|s)$/, (m, _g, 
 const words = (s: string): string[] => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').filter(Boolean);
 // Words the topic names use interchangeably, so "lung cancer", "lung carcinoma" and "bronchogenic carcinoma" find one another.
 const SYNONYM: Record<string, string> = { carcinoma: 'cancer', carcinomas: 'cancer', tumour: 'cancer', tumor: 'cancer', tumours: 'cancer', tumors: 'cancer', malignancy: 'cancer', malignant: 'cancer', neoplasm: 'cancer', neoplasms: 'cancer', neoplastic: 'cancer', pulmonary: 'lung', bronchogenic: 'lung', bronchial: 'lung' };
-const keyTokens = (s: string): string[] => words(s).filter((w) => !STOP.has(w)).map((w) => SYNONYM[w] ?? stem(w));
+// One disease, many spellings: "Tuberculosis", "tuberculous", "antitubercular" and "TB" must find the same topics, or a
+// disease topic loses its drugs (Pharmacology names them "TB regimens", "antitubercular") and its programme (PSM: "TB").
+const DISEASE_ALIAS: [RegExp, string][] = [
+  [/^(?:anti-?)?tubercul(?!oid)|^tb$|^mdr$|^xdr$|^ntep$|^rntcp$/, 'tb'], [/^(?:anti-?)?malari|^plasmodi/, 'malaria'], [/^(?:anti)?retrovir|^hiv$|^aids$/, 'hiv'],
+  [/^(?:anti-?)?lepro|^hansen/, 'leprosy'], [/^(?:anti-?)?diabet/, 'diabetes'], [/^(?:anti-?)?hypertens/, 'hypertension'],
+  [/^(?:anti-?)?epilep/, 'epilepsy'], [/^(?:anti-?)?thyroid|^thyro/, 'thyroid'], [/^(?:anti-?)?asthma/, 'asthma'],
+];
+const alias = (w: string): string | undefined => DISEASE_ALIAS.find(([re]) => re.test(w))?.[1];
+const keyTokens = (s: string): string[] => words(s).filter((w) => !STOP.has(w)).map((w) => alias(w) ?? SYNONYM[w] ?? stem(w));
 const norm = (s: string) => words(s).map(stem).join(' ');
 
 /** Topics in the database that answer a typed request, best first. Chapter titles named in the request count in full. */
@@ -89,7 +97,11 @@ export function lookupTopicsBalanced(query: string, limit = 40, perOtherSubject 
   if (bySubject.size <= 1) return all.slice(0, limit);
   const ordered = [...bySubject.entries()].sort((a, b) => b[1].length - a[1].length);
   const [mainSubject, mainRows] = ordered[0];
-  const others = ordered.slice(1).flatMap(([, rows]) => rows.slice(0, perOtherSubject));
+  // The other specialties take turns (each one's best topic first, then each one's second, ...), so a specialty with few
+  // matches (General Medicine, PSM, Pharmacology for Tuberculosis) is never cut off by the larger ones.
+  const rest = ordered.slice(1).map(([, rows]) => [...rows].sort((a, b) => b.score - a.score).slice(0, perOtherSubject)).sort((a, b) => b[0].score - a[0].score);
+  const others: DbTopic[] = [];
+  for (let round = 0; round < perOtherSubject; round++) for (const rows of rest) if (rows[round]) others.push(rows[round]);
   const keepOthers = others.slice(0, Math.max(0, Math.floor(limit / 2)));
   // The main specialty keeps most places but not all: with many specialties asking the topic, it is limited so the others are heard.
   const main = mainRows.slice(0, Math.max(1, Math.min(limit - keepOthers.length, 14)));
@@ -129,4 +141,38 @@ export function topTopicsFor(subject: string, limit = 40): string[] {
   const rows: RawRow[] = [];
   for (const [, r] of DATA[subject] ?? []) rows.push(...r);
   return rows.sort((a, b) => b[1] - a[1] || b[2] - a[2]).slice(0, limit).map((r) => r[0]);
+}
+
+// Words that place an outside (non-database) topic in a specialty. Checked in this order; the first match wins.
+const SPECIALTY_WORDS: [RegExp, string][] = [
+  [/\b(community medicine|psm|ntep|rntcp|programme|program|epidemiolog|screening|notification|surveillance|contact (?:tracing|investigation)|bcg|vaccin|prevention)\b/i, 'Preventive & Social Medicine (PSM)'],
+  [/\b(drugs?|antitubercular|antibiotics?|pharmaco\w*|regimens?|adverse effects?|toxicit\w*|resistance mechanisms?|isoniazid|rifampicin|pyrazinamide|ethambutol|bedaquiline|delamanid|pretomanid|linezolid|mechanisms? of action)\b/i, 'Pharmacology'],
+  [/\b(imaging|radiograph\w*|x-?ray|ct|mri|ultrasound|hrct)\b/i, 'Radiodiagnosis & Radiotherapy'],
+  [/\b(morpholog\w*|histolog\w*|granulom\w*|gross|microscopic|patholog\w*|tissue lesions?)\b/i, 'Pathology'],
+  [/\b(microbiolog\w*|smear|culture|stain\w*|naat|cbnaat|xpert|line-probe|susceptibility testing|organism)\b/i, 'Microbiology'],
+  [/\b(paediatric|pediatric|child(?:ren|hood)?|infant|neonat\w*)\b/i, 'Pediatrics'],
+  [/\b(pregnan\w*|genital|obstetric\w*|gynae\w*|gyne\w*|infertility)\b/i, 'Obstetrics & Gynaecology'],
+  [/\b(tuberculides?|cutaneous|skin|lupus vulgaris|scrofuloderma)\b/i, 'Dermatology & Venereology'],
+  [/\b(spine|spinal|pott|bones?|joints?|arthritis|osteo\w*)\b/i, 'Orthopedics'],
+  [/\b(larynx|laryngeal|otitis|ear|nasal|pharyn\w*)\b/i, 'Oto-Rhino-Laryngology (ENT)'],
+  [/\b(clinical features?|presentation|diagnosis and investigations?|treatment and monitoring|complications?|clinical course|management|hiv)\b/i, 'General Medicine'],
+];
+
+/**
+ * The specialty of a planned fact. A database topic keeps its own specialty; an outside top-up topic is placed by a
+ * "Pharmacology — ..." prefix or by its words. In v3, 17 of 64 kept questions were labelled with the typed topic
+ * ("Tuberculosis") because their topics came from the outside top-up, so the per-specialty cap could not see them.
+ */
+export function specialtyOf(subtopic: string, fact = ''): string | undefined {
+  const known = subjectOfTopic(subtopic) ?? subjectFromPrefix(subtopic);
+  if (known) return known;
+  for (const [re, name] of SPECIALTY_WORDS) if (re.test(subtopic)) return name;
+  for (const [re, name] of SPECIALTY_WORDS) if (re.test(fact)) return name;
+  return undefined;
+}
+
+/** The metadata of a database topic in whichever subject holds it (for planning a speciality run). */
+export function topicMetaAny(topic: string): TopicMeta | undefined {
+  const subject = subjectOfTopic(topic);
+  return subject ? topicMeta(subject, topic) : undefined;
 }

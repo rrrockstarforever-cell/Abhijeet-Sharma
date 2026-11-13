@@ -2,12 +2,15 @@
 // Real provider calls only (via /api/ai/complete on the local Express server).
 // No silent fallbacks: every failure is thrown as a typed AiError and must be shown in the UI.
 import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } from '../types.ts';
-import { lookupTopicsBalanced, howAskedFor, subjectOfTopic, subjectFromPrefix } from '../data/chapterTopics.ts';
+import { lookupTopicsBalanced, howAskedFor, specialtyOf } from '../data/chapterTopics.ts';
 import { getMcqConcurrencyOverride } from './mcqConcurrency.ts';
 
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
 import { scopeInstruction } from './scopeRules.ts';
+import { pipelineFor, OPTION_RULES, EXPLANATION_RULES, jsonShape, optionReasoningProblem, explanationThin, parseOptionReasons, answerInStem, decorativeCase, oppositeOptions, sourceBoundExplanation, topicAllowsTreatment, isGeneralFact, isProgrammeFact, isDatedFact, scrubSourceMentions, STYLE_EXAMPLES, DIAGNOSIS_GUARD, type ExamPipeline, type Letter as OptionLetter } from './pipelines/index.ts';
+import { leadInFitsFact, sourceLeakWhere } from './questionStyles.ts';
+import { recordDraft, draftOf, type DropRecord } from './diagnostics.ts';
 import { COMMON_STYLE_RULES, EXAM_RULES, STYLES, combinationListMissing, hasDuplicateOptions, inventedSource, explainsDistractors, explanationLeaks, leadInsFromChips, planSlots, spread, pointsAtMissingPicture, unpointDescribedPicture, styleProblem, stylesFromChips, subjectFromTopic, tierText, type Slot, type StyleId } from './questionStyles.ts';
 
 /**
@@ -34,6 +37,56 @@ function itemShape(idx: number, exam: ExamType): string {
 }
 
 /** Patients rotated across a typed-topic set, so no two items share the same age, sex and setting. */
+/** True when the question line only repeats the stem (a one-line question). */
+function sameLine(q: ClinicalQuestion): boolean {
+  const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return norm(String((q as { questionText?: string }).questionText ?? '')) === norm(String(q.stem ?? ''));
+}
+
+/**
+ * The stem and the question line as one text for a judge or a repair. A one-line question appears once: in v3 the examiner
+ * saw it twice and rejected 7 questions as "duplicated".
+ */
+export function stemAndLine(q: ClinicalQuestion): string {
+  const line = String((q as { questionText?: string }).questionText ?? '').trim();
+  return sameLine(q) || !line ? String(q.stem ?? '') : `${q.stem ?? ''}\n${line}`;
+}
+
+/** Case styles whose patient is assigned in code for NEET PG / INI-CET. */
+const CASE_STYLES = new Set(['vignette', 'short-case', 'image']);
+
+/**
+ * A distinct adult age and sex for each case slot: the ages are spread over 18-78 and alternate sex, so 60 slots give
+ * 60 different age-and-sex pairs. The writer may move to another age group only when the fact needs it.
+ */
+export function assignedPatient(i: number): { age: number; sex: 'man' | 'woman' } {
+  const k = Math.abs(i) % 120;
+  const age = 18 + ((k * 37) % 61);
+  return { age, sex: k % 2 === 0 ? 'woman' : 'man' };
+}
+
+/**
+ * NEET PG / INI-CET: facts that cannot carry a patient case get a one-line slot, unless the learner chose the style:
+ * general facts (a proportion, the commonest site overall, an alternative name, a typical size) and programme facts
+ * (NTEP pillars, target years, strategy frameworks). In the live tests both kinds came back as decorative cases or as
+ * "a student compares the national target ..." scenes, and were rejected.
+ * (v3 also turned "finding" cases into diagnosis cases. For a disease topic the diagnosis is usually the topic itself,
+ * so that raised wrong-lead-in rejections from 7 to 21 and repeated answers to 14; v4 removes it.)
+ */
+export function guardCaseSlots(slots: Slot[], facts: { fact: string; subtopic: string }[], styleExplicit: boolean, _leadInExplicit: boolean): void {
+  if (styleExplicit) return;
+  slots.forEach((slot, i) => {
+    if (!CASE_STYLES.has(slot.style) || slot.style === 'image') return;
+    const { fact } = facts[i] ?? { fact: '' };
+    if (isGeneralFact(fact) || isProgrammeFact(fact)) { slot.style = 'one-liner'; slot.leadIn = undefined; }
+  });
+}
+
+export function patientInstruction(i: number): string {
+  const { age, sex } = assignedPatient(i);
+  return `If the item has a patient, the patient is ${age === 18 || (age >= 80 && age < 90) ? 'an' : 'a'} ${age}-year-old ${sex}. Keep this age and sex unless the fact itself needs another group (a child, a pregnant woman, an elderly patient); then pick an age inside that group that is not a round number.`;
+}
+
 const PATIENT_PROFILES = [
  'a 68-year-old woman in a general medicine clinic',
  'a 9-month-old infant on a paediatric ward',
@@ -62,8 +115,55 @@ function placeCorrectAt(q: ClinicalQuestion, target: string): void {
   type Letter = ClinicalQuestion['correctOption'];
   q.options = q.options.map((o) => ({ ...o, id: swap(o.id) as Letter })).sort((a, b) => a.id.localeCompare(b.id));
   q.correctOption = target as Letter;
-  const fix = (text: string | undefined) => text?.replace(/\b([Oo]ptions?|[Cc]hoices?)\s+([A-E](?:\s*(?:,|and|or|&)\s*[A-E])*)\b/g, (_m, word: string, list: string) => `${word} ${list.replace(/[A-E]/g, swap)}`);
+  remapLetterMentions(q, swap);
+}
+
+/**
+ * After options change letters, every place that names a letter must follow: "Option B", "Options B and C", "(B)" in
+ * the explanation, trap note and pearl, and the per-option reasons. Without this a shuffled question says
+ * "Option B is wrong" about the option that is now D.
+ */
+export function remapLetterMentions(q: ClinicalQuestion, map: (letter: string) => string): void {
+  const fix = (text: string | undefined) => text
+    ?.replace(/\b([Oo]ptions?|[Cc]hoices?)\s+([A-E](?:\s*(?:,|and|or|&)\s*[A-E])*)\b/g, (_m, word: string, list: string) => `${word} ${list.replace(/[A-E]/g, map)}`)
+    .replace(/\(([A-E])\)/g, (_m, l: string) => `(${map(l)})`);
   q.explanation = fix(q.explanation) ?? q.explanation;
+  q.trapExplanation = fix(q.trapExplanation) ?? q.trapExplanation;
+  q.boardPearl = fix(q.boardPearl) ?? q.boardPearl;
+  if (q.optionReasons) {
+    const next: Partial<Record<OptionLetter, string>> = {};
+    for (const [l, why] of Object.entries(q.optionReasons)) if (why) next[map(l) as OptionLetter] = fix(why) ?? why;
+    q.optionReasons = next;
+  }
+}
+
+/** Options that must keep their order: statement combinations, match codes, assertion-reason, numbers. */
+export function hasFixedOptionOrder(q: ClinicalQuestion): boolean {
+  return Boolean(q.fixedOptionOrder) || q.options.some((o) => NO_SHUFFLE.test(o.text) || /\b(both a and r|a is true|a is false)\b/i.test(o.text));
+}
+
+/**
+ * Spreads the correct letters of a whole set evenly (NEET PG / INI-CET: no letter above its fair share), choosing at
+ * random among the least-used letters so the order has no pattern. Questions with a fixed option order keep their key
+ * and are counted first. Runs on the finished set, so image-first items and later rounds are balanced too.
+ */
+export function balanceAnswerLetters(questions: ClinicalQuestion[], rand: () => number = Math.random): void {
+  const counts: Record<string, number> = {};
+  const letters = (q: ClinicalQuestion) => q.options.map((o) => o.id as string);
+  for (const q of questions) for (const l of letters(q)) counts[l] ??= 0;
+  const movable: ClinicalQuestion[] = [];
+  for (const q of questions) {
+    if (hasFixedOptionOrder(q)) counts[q.correctOption] = (counts[q.correctOption] ?? 0) + 1;
+    else movable.push(q);
+  }
+  for (const q of movable) {
+    const own = letters(q);
+    const min = Math.min(...own.map((l) => counts[l] ?? 0));
+    const least = own.filter((l) => (counts[l] ?? 0) === min);
+    const pick = least[Math.floor(rand() * least.length)] ?? q.correctOption;
+    placeCorrectAt(q, pick);
+    counts[pick] = (counts[pick] ?? 0) + 1;
+  }
 }
 
 function typedShapeBase(idx: number): string {
@@ -406,6 +506,8 @@ export async function planTopicFacts(
   provider: AiProviderId,
   booksOnly?: boolean,
   requested = 0,
+  nested = false,
+  capOverride?: number,
 ): Promise<AssignedFact[]> {
   const kindOf = (s: unknown) => (s as { kind?: string }).kind;
   // Each subtopic is searched on its own, so its facts come from text about that subtopic and not from one narrow
@@ -417,6 +519,10 @@ export async function planTopicFacts(
   const planned: AssignedFact[] = [];
   const usedFacts: string[] = [];
   const perSource = new Map<string, number>();
+  // No subtopic takes more than about 6% of the set (at least 3 facts), so one narrow area cannot dominate it.
+  // A narrow topic with few subtopics may go above 6%, so the cap never makes the 1.15 x N budget unreachable.
+  const perSubtopicCap = capOverride ?? (requested >= 30 ? Math.max(3, Math.ceil(requested * 0.06), Math.ceil((requested * 1.15) / Math.max(1, subtopics.length)) + 1) : 12);
+  const keptBy: number[] = subtopics.map(() => 0);
   // The model calls for all subtopics run together; their answers are then filtered one subtopic after another, so
   // a fact repeated under two subtopics is still caught by the comparison below.
   const extractions = await Promise.all(subtopics.map(async (_, i) => {
@@ -428,9 +534,13 @@ export async function planTopicFacts(
     // Spare facts (about half again) let a slot whose question fails its checks be replaced by another planned fact.
     // At most four facts per subtopic, so one detail (for example MRCP) does not fill the set.
     // A big request raises the per-subtopic share, so 100 questions are not squeezed into 4 facts per subtopic.
-    const share = requested > 0 ? Math.ceil((requested * 1.15) / Math.max(1, subtopics.length)) : 0;
-    const want = Math.min(12, Math.max(1, facts[i] ?? 1, share));
-    const ask = want + Math.ceil(want / 2);
+    // The 1.15 x N budget is shared out by how high-yield each subtopic is (its tier-based fact count, squared), not
+    // evenly: in the second live test an even split gave a niche drug subtopic (bedaquiline) 8 questions.
+    const weight = (n: number) => Math.max(1, n) ** 2;
+    const totalWeight = facts.reduce((a, n) => a + weight(n ?? 1), 0) || 1;
+    const share = requested > 0 ? Math.ceil((requested * 1.15 * weight(facts[i] ?? 1)) / totalWeight) : 0;
+    const want = Math.min(perSubtopicCap, Math.max(1, requested > 0 ? share : (facts[i] ?? 1)));
+    const ask = Math.min(perSubtopicCap + 2, want + Math.ceil(want / 2));
     const raw = await aiComplete({
       system: PLAN_FACTS_SYSTEM,
       messages: [{ role: 'user', content: `Topic: ${topic}\nSubtopic: ${subtopics[i]}\nNumber of facts: ${ask}\n\nSources:\n${evidence}` }],
@@ -450,7 +560,7 @@ export async function planTopicFacts(
     const why: Record<string, number> = {};
     const skip = (reason: string) => { why[reason] = (why[reason] ?? 0) + 1; };
     for (const f of parsed?.facts ?? []) {
-      if (kept >= ask) break;
+      if (kept >= Math.min(ask, perSubtopicCap)) break;
       const fact = String(f?.fact ?? '').trim();
       const quote = String(f?.quote ?? '').trim();
       const src = ordered[Number(f?.source ?? 0) - 1];
@@ -470,15 +580,43 @@ export async function planTopicFacts(
       // No more than three questions from one book section or source, so a set spreads over the whole topic.
       // The same fact planned under two subtopics is one fact: compare with abbreviations and generic words normalised.
       if (usedFacts.some((u) => stemSimilarity(factKey(u), factKey(fact)) >= 0.5)) { skip('duplicate'); continue; }
+      // Approval and launch dates are not exam facts (the examiner rejected every question built on one).
+      if (isDatedFact(fact)) { skip('dated'); continue; }
       perSource.set(src.title, (perSource.get(src.title) ?? 0) + 1);
       planned.push({ subtopic: subtopics[i], fact, quote, source: src.title, origin: kindOf(src) === 'book' ? 'book' : 'web' });
       usedFacts.push(fact);
       kept += 1;
     }
     // For the quality tests: why a subtopic gave few facts (reply not JSON, quotes not in the sources, trivia filter, ...).
-    (globalThis as { __planDebug?: unknown[] }).__planDebug?.push({ subtopic: subtopics[i].slice(0, 50), asked: ask, replyChars: rawText.length, parsed: Array.isArray(parsed?.facts) ? parsed!.facts!.length : -1, kept, why, sources: ordered.length });
+    // Always recorded, so a short plan can be explained: read globalThis.__planDebug in the page console.
+    keptBy[i] = kept;
+    ((globalThis as { __planDebug?: unknown[] }).__planDebug ??= []).push({ subtopic: subtopics[i].slice(0, 60), books: Boolean(booksOnly), asked: ask, replyChars: rawText.length, parsed: Array.isArray(parsed?.facts) ? parsed!.facts!.length : -1, kept, why, sources: ordered.length });
   }
-  return tagPicturable(await dedupePlan(planned, provider), provider);
+  for (let i = 0; i < subtopics.length; i++) {
+    if (!extractions[i]) ((globalThis as { __planDebug?: unknown[] }).__planDebug ??= []).push({ subtopic: subtopics[i].slice(0, 60), books: Boolean(booksOnly), kept: 0, why: { 'no-sources': 1 } });
+  }
+  // "My books" first. Subtopics the books gave no fact for are searched on the internet when the plan is short of the
+  // 1.15 x N budget (the learner's rule: books where possible, the internet when they fall short). In the second live
+  // test 20 of 44 database topics, including every General Medicine one, planned nothing from the books.
+  const budget = Math.ceil(requested * 1.15);
+  if (booksOnly && requested > 0 && planned.length < budget) {
+    const empty = subtopics.map((s, i) => ({ s, f: facts[i] ?? 1, k: keptBy[i] })).filter((e) => e.k === 0);
+    if (empty.length) {
+      try {
+        const more = await planTopicFacts(topic, empty.map((e) => e.s), empty.map((e) => e.f), provider, false, budget - planned.length, true, perSubtopicCap);
+        for (const m of more) if (!usedFacts.some((u) => stemSimilarity(factKey(u), factKey(m.fact)) >= 0.5)) { planned.push(m); usedFacts.push(m.fact); }
+      } catch { /* the book facts alone are used */ }
+    }
+  }
+  const found = planned.length;
+  const finalPlan = await tagPicturable(await dedupePlan(planned, provider, topic), provider);
+  if (!nested) {
+    const bySub: Record<string, number> = {};
+    for (const f of finalPlan) bySub[f.subtopic] = (bySub[f.subtopic] ?? 0) + 1;
+    (globalThis as { __planSummary?: unknown }).__planSummary = { requested, budget, found, afterDedupe: finalPlan.length, planned: finalPlan.length, bySubtopic: bySub, emptySubtopics: subtopics.filter((s) => !bySub[s]) };
+    console.info(`[plan] ${finalPlan.length} facts for ${requested} requested (budget ${budget}); ${subtopics.filter((s) => !bySub[s]).length} of ${subtopics.length} subtopics planned nothing. See globalThis.__planSummary and __planDebug.`);
+  }
+  return finalPlan;
 }
 
 /**
@@ -490,20 +628,26 @@ function cheapModel(provider: AiProviderId): string {
   return getEffectiveModel(provider);
 }
 
-async function dedupePlan(plan: AssignedFact[], provider: AiProviderId): Promise<AssignedFact[]> {
+async function dedupePlan(plan: AssignedFact[], provider: AiProviderId, topic?: string): Promise<AssignedFact[]> {
   if (plan.length < 2) return plan;
   const list = plan.map((f, i) => `${i + 1}. ${f.fact}`).join('\n');
+  // The same call also finds facts that belong to another disease (leprosy or syphilis facts planned under a
+  // tuberculosis topic, because a book compares them). Each one would cost a writer call and an examiner rejection.
   const raw = await aiComplete({
     system: 'You check a numbered list of exam facts. Some facts make the same point as an earlier fact, in different words. ' +
- 'Reply with ONLY JSON: {"duplicates":[<numbers of the later facts that repeat an earlier one>]}. Reply {"duplicates":[]} if none.',
-    messages: [{ role: 'user', content: list }],
+ (topic ? `Some facts may be mainly about a different disease, drug or subject than the topic "${topic}" (a fact that only compares the topic with another disease, or describes the other disease, is off-topic; a fact about the topic's own drugs, complications or programme is on-topic). ` : '') +
+ `Reply with ONLY JSON: {"duplicates":[<numbers of the later facts that repeat an earlier one>]${topic ? ',"offTopic":[<numbers of off-topic facts>]' : ''}}. Use empty lists if none.`,
+    messages: [{ role: 'user', content: topic ? `Topic: ${topic}\n${list}` : list }],
     json: true,
     effort: 'low',
     purpose: 'fact-dedupe',
     provider,
     model: cheapModel(provider),
   }).catch(() => '');
-  const drop = new Set((extractJson<{ duplicates?: number[] }>(raw)?.duplicates ?? []).map((n) => Number(n) - 1));
+  const verdict = extractJson<{ duplicates?: number[]; offTopic?: number[] }>(raw);
+  const drop = new Set([...(verdict?.duplicates ?? []), ...(verdict?.offTopic ?? [])].map((n) => Number(n) - 1));
+  // A reply that would remove most of the plan is not trusted.
+  if (drop.size > plan.length * 0.4) return plan.filter((_, i) => !(verdict?.duplicates ?? []).map((n) => Number(n) - 1).includes(i));
   return plan.filter((_, i) => !drop.has(i));
 }
 
@@ -536,9 +680,30 @@ async function guessSubject(topic: string): Promise<string | undefined> {
 async function repairExplanation(q: ClinicalQuestion, signal?: AbortSignal): Promise<void> {
   const provider = getActiveProvider();
   if (!provider) return;
+  if (q.examType === 'NEET_PG' || q.examType === 'INI_CET') {
+    // NEET PG / INI-CET: the full teaching explanation (background, why right, every wrong option, high-yield) plus
+    // per-option reasons. The question, its key and its facts stay exactly as they are.
+    const letters = q.options.map((o) => o.id);
+    const full = await aiComplete({
+      system: `You rewrite the explanation of one exam MCQ for a learner. ${EXPLANATION_RULES} Keep every fact and the marked answer exactly as they are; add no doubtful claims. Reply with ONLY JSON: {"explanation":"...","optionReasons":{${letters.map((l) => `"${l}":"..."`).join(',')}}}.`,
+      messages: [{ role: 'user', content: [stemAndLine(q), ...q.options.map((o) => `${o.id}) ${o.text}`), `Marked answer: ${q.correctOption}) ${q.options.find((o) => o.id === q.correctOption)?.text ?? ''}`, `Current explanation: ${String(q.explanation ?? '')}`].join('\n') }],
+      json: true,
+      effort: 'low',
+      purpose: 'explanation',
+      provider,
+      model: cheapModel(provider),
+      signal,
+    }).catch(() => '');
+    const got = extractJson<{ explanation?: string; optionReasons?: unknown }>(full);
+    const better = String(got?.explanation ?? '').trim();
+    if (better.length >= 200) q.explanation = better;
+    const reasons = parseOptionReasons(got?.optionReasons, letters);
+    if (reasons && Object.keys(reasons).length >= letters.length - 1) q.optionReasons = reasons;
+    return;
+  }
   const raw = await aiComplete({
     system: 'You improve the explanation of one exam MCQ. Write 70 to 110 words of clinical reasoning only, in short plain sentences with everyday words: start with the key fact in **bold**, then one bullet per other option saying why it is wrong, naming the option by its text and never by its letter, then one line "High-yield: ...". Never mention sources, pages, attachments, the examiner or the question itself. Keep every fact and the marked answer exactly as they are; add no new claims. Reply with ONLY JSON: {"explanation":"..."}.',
-    messages: [{ role: 'user', content: [q.stem, (q as { questionText?: string }).questionText ?? '', ...q.options.map((o) => `${o.id}) ${o.text}`), `Marked answer: ${q.correctOption}`, `Current explanation: ${String(q.explanation ?? '')}`].join('\n') }],
+    messages: [{ role: 'user', content: [stemAndLine(q), ...q.options.map((o) => `${o.id}) ${o.text}`), `Marked answer: ${q.correctOption}`, `Current explanation: ${String(q.explanation ?? '')}`].join('\n') }],
     json: true,
     effort: 'low',
     purpose: 'explanation',
@@ -567,7 +732,7 @@ async function tagPicturable(plan: AssignedFact[], provider: AiProviderId): Prom
 }
 
 /** Null when the examiner accepts the item, otherwise its one-sentence reason for rejecting it. */
-async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: AbortSignal, trustedKey?: boolean): Promise<string | null> {
+async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: AbortSignal, trustedKey?: boolean, pipe?: ExamPipeline | null): Promise<string | null> {
   const provider = getActiveProvider();
   if (!provider) return null;
   const raw = await aiComplete({
@@ -575,15 +740,15 @@ async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: Abor
  'You are an examiner checking one MCQ written from the learner\'s own notes. The notes are trusted: treat the marked answer as true and do not judge it against other textbooks. ' +
  'Mark ok=false only when you are sure of one of these: (1) the stem, options or explanation contradict themselves; (2) more than one option is defensible or no option answers the question asked; ' +
  '(3) the explanation supports a different option than the marked answer; (4) the stem or options are incomplete; (5) the item is about an unrelated drug, disease, animal exposure or a very rare reaction outside the requested topic, or its stem is research, audit or resident-review wording rather than a patient or exam situation. Judge the explanation only for contradicting the key; its wording and length do not matter. A NOT or EXCEPT item with exactly one false option is fine. Otherwise ok=true. ' +
- 'Reply with ONLY JSON: {"ok":true,"problem":""} or {"ok":false,"problem":"one short sentence"}.' :
+ (pipe ? `${pipe.examinerChecks} ` : '') + 'When ok=false, say exactly what to change so the question becomes correct (for example which option to reword or which finding to add), so it can be repaired instead of thrown away. ' +  'Reply with ONLY JSON: {"ok":true,"problem":""} or {"ok":false,"problem":"one short sentence: the problem and the fix"}.' :
  'You are an examiner checking one MCQ before it is used. Mark ok=false only when you are sure of a problem: ' +
  '(1) the marked answer is wrong by standard textbooks and guidelines; (2) more than one option is defensible; ' +
  '(3) the answer only holds for one particular study, cohort, hospital, country or textbook layout, or it is a research detail no exam would ask; ' +
  '(4) the stem or options are incomplete or contradict themselves; (5) the question is out of scope, or about an unrelated drug, disease or animal exposure, or a very rare reaction outside the requested topic, or written as research, audit or resident-review wording: ' + scopeInstruction() + ' A NOT or EXCEPT question with a correct standard textbook key is ok=true. Otherwise ok=true. ' +
- 'Reply with ONLY JSON: {"ok":true,"problem":""} or {"ok":false,"problem":"one short sentence"}.',
+ (pipe ? `${pipe.examinerFocus} ` : '') + (pipe ? `${pipe.examinerChecks} ` : '') + 'When ok=false, say exactly what to change so the question becomes correct (for example which option to reword or which finding to add), so it can be repaired instead of thrown away. ' +  'Reply with ONLY JSON: {"ok":true,"problem":""} or {"ok":false,"problem":"one short sentence: the problem and the fix"}.',
     messages: [{
       role: 'user',
-      content: `Topic: ${topic}\n${q.stem}\n${q.questionText}\n` + q.options.map((o) => `${o.id}) ${o.text}`).join('\n') + `\nMarked answer: ${q.correctOption}\nExplanation: ${String(q.explanation ?? '').slice(0, 1500)}`,
+      content: `Topic: ${topic}\n${stemAndLine(q)}\n` + q.options.map((o) => `${o.id}) ${o.text}`).join('\n') + `\nMarked answer: ${q.correctOption}\nExplanation: ${String(q.explanation ?? '').slice(0, 1500)}`,
     }],
     json: true,
     effort: 'low',
@@ -595,7 +760,7 @@ async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: Abor
   // A failed check never blocks a question: only a clear "ok": false drops it.
   const verdict = extractJson<{ ok?: boolean; problem?: string }>(raw);
   if (verdict?.ok !== false) return null;
-  return String(verdict.problem ?? '').trim().slice(0, 240) || 'the examiner found a problem with the key or the options';
+  return String(verdict.problem ?? '').trim().slice(0, 600) || 'the examiner found a problem with the key or the options';
 }
 
 /**
@@ -605,7 +770,7 @@ async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: Abor
 function weightedOrder<T extends { subtopic: string }>(facts: T[], weights: Record<string, number>): T[] {
   const groups = new Map<string, T[]>();
   for (const f of facts) groups.set(f.subtopic, [...(groups.get(f.subtopic) ?? []), f]);
-  const weighted: [string, number][] = [...groups.keys()].map((k) => [k, Math.max(1, weights[k] ?? 1)]);
+  const weighted: [string, number][] = [...groups.keys()].map((k) => [k, Math.max(0.05, weights[k] ?? 1)]);
   const order = spread(facts.length, weighted);
   const left = new Map([...groups].map(([k, v]) => [k, [...v]] as [string, T[]]));
   const out: T[] = [];
@@ -615,6 +780,22 @@ function weightedOrder<T extends { subtopic: string }>(facts: T[], weights: Reco
   }
   // A subtopic can run out before its share; its leftover facts follow in plan order.
   for (const list of left.values()) out.push(...list);
+  return out;
+}
+
+/**
+ * NEET PG / INI-CET subtopic weights: the PYQ frequency times the split's exam priority. Without the priority every
+ * subtopic counted the same, so a topic split into five overlapping skin-TB subtopics gave skin TB a fifth of the set.
+ * Priority 10 counts 4x a priority-4 subtopic (weight = priority squared / 25), and a subtopic under priority 4 is
+ * weighted down further.
+ */
+export function priorityWeights(plan: { subtopic: string }[], pyq: Record<string, number>, priority?: Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const { subtopic } of plan) {
+    const p = Math.min(10, Math.max(1, Number(priority?.[subtopic]) || 6));
+    const pw = (p * p) / 25 * (p < 4 ? 0.5 : 1);
+    out[subtopic] = Math.max(0.1, (pyq[subtopic] ?? 1) * pw);
+  }
   return out;
 }
 
@@ -657,6 +838,7 @@ const REPAIRABLE_DROPS = new Set([
  'refers-to-missing-picture', 'treatment-drift',
 ]);
 
+
 /** What the writer is told when a question was dropped by the hint check, so the rewrite does not repeat the clue. */
 const HINT_REASONS: Record<string, string> = {
  'hint-stem-words': 'the correct option repeated the words of the stem, which gives the answer away; reword the key so it does not echo the stem',
@@ -671,8 +853,10 @@ async function repairDraft(draft: ClinicalQuestion, problem: string, provider: A
   // The shape keeps the draft's option count: a 4-option template made every 5-option repair fail as 'invalid'.
   const optionShape = draft.options.map((o) => `{"id":"${o.id}","text":""}`).join(',');
   const raw = await aiComplete({
-    system: `You repair one exam MCQ. Fix ONLY the problem named. Keep the same fact, the same correct answer and exactly ${draft.options.length} options. Reply with ONLY JSON: {"stem":"","questionText":"","options":[${optionShape}],"correctOption":"A","explanation":""}.`,
-    messages: [{ role: 'user', content: ['Problem to fix: ' + problem, '', 'Stem: ' + draft.stem, 'Question line: ' + line, draft.options.map((o) => `${o.id}) ${o.text}`).join(String.fromCharCode(10)), 'Correct answer: ' + draft.correctOption + ') ' + answer, 'Explanation: ' + (draft.explanation ?? '')].join(String.fromCharCode(10)) }],
+    system: (draft.examType === 'NEET_PG' || draft.examType === 'INI_CET')
+      ? `You repair one ${draft.examType === 'NEET_PG' ? 'NEET PG' : 'INI-CET'} MCQ. Fix ONLY the problem named. Keep the same fact, the same correct answer and exactly ${draft.options.length} options. ${OPTION_RULES} Keep the explanation's parts (Background, why the key is right, one bullet for every wrong option by its text, High-yield), updating any part your fix changes. Reply with ONLY JSON: {"stem":"","questionText":"","options":[${optionShape}],"correctOption":"A","explanation":"","optionReasons":{${draft.options.map((o) => `"${o.id}":""`).join(',')}}}.`
+      : `You repair one exam MCQ. Fix ONLY the problem named. Keep the same fact, the same correct answer and exactly ${draft.options.length} options. Reply with ONLY JSON: {"stem":"","questionText":"","options":[${optionShape}],"correctOption":"A","explanation":""}.`,
+    messages: [{ role: 'user', content: ['Problem to fix: ' + problem, '', 'Stem: ' + draft.stem, 'Question line: ' + (sameLine(draft) ? '(same as the stem)' : line), draft.options.map((o) => `${o.id}) ${o.text}`).join(String.fromCharCode(10)), 'Correct answer: ' + draft.correctOption + ') ' + answer, 'Explanation: ' + (draft.explanation ?? '')].join(String.fromCharCode(10)) }],
     json: true,
     effort: 'low',
     purpose: 'repair',
@@ -739,26 +923,84 @@ export function logStage(stage: string, ms: number, lane?: string, detail?: Reco
 const NON_EXAM_WORDING = /\b(hypothetical|in a (research|laboratory|hypothetical) (assay|study|experiment|investigation|setting)|research (assay|susceptibility|study|laboratory)|laboratory (study|investigation|experiment) (of|in which|shows|finds|compares)|supplied (chapter|reference|text|passage|evidence)|(team|committee|audit)'s (review|assessment|proposal)|antimicrobial audit|(a |the )?(resident|trainee|pharmacist|registrar|intern|clinician|team) (proposes?|argues?|suggests?|reviews?|requests?|asks)|proposed (rescue|substitution|regimen change|dosing change)|an experimental)\b/i;
 const VET_OR_FRINGE = /\b(veterinary|ferret|equine antiserum|zoo|livestock)\b/i;
 
-function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string; planned?: boolean } | undefined, reason: string): void {
+/** A writer reply that is not a question but an explanation that the sources had nothing on the topic. */
+const NO_SOURCE_REPLY = /\b(no (?:passage|information|text|content)\b[^.]{0,80}\b(?:supplied|provided|given|books?|passages?|sources?)|(?:supplied|provided|given|attached) (?:\w+ )?(?:book )?(?:passages?|texts?|notes|material|sources?) (?:cover|contain|do not|does not|did not|discuss)|passages? (?:do|does) not (?:cover|contain|discuss|mention))/i;
+
+/** What one attempt carries for the rejection log and the rewrite. */
+interface DropCtx {
+  reason?: string;
+  draft?: ClinicalQuestion;
+  dropKey?: string;
+  fact?: string;
+  planned?: boolean;
+  /** Diagnostics: check-specific evidence, the slot, the attempt number and the source used. */
+  detail?: Record<string, unknown>;
+  subtopic?: string;
+  subject?: string;
+  attempt?: number;
+  slot?: Slot;
+  source?: 'books' | 'web';
+}
+
+/**
+ * The evidence behind a rejection, worked out from the draft for the checks that do not set it themselves: the
+ * question line, the key, and per check the matched phrase and field, the shared words, the absolute word or lengths.
+ */
+/** The earlier item a repeat matched, with its similarity, for the rejection log. */
+function closest(list: string[], text: string, label: string): Record<string, unknown> {
+  let best = { sim: 0, item: '' };
+  for (const item of list) { const sim = stemSimilarity(item, text); if (sim > best.sim) best = { sim, item }; }
+  return { [`matched_${label}`]: best.item.slice(0, 300), similarity: Math.round(best.sim * 100) / 100 };
+}
+
+function evidenceFor(reason: string, q: ClinicalQuestion | undefined): Record<string, unknown> {
+  if (!q) return {};
+  const key = q.options?.find((o) => o.id === q.correctOption)?.text ?? '';
+  const out: Record<string, unknown> = { questionLine: (q as { questionText?: string }).questionText, key };
+  const words = (t: string) => (t.toLowerCase().match(/[a-z][a-z-]{5,}/g) || []).filter((w) => !HINT_STOP.has(w));
+  if (/mentions-source/.test(reason)) out.sourcePhrases = sourceLeakWhere(q);
+  if (reason === 'hint-stem-words') { const st = new Set(words(`${q.stem} ${(q as { questionText?: string }).questionText ?? ''}`)); out.sharedWords = [...new Set(words(key))].filter((w) => st.has(w)); }
+  if (reason === 'hint-absolute') out.absoluteWord = key.match(ABSOLUTE_WORDS)?.[0];
+  if (reason === 'hint-length') out.optionLengths = q.options.map((o) => `${o.id}:${o.text.length}`);
+  if (reason === 'similar-options') out.options = q.options.map((o) => o.text);
+  if (reason === 'answer-in-stem') out.stem = q.stem;
+  return out;
+}
+
+function dropQ(ctx: DropCtx | undefined, reason: string): void {
   logStage(`drop:${reason}`, 0);
   if (ctx) ctx.dropKey = reason;
   const d = ctx?.draft;
-  // The planned fact the attempt was written for, so each rejected question can be traced to its fact.
-  const fact = ctx?.fact;
-  // `why` is the reason the rewrite is told (for the examiner, its own sentence), so a drop can be checked later.
-  reportQuestion('dropped', reason, d ? { why: ctx?.reason ?? null, planned: ctx?.planned ?? null, fact, stem: d.stem, questionText: (d as { questionText?: string }).questionText, options: d.options, correctOption: d.correctOption, explanation: d.explanation, subtopic: (d as { subtopic?: string }).subtopic } : (fact ? { fact } : undefined));
+  recordDraft({
+    outcome: 'dropped',
+    reason,
+    // `why` is the reason the rewrite is told (for the examiner, its own sentence).
+    why: ctx?.reason ?? null,
+    detail: { ...evidenceFor(reason, d), ...(ctx?.detail ?? {}) },
+    // The planned fact the attempt was written for, so each rejected question can be traced to its fact.
+    fact: ctx?.fact,
+    planned: ctx?.planned ?? null,
+    subtopic: ctx?.subtopic ?? (d as { subtopic?: string } | undefined)?.subtopic,
+    subject: ctx?.subject,
+    attempt: ctx?.attempt,
+    slot: ctx?.slot ? { style: ctx.slot.style, leadIn: ctx.slot.leadIn, tier: ctx.slot.tier } : undefined,
+    source: ctx?.source,
+    draft: draftOf(d),
+  });
 }
 
 /** Counts a repair on the progress page: attempted (sent), accepted (kept after its checks) or failed (no repair returned). */
-export function reportRepair(outcome: 'attempted' | 'accepted' | 'failed'): void {
-  void outcome;
+export function reportRepair(outcome: 'attempted' | 'accepted' | 'failed' | 'rejected-again', reason?: string): void {
+  // Kept in memory so a run's repairs can be read from the page (globalThis.__repairs) while testing: how many drafts of
+  // each rejection reason were rescued by a repair, and how many failed again.
+  const g = globalThis as { __repairs?: { outcome: string; reason?: string }[] };
+  (g.__repairs ??= []).push({ outcome, reason });
 }
 
 /** Tells the server whether a question was kept, so the progress page counts the same questions the app shows. */
 export function reportQuestion(outcome: 'accepted' | 'dropped', reason?: string, draft?: unknown): void {
-  // Kept in memory so a run's drops can be read from the page (globalThis.__drops) while testing.
-  const g = globalThis as { __drops?: unknown[] };
-  (g.__drops ??= []).push({ outcome, reason, why: (draft as { why?: string } | undefined)?.why ?? null, q: (draft as { stem?: string } | undefined)?.stem?.slice(0, 160) });
+  // Kept in memory so a run's drops can be read from the page (globalThis.__drops); the full record is in __runReport.
+  recordDraft({ outcome, reason, why: (draft as { why?: string } | undefined)?.why ?? null, draft: draft as DropRecord['draft'] });
 }
 
 /** Runs one step and records how long it took. */
@@ -1054,7 +1296,7 @@ async function verifyItem(q: ClinicalQuestion, groundOn: { query: string; subjec
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           // The checker is a stronger model than the writer, so a weak writer cannot approve its own mistakes.
-      body: JSON.stringify({ ...currentRoute(provider), question: q, groundOn }),
+      body: JSON.stringify({ ...currentRoute(provider), question: sameLine(q) ? { ...q, questionText: '' } : q, groundOn }),
           signal,
         });
         if (res.ok) {
@@ -1110,8 +1352,9 @@ export function hintReason(q: ClinicalQuestion): string | null {
 const NO_SHUFFLE = /\b(all|none|both|neither)\b.*\b(above|these|of the)\b|\b(a|b|c|d|e)\s*(and|&|,)\s*(a|b|c|d|e)\b|^\s*(a|b|c|d|e)\s*[,&]|\bonly\s*$|^\s*\d(\s*(,|and|&)\s*\d)+/i;
 
 /** Models over-use B/C for the key. Shuffle so the position is not a tell. */
-export function shuffleOptions(entries: { id: string; text: string }[], correctId: string): { entries: { id: string; text: string }[]; correct: string } {
-  if (entries.length < 3 || entries.some((e) => NO_SHUFFLE.test(e.text))) return { entries, correct: correctId };
+export function shuffleOptions(entries: { id: string; text: string }[], correctId: string): { entries: { id: string; text: string }[]; correct: string; map: Record<string, string> } {
+  const identity = Object.fromEntries(entries.map((e) => [e.id, e.id]));
+  if (entries.length < 3 || entries.some((e) => NO_SHUFFLE.test(e.text))) return { entries, correct: correctId, map: identity };
   const order = entries.map((_, i) => i);
   for (let i = order.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -1122,6 +1365,8 @@ export function shuffleOptions(entries: { id: string; text: string }[], correctI
   return {
     entries: order.map((o, i) => ({ id: ids[i], text: entries[o].text })),
     correct: ids[order.indexOf(origCorrect)],
+    // Old letter → new letter, so letters named in the explanation can follow their options.
+    map: Object.fromEntries(order.map((o, i) => [entries[o].id, ids[i]])),
   };
 }
 
@@ -1156,6 +1401,10 @@ export interface GenerateQuestionsOptions {
   requestedTopic?: string;
   /** Facts planned before writing (fact assignment): one question slot per planned fact. */
   factPlan?: AssignedFact[];
+  /** Exam priority (1-10) of each subtopic from the topic split. NEET PG / INI-CET multiply it into the PYQ weight. */
+  subtopicPriority?: Record<string, number>;
+  /** A speciality run (no typed topic): the specialities chosen. With more than one, no single subject is assumed. */
+  specialities?: string[];
   difficultyTier: DifficultyTier;
   difficultySubLevel?: DifficultySubLevel;
   effort?: string;
@@ -1252,8 +1501,34 @@ function nextId(exam: ExamType): string {
   return `AI-${exam.replace('_', '')}-${Date.now().toString(36)}-${globalSeq}`;
 }
 
+/**
+ * Repairs the shape slips that made writer replies "invalid" (9 in the second live test): options sent as a list of
+ * strings or with lower-case letter keys, and a correct option written as "Option B", "B)" or as the option's own text.
+ */
+export function salvageSpec(raw: Record<string, unknown>): void {
+  // An empty stem with the question in questionText is a one-line question (20 of v3's 21 "invalid" replies).
+  if (!String(raw.stem ?? '').trim() && typeof raw.questionText === 'string' && raw.questionText.trim()) raw.stem = raw.questionText.trim();
+  const opts = raw.options as unknown;
+  if (Array.isArray(opts) && opts.length && opts.every((o) => typeof o === 'string')) {
+    raw.options = Object.fromEntries((opts as string[]).map((t, i) => ['ABCDE'[i], t.replace(/^\s*\(?[A-Ea-e][).:]\s+/, '')]));
+  } else if (opts && typeof opts === 'object' && !Array.isArray(opts)) {
+    const fixed: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(opts as Record<string, unknown>)) fixed[k.trim().toUpperCase().replace(/^OPTION\s*/, '').slice(0, 1)] = v;
+    raw.options = fixed;
+  }
+  const key = String(raw.correctOption ?? '').trim();
+  const letter = key.match(/^(?:option\s*)?\(?([A-Ea-e])\)?(?:[).:]|\s|$)/i)?.[1];
+  if (letter) { raw.correctOption = letter.toUpperCase(); return; }
+  // The key given as the option's text.
+  const entries: [string, string][] = Array.isArray(raw.options)
+    ? (raw.options as { id?: string; text?: string }[]).map((o) => [String(o?.id ?? ''), String(o?.text ?? '')])
+    : Object.entries((raw.options ?? {}) as Record<string, string>).map(([k, v]) => [k, String(v)]);
+  const match = entries.find(([, t]) => t.trim().toLowerCase() === key.toLowerCase());
+  if (match) raw.correctOption = match[0];
+}
+
 /** Validate/repair one raw question from the model; null when it must be dropped. */
-function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtopic: string }[], tier: 'LOW' | 'MEDIUM' | 'HIGH', subLevel: DifficultySubLevel | undefined, requiredOptions: number): ClinicalQuestion | null {
+function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtopic: string }[], tier: 'LOW' | 'MEDIUM' | 'HIGH', subLevel: DifficultySubLevel | undefined, requiredOptions: number, keepOrder = false): ClinicalQuestion | null {
   if (!raw || typeof raw !== 'object') return null;
   const stem = typeof raw.stem === 'string' ? raw.stem.trim() : '';
   if (!stem) return null; // non-empty stem required
@@ -1277,7 +1552,8 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
 
   const keyed = String(raw.correctOption ?? '').trim().toUpperCase();
   if (!entries.some((o) => o.id === keyed)) return null; // correctOption must exist among options
-  const shuffled = shuffleOptions(entries, keyed);
+  // Coded options (combinations, assertion-reason, numbers) keep the writer's order.
+  const shuffled = keepOrder ? { entries, correct: keyed, map: Object.fromEntries(entries.map((e) => [e.id, e.id])) } : shuffleOptions(entries, keyed);
   const correct = shuffled.correct;
 
   const requested = pool[Math.floor(Math.random() * pool.length)];
@@ -1296,7 +1572,7 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
       ? Math.round(raw.targetAccuracy)
       : TIER_ACCURACY[aiTier];
 
-  return {
+  const built: ClinicalQuestion = {
     id: nextId(exam),
     moduleCode: `${exam.replace('_', '-')} · AI Generated Module`,
     examType: exam,
@@ -1326,7 +1602,12 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
     targetAccuracy,
     figureModality: typeof raw.figureModality === 'string' && raw.figureModality.trim() ? raw.figureModality.trim() : undefined,
     figureQuery: typeof raw.figureQuery === 'string' && raw.figureQuery.trim() ? raw.figureQuery.trim() : undefined,
+    optionReasons: parseOptionReasons(raw.optionReasons, entries.map((e) => e.id)),
+    fixedOptionOrder: keepOrder || undefined,
   };
+  // The writer's explanation names letters as it wrote them; after the shuffle they must name the same options.
+  remapLetterMentions(built, (l) => shuffled.map[l] ?? l);
+  return built;
 }
 
 /**
@@ -1335,7 +1616,7 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
  */
 export async function generateExamQuestions(options: GenerateQuestionsOptions): Promise<{ questions: ClinicalQuestion[]; dropped: number; stopped: boolean; failure: string | null; imagesAttached: number }> {
   const {
-    exam, count, subjectSubtopics, requestedTopic, factPlan, difficultyTier, difficultySubLevel, effort,
+    exam, count, subjectSubtopics, requestedTopic, factPlan, subtopicPriority, specialities, difficultyTier, difficultySubLevel, effort,
     onProgress, onBatch, batchPromises, shouldStop, existing, usedUnits: unitsUsed, signal, onRetry,
     questionTypes, stemPatterns, styles: explicitStyles, leadIns: explicitLeadIns, evidenceSources, patientGroup, presentingProblems,
     sourceMaterial, customInstructions, includeImages, booksOnly,
@@ -1350,7 +1631,12 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   let figuresPlanned = 0;
 
   const tier: 'LOW' | 'MEDIUM' | 'HIGH' = difficultyTier === 'ALL' ? 'MEDIUM' : difficultyTier;
-  const pattern = EXAM_PATTERNS[exam];
+  // NEET PG and INI-CET each run their own pipeline (src/lib/pipelines); AMC CAT keeps the original path.
+  const pipe: ExamPipeline | null = pipelineFor(exam);
+  const pattern = pipe ? { name: pipe.name, opts: pipe.optionCount, pat: pipe.pattern } : EXAM_PATTERNS[exam];
+  // "All" difficulty on a subject run: each question gets its own tier from the exam's mix (it used to be MEDIUM for all).
+  const tierSeq: ('LOW' | 'MEDIUM' | 'HIGH')[] = difficultyTier === 'ALL' && pipe ? spread(Math.max(1, count * 4), pipe.tierMix) : [];
+  const tierAt = (i: number): 'LOW' | 'MEDIUM' | 'HIGH' => (tierSeq.length ? tierSeq[i % tierSeq.length] : tier);
   const questions: ClinicalQuestion[] = [];
   let dropped = 0;
 
@@ -1365,12 +1651,21 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const nextLetter = (): string => {
     const min = Math.min(...Object.values(placedLetters));
     const order = ['A', 'B', 'C', 'D'];
+    if (pipe) {
+      // Random among the least-used letters: even counts with no A-B-C-D pattern a candidate could learn.
+      const least = order.filter((l) => placedLetters[l] === min);
+      const letter = least[Math.floor(Math.random() * least.length)];
+      placedLetters[letter] += 1;
+      return letter;
+    }
     for (let i = 0; i < 4; i += 1) {
       const letter = order[(placementTurn + i) % 4];
       if (placedLetters[letter] === min) { placementTurn += 1; placedLetters[letter] += 1; return letter; }
     }
     return 'A';
   };
+  // Letters already used in this module (earlier rounds) count too.
+  if (pipe) for (const prior of existing ?? []) if (prior.correctOption in placedLetters) placedLetters[prior.correctOption] += 1;
   // Key facts of accepted questions: the same fact asked in other words is still a repeat.
   const acceptedKeyFacts: string[] = [];
   // Planned facts already accepted: a planned fact is tested once in a set.
@@ -1390,7 +1685,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     const rawFact = (topic as { assigned?: AssignedFact }).assigned?.fact ?? fallbackFact;
     const key = assignedFactKey(rawFact);
     // Network, verify, over-target and malformed replies say nothing reliable about the planned fact.
-    if (!key || !dropKey || ['verify-error', 'over-target', 'unparsed'].includes(dropKey)) return;
+    if (!key || !dropKey || ['verify-error', 'over-target', 'unparsed', 'source-miss'].includes(dropKey)) return;
     const drops = (factDrops.get(key) ?? 0) + 1;
     factDrops.set(key, drops);
     if (drops >= MAX_DROPS_PER_FACT || (dropKey === 'examiner' && (examinerFactFails.get(key) ?? 0) >= MAX_EXAMINER_FAILS_PER_FACT)) retiredFacts.add(key);
@@ -1404,6 +1699,12 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     return true;
   };
   const isFactRetired = (topic: unknown): boolean => retiredFacts.has(assignedFactKey((topic as { assigned?: AssignedFact }).assigned?.fact));
+  // Units ("subtopic|focus") whose book passages did not cover them: written from internet sources from then on.
+  const bookMisses = new Set<string>();
+  // Times each planned fact failed its source check; two misses retire the fact.
+  const sourceMissFacts = new Map<string, number>();
+  // Key facts kept per subtopic, so a writer sees all the facts its own subtopic already tests.
+  const factsBySubtopic = new Map<string, string[]>();
   // Correct answers kept so far in this set (checked so one answer is not asked twice).
   const acceptedAnswers: string[] = [];
   // The same answers as written, for telling a rewrite which answers are taken (the normalised keys are unreadable).
@@ -1416,6 +1717,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const used = unitsUsed ?? new Set<string>();
   // Questions already kept in this module (from an earlier round): new ones must not repeat them.
   for (const prior of existing ?? []) {
+    if (prior.keyFact && prior.subtopic) factsBySubtopic.set(prior.subtopic, [...(factsBySubtopic.get(prior.subtopic) ?? []), prior.keyFact]);
     seenStems.add(stemKey(prior.stem));
     acceptedStems.push(toBenchItem(prior).stem);
     if (prior.keyFact) acceptedKeyFacts.push(prior.keyFact);
@@ -1448,7 +1750,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         subject: t.subject,
         subtopic: t.subtopic,
         focus: typeof t.focus === 'string' && t.focus.trim() ? t.focus.trim() : undefined,
-        difficultyTier: (t.difficultyTier ?? tier) as 'LOW' | 'MEDIUM' | 'HIGH',
+        difficultyTier: (['LOW', 'MEDIUM', 'HIGH'].includes(t.difficultyTier) ? t.difficultyTier : tierAt(Math.floor(Math.random() * 1e6))) as 'LOW' | 'MEDIUM' | 'HIGH',
       }));
     } catch {
       return null;
@@ -1466,7 +1768,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     ? await fetchPyqWeights([...new Set(factPlan.map((f) => f.subtopic))], exam)
     : {};
   const orderedPlannedFacts = requestedTopic && factPlan?.length
-    ? weightedOrder(factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`)), pyqWeightsForPlan)
+    ? weightedOrder(factPlan.filter((f) => !used.has(`${f.subtopic}|${f.fact}`)), pipe ? priorityWeights(factPlan, pyqWeightsForPlan, subtopicPriority) : pyqWeightsForPlan)
     : [];
   // A duplicated planner fact would otherwise create several slots for one claim and defeat retirement.
   const plannedFactKeys = new Set<string>();
@@ -1478,13 +1780,18 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   });
   // Every planned fact gets a slot: its style (vignette, one-liner, NOT, match, statements, ...), lead-in and difficulty,
   // from the styles the learner picked or, when none, the exam's own mix.
-  const subjectGuess = plannedFacts.length && requestedTopic ? await guessSubject(requestedTopic) : undefined;
+  // A speciality run over several specialities has no single subject: each slot uses its own fact's specialty instead.
+  const subjectGuess = plannedFacts.length && requestedTopic && !((specialities?.length ?? 0) > 1) ? await guessSubject(requestedTopic) : undefined;
   const isPharmacology = /pharmac/i.test(subjectGuess ?? '');
   const slots: Slot[] = plannedFacts.length
-    ? planSlots(plannedFacts.map((f) => ({ fact: f.fact, subtopic: f.subtopic, picturable: f.picturable })), exam, stylesFromChips(questionTypes, explicitStyles), leadInsFromChips(stemPatterns, explicitLeadIns), difficultyTier, subjectGuess)
+    ? planSlots(plannedFacts.map((f) => ({ fact: f.fact, subtopic: f.subtopic, picturable: f.picturable })), exam, stylesFromChips(questionTypes, explicitStyles), leadInsFromChips(stemPatterns, explicitLeadIns), difficultyTier, subjectGuess,
+      pipe ? { styleMix: pipe.styleMix(subjectGuess), leadInMix: pipe.leadInMix, tierMix: pipe.tierMix } : undefined)
     : [];
+  if (pipe && slots.length) {
+    guardCaseSlots(slots, plannedFacts, stylesFromChips(questionTypes, explicitStyles).length > 0, leadInsFromChips(stemPatterns, explicitLeadIns).length > 0);
+  }
   const plannedTopics = plannedFacts.length
-    ? plannedFacts.map((f, i) => ({ subject: subjectOfTopic(f.subtopic) ?? subjectFromPrefix(f.subtopic) ?? requestedTopic ?? '', subtopic: f.subtopic, focus: f.fact, difficultyTier: slots[i].tier, assigned: f, slot: slots[i] }))
+    ? plannedFacts.map((f, i) => ({ subject: (specialities?.length ? subjectSubtopics.find((e) => e.subtopics.includes(f.subtopic))?.subject : undefined) ?? specialtyOf(f.subtopic, f.fact) ?? requestedTopic ?? '', subtopic: f.subtopic, focus: f.fact, difficultyTier: slots[i].tier, assigned: f, slot: slots[i] }))
     : requestedTopic ? null : await planTopics(count);
 
   // Build the subject/subtopic pool as fallback.
@@ -1504,11 +1811,11 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   const topics: PlannedTopic[] = plannedTopics ??
     Array.from({ length: count * 2 }, (_, i) => ({
       ...workingPool[i % workingPool.length],
-      difficultyTier: tier,
+      difficultyTier: tierAt(i),
     }));
 
   // ---------- Step 3: Single-question generation ----------
-  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string, ctx?: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string; planned?: boolean }, slotOverride?: Slot, repaired?: BatchQuestionSpec): Promise<ClinicalQuestion | null> => {
+  const generateSingleQuestion = async (topic: { subject: string; subtopic: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }, attempt: number, focus?: string, shape?: string, ctx?: DropCtx, slotOverride?: Slot, repaired?: BatchQuestionSpec): Promise<ClinicalQuestion | null> => {
     if (ctx) ctx.fact = focus ?? topic.subtopic;
     if (signal?.aborted || shouldStop?.()) { stopped = true; return null; }
 
@@ -1527,7 +1834,16 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
 
     // The server reads the internet on this topic with the request, and the writer checks its key against
     // those sources in the same call, so no separate check runs afterwards.
-    const groundQuery = focus ?? focusParts(topic.subtopic)[0] ?? topic.subtopic;
+    // For a planned book fact the passages are searched with the fact itself, not the subtopic name: the plan found
+    // the fact in the books, so a search on its own words finds the passage the plan used (in the Pharmacology test
+    // 43 of 194 rejections were "source-miss": the writer's passages did not contain the planned fact).
+    const groundQuery = (booksOnly && assigned?.fact ? assigned.fact : null) ?? focus ?? focusParts(topic.subtopic)[0] ?? topic.subtopic;
+    // "My books" first. A unit whose book passages did not cover it (the writer said so, or its own source check failed)
+    // is written from internet sources on the next attempt: the learner's rule is books where possible, the internet
+    // when they fall short. In the Pharmacology report 15 drafts were the writer explaining that no passage was supplied.
+    const unitKey = `${topic.subtopic}|${focus ?? ''}`;
+    const useBooks = Boolean(booksOnly) && !bookMisses.has(unitKey);
+    if (ctx) ctx.source = useBooks ? 'books' : 'web';
     const prompt = [
  `Write ONE exam-standard MCQ for ${pattern.name}.`,
  `Subject: ${topic.subject}`,
@@ -1536,42 +1852,50 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       // is not written again and again.
       focus ? `Focus this item on: ${focus}. Use a different drug, regimen or scenario from the usual textbook example.` : '',
       // A typed topic is what the learner wants to learn: the item must ask about that content, not a downstream decision.
-      sourced ? `Base the correct option on this fact, which source "${sourced.source}" states: "${sourced.fact}". The question must test that fact, and the stem must not give the answer away. Set keyFact to this fact and sourceCheck to "supported".` : '',
+      sourced ? `Base the correct option on this fact, which source "${sourced.source}" states: "${sourced.fact}". The question must test that fact, and the stem must not give the answer away. Set keyFact to this fact and sourceCheck to "supported".${pipe ? ' The fact is the ANSWER, not part of the stem: the stem gives only the findings that lead to it, and never states the fact, the named finding or the answer in other words (no biopsy or X-ray report that already names it). If the fact is a general one (a proportion, the commonest site overall, an alternative name), write a one-line question without a patient.' : ''}` : '',
       (() => { const how = howAskedFor(assigned?.subtopic ?? topic.subtopic); return how ? `How the exam asks this topic (from the PYQ research): ${how} Follow that pattern.` : ''; })(),
       requestedTopic && slot
         ? `The learner asked for exactly: "${requestedTopic}". The item must test that content itself (the named effect, feature, drug or fact) in the style given below. The stem must give real context (a subject, a setting or a finding), never a topic label, and must not name or hint at the answer. Never refer to a picture, list or table that the stem does not contain ("this biopsy", "shown here") unless the style is image-based and the stem says what the picture shows. The options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis.`
-        : requestedTopic ? `The learner asked for exactly: "${requestedTopic}". Each item must test that content itself (the named effect, feature, drug or fact). Test mechanism only if the request asks for it, and do not test a workup, diagnosis or management step that follows from it. Keep the stem short and direct; a brief case is fine only when the answer is that fact. The stem must give real context (a patient, a setting or a finding), never a topic label, and must not name or hint at the answer. Stay inside the request: do not write treatment, management or investigation items unless the request names them. Use a patient case in at most one item in three; the other items are one-line questions about the fact. Never use a generic lead-in such as "the most likely diagnosis" or "the most appropriate investigation" without naming the condition or the finding it is about. The four options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis; otherwise ask for a supporting or most likely finding.` : '',
+        : requestedTopic ? `The learner asked for exactly: "${requestedTopic}". Each item must test that content itself (the named effect, feature, drug or fact). Test mechanism only if the request asks for it, and do not test a workup, diagnosis or management step that follows from it. Keep the stem short and direct; a brief case is fine only when the answer is that fact. The stem must give real context (a patient, a setting or a finding), never a topic label, and must not name or hint at the answer. ${pipe && topicAllowsTreatment(requestedTopic) ? 'Treatment, drugs (with their adverse effects) and national programme regimens are part of this topic and may be tested.' : 'Stay inside the request: do not write treatment, management or investigation items unless the request names them.'} Use a patient case in at most one item in three; the other items are one-line questions about the fact. Never use a generic lead-in such as "the most likely diagnosis" or "the most appropriate investigation" without naming the condition or the finding it is about. The four options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis; otherwise ask for a supporting or most likely finding.` : '',
       requestedTopic && acceptedStems.length ? `Already in this set, so do not reuse these patients, scenarios or drugs: ${acceptedStems.slice(-25).map((s) => s.slice(0, 110)).join(' | ')}` : '',
       // Told up front, the writer picks a different answer instead of being rejected for a repeat afterwards (picture
       // facts otherwise all become "the most likely diagnosis", with the same answer again and again).
       requestedTopic && acceptedAnswerTexts.length ? `These are already correct answers in this set, so your correct option must be something else; if the fact's condition is among them, ask about the fact's feature, test or finding instead of the diagnosis: ${[...new Set(acceptedAnswerTexts.map((t) => t.slice(0, 50)))].slice(-40).join('; ')}` : '',
       requestedTopic ? 'Put the question only in questionText. The stem ends with the last finding, never with a question.' : '',
       (isPharmacology || /pharmac/i.test(topic.subject)) ? 'This is a pharmacology item. The correct answer must be a drug, drug class, mechanism of action, pharmacokinetic fact, adverse effect, interaction, dose, resistance mechanism or antidote. Never ask for a disease diagnosis, the causative organism, a laboratory or pathological diagnosis, or a syndrome name; the patient is only the setting for the drug question.' : '',
-      requestedTopic && slot && !/treat|manag|therap|drug|dose|regimen|rescue|prevent/i.test(requestedTopic) && !(slot.leadIn && ['next-step', 'drug-of-choice', 'treatment-of-choice', 'advice'].includes(slot.leadIn))
+      requestedTopic && slot && !(pipe ? topicAllowsTreatment(requestedTopic) : /treat|manag|therap|drug|dose|regimen|rescue|prevent/i.test(requestedTopic)) && !(slot.leadIn && ['next-step', 'drug-of-choice', 'treatment-of-choice', 'advice'].includes(slot.leadIn))
         ? 'The request does not ask about treatment, so the question line must not ask for a treatment, regimen, drug of choice or management step; ask for the diagnosis, finding, organism, stain, test or feature instead.'
         : '',
+      // Every fact already tested in this subtopic, in full: the Pharmacology report showed the writer returning to the
+      // same classic facts (TB regimen 15 times) because it only saw the last 12 facts of the whole set, cut short.
+      factsBySubtopic.get(topic.subtopic)?.length ? `Facts already tested in this subtopic (all of them; test a different one): ${factsBySubtopic.get(topic.subtopic)!.map((f) => f.slice(0, 200)).join(' | ')}` : '',
       requestedTopic && acceptedKeyFacts.length ? `Key facts already tested in this set. Do not test any of them again, not even in other words: ${acceptedKeyFacts.slice(-20).map((f) => f.slice(0, 120)).join(' | ')}` : '',
       shape ?? '',
       slot && STYLES[slot.style].codedOptions ? '' : `Make the ${pattern.opts} options similar in length and detail. The correct option must not be the longest or the most detailed.`,
- `Difficulty: ${topic.difficultyTier}. ${slot ? tierText(slot.style, topic.difficultyTier) : TIER_BEHAVIOUR[topic.difficultyTier]}`,
-      slot ? `${EXAM_RULES[exam]} ${COMMON_STYLE_RULES}` : pattern.pat,
+      pipe
+        ? `Difficulty: ${topic.difficultyTier}. ${pipe.tierText(slot?.style, topic.difficultyTier)}`
+        : `Difficulty: ${topic.difficultyTier}. ${slot ? tierText(slot.style, topic.difficultyTier) : TIER_BEHAVIOUR[topic.difficultyTier]}`,
+      pipe
+        ? `${slot ? pipe.rules : pipe.pattern} Never cite a guideline, survey, study or source that the case does not give. ${OPTION_RULES} ${EXPLANATION_RULES}`
+        : slot ? `${EXAM_RULES[exam]} ${COMMON_STYLE_RULES}` : pattern.pat,
       !slot && questionTypes?.length ? `Question type focus: ${questionTypes.join('; ')}.` : '',
       !slot && stemPatterns?.length ? `Stem pattern: ${stemPatterns.join('; ')}.` : '',
       evidenceSources?.length ? `Ground answers in: ${evidenceSources.join('; ')}.` : '',
       patientGroup ? `Patient group: ${patientGroup}.` : '',
       presentingProblems?.length ? `Presenting problems: ${presentingProblems.join('; ')}.` : '',
       sourceMaterial ? `Base on these notes: """${sourceMaterial.slice(0, 6000)}""".` : '',
-      booksOnly
-        ? 'The learner\'s own book passages are attached after this request and are your ONLY source. Base the correct option and keyFact on them, not on outside knowledge, and name the book and chapter in citations. Set "sourceCheck" to "supported" only if a passage directly states the keyed fact; otherwise set it to "not supported". Do not copy their wording.'
+      useBooks
+        ? 'The learner\'s own book passages are attached after this request and are your ONLY source. Base the correct option and keyFact on them, not on outside knowledge, and name the book and chapter in citations. Set "sourceCheck" to "supported" only if a passage directly states the keyed fact; otherwise set it to "not supported". Do not copy their wording.' + (assigned?.quote ? ` The plan found this fact in "${assigned.source}" with these exact words, which count as one of your passages: """${assigned.quote.slice(0, 600)}"""` : '')
         : 'Internet sources on this topic are attached after this request. Base the correct option on them where they apply, state the fact in keyFact, and do not copy their wording. Set "sourceCheck" to "supported" only if one of those sources directly backs the keyed option; otherwise set it to "not supported" and change the item to a fact that they do back. sourceCheck concerns only the keyed option and keyFact: patient details in a vignette and the reasons given for the wrong options may use standard textbook knowledge.',
       slot && slot.style !== 'image'
         ? 'This item is not image-based: set "figureModality" and "figureQuery" to empty strings, and never refer to a picture.'
         : includeImages
         ? 'If this item is image-based (about one in five items must be), describe the finding in the stem AND set "figureModality" and "figureQuery" so a real picture can be fetched: "figureModality" is one of ECG | X-ray | CT | MRI | ultrasound | histology | fundus | clinical photo, and "figureQuery" is a 3-6 word English search phrase naming the diagnosis + modality (e.g. "atrial fibrillation ECG", "lobar pneumonia chest X-ray", "membranous nephropathy histology"). For items that are NOT image-based, set both to an empty string — never invent a picture.'
         : '',
- `JSON shape — return exactly one object: { "examType": "${exam}", "subject": "${topic.subject}", "subtopic": "${topic.subtopic}", "cognitiveTier": "Direct Recall | Clinical 2-Step | Multi-Step & IBQ", "difficultyTier": "${topic.difficultyTier}", "stem": "...", "questionText": "...", "options": {${'ABCDE'.slice(0, pattern.opts).split('').map(k => `"${k}": "text"`).join(', ')}}, "correctOption": "A|B|C|D|E", "explanation": "...", "keyFact": "one sentence: the textbook or guideline fact that makes the correct option right, stated so a student could look it up", "boardPearl": "...", "citations": [...], "trapType": "...", "trapExplanation": "...", "targetAccuracy": 0-100, "sourceCheck": "supported|not supported"${includeImages ? ', "figureModality": "", "figureQuery": ""' : ''} }`,
+      pipe ? jsonShape(exam, topic.subject, topic.subtopic, topic.difficultyTier, pipe.optionCount, Boolean(includeImages)) : `JSON shape — return exactly one object: { "examType": "${exam}", "subject": "${topic.subject}", "subtopic": "${topic.subtopic}", "cognitiveTier": "Direct Recall | Clinical 2-Step | Multi-Step & IBQ", "difficultyTier": "${topic.difficultyTier}", "stem": "...", "questionText": "...", "options": {${'ABCDE'.slice(0, pattern.opts).split('').map(k => `"${k}": "text"`).join(', ')}}, "correctOption": "A|B|C|D|E", "explanation": "...", "keyFact": "one sentence: the textbook or guideline fact that makes the correct option right, stated so a student could look it up", "boardPearl": "...", "citations": [...], "trapType": "...", "trapExplanation": "...", "targetAccuracy": 0-100, "sourceCheck": "supported|not supported"${includeImages ? ', "figureModality": "", "figureQuery": ""' : ''} }`,
       learnerProfile ? `Learner instructions: """${learnerProfile}"""` : '',
- 'Output ONLY the JSON object.',
+      pipe ? pipe.selfCheck : '',
+      'Output ONLY the JSON object.',
     ].join('\n');
 
     // Several copies of the same request run at once. The first copy that passes every check is kept, and the others are stopped.
@@ -1596,16 +1920,51 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           // The thinking pass writes the item and checks its key against the internet sources in one call.
           // Paid providers reason less: the sources are already in the request, so long reasoning mostly adds cost.
           effort: 'low',
-          groundOn: { query: groundQuery, subject: topic.subject, books: booksOnly || undefined },
+          groundOn: { query: groundQuery, subject: topic.subject, books: useBooks || undefined },
           signal,
         });
         const parsed = extractJson<BatchQuestionSpec>(raw);
-        if (!parsed) { if (ctx) ctx.reason = 'the reply was not one valid JSON object in the shape given; return only that object'; dropQ(ctx, 'unparsed'); return null; }
+        if (!parsed) { if (ctx) { ctx.reason = 'the reply was not one valid JSON object in the shape given; return only that object'; ctx.detail = { chars: raw.length, raw: raw.slice(0, 2000) }; } dropQ(ctx, 'unparsed'); return null; }
+        // The writer had no usable passage: it says so in the stem, or marks its own source check as not supported.
+        {
+          const said = `${String((parsed as { stem?: unknown }).stem ?? '')} ${String((parsed as { questionText?: unknown }).questionText ?? '')}`;
+          const refusal = NO_SOURCE_REPLY.test(said);
+          const notSupported = String(parsed.sourceCheck ?? '').trim().toLowerCase() === 'not supported';
+          if (pipe && (refusal || (useBooks && notSupported))) {
+            if (useBooks) bookMisses.add(unitKey);
+            // A planned fact whose source check fails twice is retired: the passages do not back it, and a third try only repeats the miss.
+            { const mk = assignedFactKey(assigned?.fact); if (mk) { const n = (sourceMissFacts.get(mk) ?? 0) + 1; sourceMissFacts.set(mk, n); if (n >= 2) retiredFacts.add(mk); } }
+            if (ctx) {
+              ctx.reason = useBooks ? 'the book passages did not cover this point; the next attempt uses internet sources' : 'no source covered this point; test a fact the sources state plainly';
+              ctx.detail = { sourceCheck: parsed.sourceCheck ?? null, writerSaid: said.slice(0, 400), source: useBooks ? 'books' : 'web' };
+            }
+            dropQ(ctx, 'source-miss');
+            return null;
+          }
+        }
         if (!booksOnly && String(parsed.sourceCheck ?? '').trim().toLowerCase() === 'not supported') { if (ctx) ctx.reason = 'your own source check found the key not supported by the sources; test a fact the sources state plainly'; dropQ(ctx, 'unsupported'); return null; }
 
-        const q = buildQuestion(parsed, exam, [{ subject: topic.subject, subtopic: topic.subtopic }], topic.difficultyTier, difficultySubLevel, pattern.opts);
-        if (!q) { if (ctx) ctx.reason = `the item had the wrong shape: give exactly ${pattern.opts} non-empty options with ids ${'ABCDE'.slice(0, pattern.opts).split('').join(', ')}, and a correctOption that is one of them`; dropQ(ctx, 'invalid'); return null; }
+        // NEET PG / INI-CET: common shape slips are repaired in code before the shape check (options as a list of strings,
+        // lower-case letters, a correctOption written as "Option B" or as the option's text).
+        if (pipe) salvageSpec(parsed as unknown as Record<string, unknown>);
+        const q = buildQuestion(parsed, exam, [{ subject: topic.subject, subtopic: topic.subtopic }], topic.difficultyTier, difficultySubLevel, pattern.opts, Boolean(slot && STYLES[slot.style].codedOptions));
+        if (!q) {
+          if (ctx) ctx.reason = `the item had the wrong shape: give exactly ${pattern.opts} non-empty options with ids ${'ABCDE'.slice(0, pattern.opts).split('').join(', ')}, and a correctOption that is one of them`;
+          // What the reply looked like, so an "invalid" rejection can be diagnosed (globalThis.__invalid in the page console).
+          const g = globalThis as { __invalid?: unknown[] };
+          (g.__invalid ??= []).push({ chars: raw.length, start: raw.slice(0, 300), optionCount: Object.keys(((parsed as unknown as { options?: object }).options) ?? {}).length, correctOption: (parsed as unknown as { correctOption?: unknown }).correctOption });
+          if (ctx) ctx.detail = { chars: raw.length, raw: raw.slice(0, 2000) };
+          dropQ(ctx, 'invalid');
+          return null;
+        }
         if (ctx) ctx.draft = q;
+        // Exam pipeline clean-ups first: a question sitting at the end of the stem, a reasoning tail on an option, a
+        // lower-case NOT. These are fixed here, so they no longer cost a rejection and a full rewrite.
+        if (pipe) { pipe.normalize(q); scrubSourceMentions(q); }
+        // NEET PG / INI-CET one-line styles may be a single question sentence ("In laryngeal tuberculosis, which part is
+        // most often involved?"). The runner shows such a stem once, so it is not a repeated or generic question line.
+        const oneLineQuestion = Boolean(pipe && slot && ['one-liner', 'negative', 'mechanism'].includes(slot.style)) && /\?\s*$/.test((q.stem ?? '').trim()) && !/[.!]\s+\S/.test((q.stem ?? '').trim());
+        if (oneLineQuestion) (q as { questionText?: string }).questionText = (q.stem ?? '').trim();
         // The writer often repeats the question at the end of the stem as well as in the question line. That is a
         // formatting slip, not a bad item: the trailing question is cut from the stem when a question line exists.
         {
@@ -1636,15 +1995,38 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const GENERIC_CASE_WORDS = new Set(['presents', 'presented', 'patient', 'history', 'years', 'after', 'develops', 'developed', 'complains', 'examination', 'shows', 'culture', 'grows', 'infection', 'treatment', 'therapy', 'antibiotic', 'antibiotics', 'following', 'symptoms', 'fever', 'pained', 'chronic', 'acute', 'known', 'receives', 'received', 'admitted', 'brought', 'department', 'emergency', 'hospital', 'intensive', 'current', 'several', 'weeks', 'months', 'before', 'during', 'there', 'which', 'their', 'being', 'having', 'started', 'despite']);
         const caseWords = (text: string): Set<string> => new Set(text.toLowerCase().replace(/[^a-z\s-]/g, ' ').split(/\s+/).filter((w) => w.length >= 6 && !GENERIC_CASE_WORDS.has(w)));
         const myWords = caseWords(q.stem ?? '');
-        const sharesCondition = (other: string): boolean => { let n = 0; for (const w of caseWords(other)) if (myWords.has(w)) n += 1; return n >= 2; };
-        const repeatedPatient = requestedTopic && myPatient !== '' && acceptedStems.some((s) => patientOf(s) === myPatient && sharesCondition(s));
+        // NEET PG / INI-CET: words of the topic itself ("tuberculosis", "pulmonary" in a TB set) are shared by every case of
+        // the set, so they do not make two cases the same. The scenario must overlap on three other words.
+        const topicStems = pipe ? new Set(`${requestedTopic ?? ''} ${topic.subtopic}`.toLowerCase().split(/[^a-z]+/).filter((w) => w.length >= 5).map((w) => w.slice(0, 6))) : null;
+        const sharesCondition = (other: string): boolean => {
+          let n = 0;
+          for (const w of caseWords(other)) if (myWords.has(w) && !(topicStems && topicStems.has(w.slice(0, 6)))) n += 1;
+          return n >= (pipe ? 3 : 2);
+        };
+        let repeatedPatient = requestedTopic && myPatient !== '' && acceptedStems.some((s) => patientOf(s) === myPatient && sharesCondition(s));
+        // NEET PG / INI-CET: an adult patient who repeats an earlier one gets a nearby unused age in code (same sex, within
+        // seven years), instead of a rejection and a rewrite. Children, pregnancy and the elderly are left alone.
+        if (repeatedPatient && pipe) {
+          const m = (q.stem ?? '').match(/\b(\d{1,3})([- ]year[- ]old\s+)(man|woman|male|female)\b/i);
+          const age = m ? Number(m[1]) : 0;
+          if (m && age >= 18 && age <= 75 && !/pregnan|gestation|antenatal/i.test(q.stem ?? '')) {
+            const taken = new Set(acceptedStems.map(patientOf));
+            const sex = m[3].toLowerCase();
+            const free = [1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7].map((d) => age + d).find((a) => a >= 18 && a <= 78 && !taken.has(`${a}-year-old ${sex}`) && !taken.has(`${a} year old ${sex}`));
+            if (free) {
+              q.stem = (q.stem ?? '').replace(m[0], `${free}${m[2]}${m[3]}`);
+              repeatedPatient = false;
+            }
+          }
+        }
         // Patient stems are capped at half the set, so the set is not mostly vignettes. A stricter cap made most attempts fail.
         const isCase = requestedTopic && /\b\d{1,3}[- ](?:year|month)s?[- ]old\b/i.test(q.stem ?? '');
         const casesSoFar = acceptedStems.filter((s) => /\b\d{1,3}[- ](?:year|month)s?[- ]old\b/i.test(s)).length;
         // The cap starts once 8 items are kept; from the first item it stalled sets on topics the verifier finds harder.
         const tooManyCases = Boolean(isCase) && acceptedStems.length >= 8 && casesSoFar >= Math.ceil(0.6 * (acceptedStems.length + 1));
         // A typed topic that does not name treatment gets no treatment or management items (hard filter, not a prompt hint).
-        const topicNamesTreatment = /treat|manag|therap|drug|dose|regimen|rescue|prevent/i.test(requestedTopic ?? '');
+        // NEET PG / INI-CET: a disease topic includes its drugs, adverse effects and programme regimens (see topicAllowsTreatment).
+        const topicNamesTreatment = pipe ? topicAllowsTreatment(requestedTopic ?? '') : /treat|manag|therap|drug|dose|regimen|rescue|prevent/i.test(requestedTopic ?? '');
         // Only clear treatment phrases count; words like "therapy" or "dose" also appear in side-effect questions.
         // Only what the question asks counts: case history ("no response to antibiotics", "on first-line therapy") and
         // laboratory questions ("antibiotic sensitivity testing") are not treatment items.
@@ -1656,7 +2038,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // A question must stand on its own stem: it cannot point to a list or item the stem does not give.
         const dependsOnOutside = /\b(that|those|this|these) (list|group|set|pattern|eruption|statement)s?\b|\blisted\b|\bon that\b|\bthat list\b|\bthat statement\b/i.test(`${q.stem ?? ''} ${qLine}`) && !/\b(list|statement|pattern)\b/i.test(q.stem ?? '');
         // A stem that is itself a question (ends with "?") is not a stem: it gives no case or context.
-        const stemIsQuestion = Boolean(requestedTopic) && /\?\s*$/.test((q.stem ?? '').trim());
+        const stemIsQuestion = Boolean(requestedTopic) && !oneLineQuestion && /\?\s*$/.test((q.stem ?? '').trim());
         // Styles with a fixed question line ("Choose the correct combination.", "Which statements are correct?") are short by design.
         const shortLineOk = Boolean(slot);
         const codedOptions = Boolean(slot) && STYLES[slot!.style].codedOptions;
@@ -1664,7 +2046,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const managesByDesign = Boolean(slot?.leadIn) && ['next-step', 'drug-of-choice', 'treatment-of-choice', 'advice'].includes(slot!.leadIn!);
         const genericLeadIn = Boolean(requestedTopic) && (stemIsQuestion || (!shortLineOk && qLine.length < 40) || /^(choose|select) the (single )?best answer/i.test(qLine) && !shortLineOk || (/^which of the following is the most likely diagnosis\??$/i.test(qLine) && slot?.leadIn !== 'diagnosis' && slot?.style !== 'image') || dependsOnOutside);
         // With a planned style mix the slots decide how many cases there are, so the case cap is off.
-        const shape = structureReason(q) ?? (combinationListMissing(q) ? 'combination-list-missing' : null) ?? (inventedSource(q) ? 'invented-source' : null) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions && !codedOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases && !slot ? 'too-many-cases' : null) ?? (driftsIntoTreatment && !managesByDesign ? 'treatment-drift' : null);
+        const structural = structureReason(q);
+        const shape = (structural === 'stem-repeats-question' && oneLineQuestion ? null : structural) ?? (combinationListMissing(q) ? 'combination-list-missing' : null) ?? (inventedSource(q) ? 'invented-source' : null) ?? (genericLeadIn ? 'generic-lead-in' : null) ?? (thinStem ? 'stem-thin' : null) ?? (twinOptions && !codedOptions ? 'similar-options' : null) ?? (repeatedPatient ? 'repeat-patient' : null) ?? (tooManyCases && !slot ? 'too-many-cases' : null) ?? (driftsIntoTreatment && !managesByDesign ? 'treatment-drift' : null);
         const SHAPE_HINTS: Record<string, string> = {
  'generic-lead-in': 'the question line must name the fact or finding it asks about; do not end the stem with a question mark',
  'invented-source': 'do not cite a guideline, survey, study or shortage; describe the case itself, with no source the stem does not give',
@@ -1678,8 +2061,54 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
  'missing-statements': 'list the numbered statements inside the stem',
         };
         if (shape) { if (ctx) ctx.reason = SHAPE_HINTS[shape] ?? shape; dropQ(ctx, `${shape}`); return null; }
+        // The exam's own rules (NEET PG: single best answer only; both: no "all of the above"), then plain-label options.
+        if (pipe && !codedOptions) {
+          const examIssue = pipe.validate(q);
+          if (examIssue) { if (ctx) ctx.reason = examIssue; dropQ(ctx, examIssue.split(':')[0]); return null; }
+          const optionIssue = optionReasoningProblem(q);
+          if (optionIssue) { if (ctx) ctx.reason = optionIssue; dropQ(ctx, 'option-reasoning'); return null; }
+          // Defects found in a real 100-question run that the older checks let through.
+          if (answerInStem(q)) { if (ctx) ctx.reason = 'the stem or question line names the correct answer; describe the findings without naming or paraphrasing the answer'; dropQ(ctx, 'answer-in-stem'); return null; }
+          if (decorativeCase(q)) { if (ctx) ctx.reason = 'the patient case is not used by the question (it asks a general fact such as a proportion or the commonest site overall); either ask about THIS patient so the findings are needed, or drop the case and write a one-line question'; dropQ(ctx, 'decorative-case'); return null; }
+          if (oppositeOptions(q)) { if (ctx) ctx.reason = 'two options are exact opposites of each other, which gives the answer away; replace one of them with a different, plausible option'; dropQ(ctx, 'opposite-options'); return null; }
+        }
+        // A key that matches one source's wording but not the standard textbook answer ("the stated criterion").
+        if (pipe && !useBooks && sourceBoundExplanation(q)) {
+          if (ctx) ctx.reason = 'the key followed the wording of one source ("the stated criterion") instead of the standard textbook answer; use the answer standard Indian textbooks give';
+          dropQ(ctx, 'source-bound-key');
+          return null;
+        }
         // The style asked for must really be delivered (match lists, numbered statements, numbers, lead-in, and so on).
-        const styleIssue = styleProblem(q, slot, pattern.opts, true);
+        let styleIssue = styleProblem(q, slot, pattern.opts, true);
+        // NEET PG / INI-CET: the planned lead-in (diagnosis, next step, ...) is a target for the set's mix, not a reason to
+        // reject, unless the learner chose the lead-in. A different but real question line is accepted (26 rejections and
+        // 25 repair calls in v3). A generic or empty question line is still caught by the generic-lead-in check.
+        if (styleIssue && pipe && slot?.leadIn && !leadInExplicit && styleIssue.startsWith('wrong-lead-in')) {
+          styleIssue = styleProblem(q, { ...slot, leadIn: undefined }, pattern.opts, true);
+        }
+        // NEET PG / INI-CET: a draft that missed its slot's shape but is a sound question of a neighbouring shape is kept
+        // as that shape instead of being rejected (one-liner slots that came back as full cases: 9 rejections; picture
+        // slots that came back as plain cases: 5).
+        if (styleIssue && pipe && slot && !styleExplicit) {
+          const key = styleIssue.split(':')[0];
+          const asCase = { ...slot, style: 'vignette' as StyleId, leadIn: undefined };
+          if ((key === 'one-liner-has-patient' || key === 'no-picture-description') && !STYLES.vignette.validate(q, asCase) && !pointsAtMissingPicture(q) && !decorativeCase(q)) styleIssue = null;
+          // "A patient with laryngeal tuberculosis has ..." with no age is a normal exam one-liner.
+          else if (key === 'one-liner-has-patient' && !/\b\d{1,3}[- ](?:year|month|week|day)s?[- ]old\b/i.test(q.stem ?? '') && !styleProblem(q, { ...slot, style: 'short-case' as StyleId, leadIn: undefined }, pattern.opts, true)) styleIssue = null;
+          // Meta-text only in the explanation: the explanation is rewritten (one cheap call), not the whole question.
+          else if (key === 'meta-text' && !/\b(the|this) (stem|question|lead-in|vignette) (asks|states|describes|gives|provides|tells|mentions)\b/i.test(q.stem ?? '')) {
+            await repairExplanation(q, signal);
+            styleIssue = styleProblem(q, slot, pattern.opts, true);
+          }
+          // "The passage" / "the provided notes" only in the explanation (most of v3's 19 mentions-source rejections):
+          // the explanation is rewritten, not the question.
+          else if (key === 'mentions-source' && !/^mentions-source/.test(styleProblem({ ...q, explanation: '', optionReasons: undefined } as ClinicalQuestion, slot, pattern.opts, true) ?? '')) {
+            await repairExplanation(q, signal);
+            styleIssue = styleProblem(q, slot, pattern.opts, true);
+          }
+          // A case slot that came back as a clean one-line question is kept as a one-liner (8 not-a-vignette rejections in v3).
+          else if ((key === 'not-a-vignette' || key === 'not-a-case') && !styleProblem(q, { ...slot, style: 'one-liner' as StyleId, leadIn: undefined }, pattern.opts, true)) styleIssue = null;
+        }
         if (styleIssue) { if (ctx) ctx.reason = styleIssue; dropQ(ctx, `style-${styleIssue.split(':')[0]}`); return null; }
         const hint = hintReason(q);
         if (hint) { if (ctx) ctx.reason = HINT_REASONS[hint] ?? hint; dropQ(ctx, `${hint}`); return null; }
@@ -1693,13 +2122,15 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const key = stemKey(q.stem);
         if (seenStems.has(key)) { claimed = false; if (ctx) ctx.reason = 'this exact stem is already in the set; write a different case or context'; dropQ(ctx, 'repeat-stem'); return null; }
         const fullStem = toBenchItem(q).stem;
-        if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) { claimed = false; if (ctx) ctx.reason = 'the scenario is nearly the same as one already in the set; use a different patient, setting and wording'; dropQ(ctx, 'similar-stem'); return null; }
+        if (acceptedStems.some((s) => stemSimilarity(s, fullStem) >= DUPLICATE_SIMILARITY)) {
+          if (ctx) ctx.detail = closest(acceptedStems, fullStem, 'stem'); claimed = false; if (ctx) ctx.reason = 'the scenario is nearly the same as one already in the set; use a different patient, setting and wording'; dropQ(ctx, 'similar-stem'); return null; }
         // The same key fact asked in other words (same drug, same finding) is a repeat, even when the stem differs.
         // Without a written key fact, the correct option's text stands in, so repeats are still caught.
         // A planned slot keeps its planned fact as the key fact. The planner already kept those facts distinct.
         const keyFact = sourced ? sourced.fact : ((q.keyFact || '').trim() || (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim());
         if (assigned && acceptedPlannedFacts.has(assignedFactKey(assigned.fact))) { dropQ(ctx, 'repeat-planned-fact'); return null; }
-        if (!sourced && keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) { claimed = false; if (ctx) ctx.reason = `the set already tests this fact. Test a different fact of the topic. Facts already used: ${usedList(acceptedKeyFacts)}`; dropQ(ctx, 'repeat-fact'); return null; }
+        if (!sourced && keyFact && acceptedKeyFacts.some((k) => stemSimilarity(k, keyFact) >= KEY_FACT_SIMILARITY)) {
+          if (ctx) ctx.detail = { keyFact, ...closest(acceptedKeyFacts, keyFact, 'fact') }; claimed = false; if (ctx) ctx.reason = `the set already tests this fact. Test a different fact of the topic. Facts already used${factsBySubtopic.get(topic.subtopic)?.length ? ' in this subtopic (all of them)' : ''}: ${factsBySubtopic.get(topic.subtopic)?.length ? factsBySubtopic.get(topic.subtopic)!.map((f) => `"${f.slice(0, 160)}"`).join('; ') : usedList(acceptedKeyFacts)}`; dropQ(ctx, 'repeat-fact'); return null; }
         // The same correct answer asked again in other words (for example the same imaging test) is also a repeat.
         // Abbreviations and generic words are normalised first, so "CT" and "computed tomography", or "serum lipase level"
         // and "lipase assay", count as the same answer.
@@ -1709,9 +2140,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           .replace(/\s+/g, ' ').trim();
         const correctText = (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim();
         const correctKey = answerKey(correctText);
-        if (correctKey && requestedTopic && !codedOptions && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { claimed = false; if (ctx) ctx.reason = `the correct answer "${correctText.slice(0, 80)}" is already the answer of another question in the set; pick a fact with a different answer. Answers already used: ${usedList(acceptedAnswerTexts)}`; dropQ(ctx, 'repeat-answer'); return null; }
+        if (correctKey && requestedTopic && !codedOptions && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) {
+          if (ctx) ctx.detail = { answer: correctText, ...closest(acceptedAnswerTexts, correctText, 'answer') }; claimed = false; if (ctx) ctx.reason = `the correct answer "${correctText.slice(0, 80)}" is already the answer of another question in the set; pick a fact with a different answer. Answers already used: ${usedList(acceptedAnswerTexts)}`; dropQ(ctx, 'repeat-answer'); return null; }
         // The learner's books are the source of truth, so a book question is not re-checked against other sources.
-        const verdict = booksOnly ? 'supported' : await verifyItem(q, { query: groundQuery, subject: topic.subject, books: booksOnly || undefined }, signal);
+        const verdict = useBooks ? 'supported' : await verifyItem(q, { query: groundQuery, subject: topic.subject, books: undefined }, signal);
         if (verdict !== 'supported') {
           claimed = false;
           if (verdict === 'error') {
@@ -1743,7 +2175,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           dropQ(ctx, 'not-pharmacology');
           return null;
         }
-        const examinerProblem = requestedTopic ? await examinerRejects(q, requestedTopic, signal, booksOnly) : null;
+        // NEET PG and INI-CET runs are examined whether or not the learner typed a topic.
+        const examinerProblem = requestedTopic || pipe ? await examinerRejects(q, requestedTopic ?? topic.subtopic, signal, useBooks, pipe) : null;
         if (examinerProblem) {
           // The examiner's own words go to the rewrite and to the drop file, so a rewrite fixes that problem.
           if (ctx) ctx.reason = `the examiner rejected it: ${examinerProblem}`;
@@ -1755,10 +2188,13 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           return null;
         }
         // The explanation must say why the key is right and why the others are wrong; if it does not, it is rewritten.
-        if (requestedTopic && ((slot?.style !== 'calculation' && !explainsDistractors(q)) || explanationLeaks(q))) await repairExplanation(q, signal);
+        // NEET PG / INI-CET: background + every wrong option explained, on every run. A short or partial explanation is
+        // rewritten (the question itself is kept), so it never costs a rejection.
+        if (pipe ? ((slot?.style !== 'calculation' && !explainsDistractors(q)) || explanationLeaks(q) || explanationThin(q))
+          : requestedTopic && ((slot?.style !== 'calculation' && !explainsDistractors(q)) || explanationLeaks(q))) await repairExplanation(q, signal);
         // The correct letters rotate through A-D over the accepted questions, so no letter dominates the set.
         // Coded options (combinations, numbers, assertion-reason) keep their order.
-        if (requestedTopic && !codedOptions) placeCorrectAt(q, nextLetter());
+        if ((requestedTopic || pipe) && !codedOptions && !(pipe && hasFixedOptionOrder(q))) placeCorrectAt(q, nextLetter());
 
         // Pictures. An image-style slot always asks for one; other slots only when the fact has a typical picture, for at
         // most about one question in four. Without a slot (a plain subject run) the earlier rule applies.
@@ -1799,7 +2235,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         if (correctKey) { acceptedAnswers.push(correctKey); acceptedAnswerTexts.push(correctText); }
         seenStems.add(key);
         acceptedStems.push(fullStem);
-        if (keyFact) acceptedKeyFacts.push(keyFact);
+        if (keyFact) { acceptedKeyFacts.push(keyFact); factsBySubtopic.set(topic.subtopic, [...(factsBySubtopic.get(topic.subtopic) ?? []), keyFact]); }
         if (assigned) acceptedPlannedFacts.add(assignedFactKey(assigned.fact));
 
         used.add(`${topic.subtopic}|${focus ?? ''}`);
@@ -1857,7 +2293,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   });
   // A pool of workers takes planned topics from a queue. When the queue runs low, more topics are planned right
   // away, so a question starts as soon as a lane is free, while others are still in progress.
-  type QueueItem = { topic: PlannedTopic; idx: number; retries: number; hint?: string; slot?: Slot; repaired?: BatchQuestionSpec; verifyErrors?: number };
+  type QueueItem = { topic: PlannedTopic; idx: number; retries: number; hint?: string; slot?: Slot; repaired?: BatchQuestionSpec; verifyErrors?: number; repairedFor?: string };
   const queue: QueueItem[] = topics.map((topic, idx) => ({ topic, idx, retries: 0 }));
   let slotCounter = topics.length;
   let refilling: Promise<boolean> | null = null;
@@ -1871,7 +2307,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const more = await planTopics();
         const extra: PlannedTopic[] = more && more.length ? more : Array.from({ length: count }, (_, i) => ({
           ...workingPool[(slotCounter + i) % workingPool.length],
-          difficultyTier: tier,
+          difficultyTier: tierAt(slotCounter + i),
         }));
         for (const topic of extra) queue.push({ topic, idx: slotCounter++, retries: 0 });
         return extra.length > 0;
@@ -1908,7 +2344,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       if (!pending && questions.length + questionsInProgress >= count) { await new Promise((r) => setTimeout(r, 300)); continue; }
       const next: QueueItem = pending ?? queue.shift()!;
       pending = null;
-      const { topic, idx, retries, hint, slot: slotOverride, repaired, verifyErrors = 0 } = next;
+      const { topic, idx, retries, hint, slot: slotOverride, repaired, verifyErrors = 0, repairedFor } = next;
       if (isFactRetired(topic)) continue;
       const slot = slotOverride ?? topic.slot;
       const parts = focusParts(topic.subtopic);
@@ -1916,10 +2352,14 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       const focus = topic.focus ?? (parts.length > 1 ? parts[idx % parts.length] : undefined);
       questionsInProgress += 1;
       // A rewrite is told why the last attempt was rejected.
-      const ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string; planned?: boolean } = {};
+      const ctx: DropCtx = { attempt: retries, slot: slot ?? undefined, subtopic: topic.subtopic, subject: topic.subject };
+      // NEET PG / INI-CET: the patient of a case-style slot is chosen here, not left to the writer. Writers return the same
+      // few patients again and again (a 29-year-old woman 10 times in one Tuberculosis run), so "use a different patient"
+      // alone failed 67 times. A rewrite gets a different patient.
+      const casePatient = pipe && slot && CASE_STYLES.has(slot.style) ? ` ${patientInstruction(idx + retries * 53)}` : '';
       const shapeText = slot
-        ? `${STYLES[slot.style].instruction(slot, pattern.opts)}${hint ? ` Your previous attempt was rejected because: ${hint}. Fix exactly that.` : ''}`
-        : requestedTopic ? typedShape(idx) : itemShape(idx, exam);
+        ? `${STYLES[slot.style].instruction(slot, pattern.opts)}${pipe?.styleAddendum[slot.style] ? ` ${pipe.styleAddendum[slot.style]}` : ''}${pipe && slot.leadIn === 'diagnosis' ? ` ${DIAGNOSIS_GUARD}` : ''}${pipe && STYLE_EXAMPLES[slot.style] ? ` ${STYLE_EXAMPLES[slot.style]}` : ''}${casePatient}${hint ? ` Your previous attempt was rejected because: ${hint}. Fix exactly that.` : ''}`
+        : `${pipe ? pipe.itemShape(idx) : requestedTopic ? typedShape(idx) : itemShape(idx, exam)}${pipe && hint ? ` Your previous attempt was rejected because: ${hint}. Fix exactly that.` : ''}`;
       const q = await generateSingleQuestion(topic, 0, focus, shapeText, ctx, slotOverride, repaired).finally(() => { questionsInProgress -= 1; });
       completedCount += 1;
       // Circuit breaker: when the provider is down every slot fails, and a run that keeps refilling its queue would
@@ -1935,14 +2375,15 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         dropQ(ctx, 'over-target');
       } else if (q) {
         questions.push(q);
-        reportQuestion('accepted');
-        if (repaired) reportRepair('accepted');
+        recordDraft({ outcome: 'accepted', subtopic: topic.subtopic, subject: q.subject, fact: ctx.fact, planned: ctx.planned ?? null, attempt: retries, slot: slot ? { style: slot.style, leadIn: slot.leadIn, tier: slot.tier } : undefined, source: ctx.source, draft: draftOf(q) });
+        if (repaired) reportRepair('accepted', repairedFor);
         if (questions.length >= count) markTargetReached();
       } else if (ctx.dropKey === 'verify-error' && ctx.draft && verifyErrors < MAX_VERIFY_ERRORS && !stopped && !signal?.aborted) {
         // The source checker failed for network or provider reasons, not because of the question. The same draft is
         // checked again without using up a rewrite; the provider-error breaker above still ends a run whose provider is down.
         pending = { topic, idx, retries, hint, slot: slotOverride, repaired: ctx.draft as unknown as BatchQuestionSpec, verifyErrors: verifyErrors + 1 };
       } else {
+        if (repaired && repairedFor && ctx.dropKey !== 'verify-error') reportRepair('rejected-again', `${repairedFor} -> ${ctx.dropKey}`);
         recordFactDrop(topic, ctx.dropKey, ctx.fact);
         if (isFactRetired(topic)) {
         // The planned fact keeps failing (the examiner rejected it twice, or any check rejected it three times): the
@@ -1960,13 +2401,18 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         // A rejected question goes to the front of the queue: the next free lane regenerates it before any fresh question.
         // The repair starts at the moment the defect is found, in this lane: it is not put behind the queue.
         // Up to two repairs per topic: a second repair, told the new problem, still keeps the fact and is cheaper than a rewrite.
-        const canRepair = retries < MAX_REPAIRS && Boolean(ctx.draft) && Boolean(ctx.dropKey) && REPAIRABLE_DROPS.has(ctx.dropKey!);
+        // An examiner rejection is repaired with the examiner's own fix and examined once more; a repaired draft the
+        // examiner rejects again is rewritten from scratch, not repaired a second time.
+        const examinerAgain = ctx.dropKey === 'examiner' && repairedFor === 'examiner';
+        // NEET PG / INI-CET: no repair-in-place. Across v2 and v3 a repair was kept about a third of the time (34%, 33%), no
+        // better than writing the question again with the reason, so the slot is simply rewritten with the reason.
+        const canRepair = !pipe && !examinerAgain && retries < MAX_REPAIRS && Boolean(ctx.draft) && Boolean(ctx.dropKey) && REPAIRABLE_DROPS.has(ctx.dropKey!);
         const fixed = canRepair
           ? await repairDraft(ctx.draft!, ctx.reason ?? ctx.dropKey!, getActiveProvider() ?? 'gemini').catch(() => null)
           : null;
-        if (fixed === null && canRepair) reportRepair('failed');
-        else if (fixed) reportRepair('attempted');
-        pending = { topic, idx, retries: retries + 1, hint: ctx.reason, slot: nextSlot, repaired: fixed ?? undefined };
+        if (fixed === null && canRepair) reportRepair('failed', ctx.dropKey);
+        else if (fixed) reportRepair('attempted', ctx.dropKey);
+        pending = { topic, idx, retries: retries + 1, hint: ctx.reason, slot: nextSlot, repaired: fixed ?? undefined, repairedFor: fixed ? ctx.dropKey : undefined };
         }
       }
       onProgress?.(questions.length, count, completedCount, Math.max(completedCount, slotCounter));

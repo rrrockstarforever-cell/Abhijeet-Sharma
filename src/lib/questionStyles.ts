@@ -3,6 +3,7 @@
 // shape is wrong; the quality tests use the same rules.
 import type { ClinicalQuestion, ExamType } from '../types.ts';
 import { PYQ_PROFILE, type StyleShares } from './pyqProfile.ts';
+import { everyDistractorExplained } from './pipelines/shared.ts';
 
 export type StyleId =
   | 'vignette' | 'short-case' | 'one-liner' | 'negative' | 'match'
@@ -241,18 +242,9 @@ export function pointsAtMissingPicture(q: ClinicalQuestion): boolean {
 
 /** Checks every other option is accounted for in the explanation (by letter or by its words). */
 export function explainsDistractors(q: ClinicalQuestion): boolean {
-  const exp = String(q.explanation ?? '');
-  if (exp.length < 80) return false;
-  const lower = exp.toLowerCase();
-  const others = (q.options || []).filter((o) => o.id !== q.correctOption);
-  let covered = 0;
-  for (const o of others) {
-    const byLetter = new RegExp(`\\b(?:options?|choices?|answers?)\\s*(?:[A-E](?:\\s*(?:,|and|or|&)\\s*)?)*\\b${o.id}\\b|\\(${o.id}\\)|\\b${o.id}\\)`, 'i').test(exp);
-    const key = norm(String(o.text ?? '')).split(' ').filter((w) => w.length >= 6).slice(0, 4);
-    const byWords = key.length > 0 && key.filter((w) => lower.includes(w)).length >= Math.min(2, key.length);
-    if (byLetter || byWords) covered += 1;
-  }
-  return covered >= Math.min(2, others.length);
+  if (String(q.explanation ?? '').length < 80) return false;
+  // Every wrong option needs its own reason (in the explanation or in optionReasons), not just two of them.
+  return everyDistractorExplained(q);
 }
 
 /** The style problem of a question, or null. Common rules first, then the style's own. */
@@ -266,6 +258,17 @@ const NO_CLASS_ASKED = /\b(mechanism of action|molecular target|classif|class of
 const ADVERSE_ASKED = /adverse|toxicit|side effect|complication/i;
 // A drug or class name in the stem hands over the answer when the question asks for that drug's mechanism, target or class.
 const CLASS_WORD = /\b(\w*(azoles?|candins?)|echinocandins?|allylamines?|polyenes?|hydroxypyridones?|morpholines?|statins?|sartans?|prils?|olols?|gliptins?|gliflozins?|cyclines?|penems?|cillins?|floxacins?|mycins?|glitazones?|bisphosphonates?|benzodiazepines?|fibrates?|triptans?|nitrates?|thiazides?|sulfonylureas?|macrolides?|aminoglycosides?|cephalosporins?)\b/i;
+/** Where a "supplied passage" phrase sits (stem, question line, an option, the explanation) and the words matched. */
+export function sourceLeakWhere(q: ClinicalQuestion): { field: string; match: string }[] {
+  const fields: [string, string][] = [['stem', String(q.stem ?? '')], ['questionText', String((q as { questionText?: string }).questionText ?? '')], ...(q.options ?? []).map((o) => [`option ${o.id}`, String(o.text ?? '')] as [string, string]), ['explanation', String(q.explanation ?? '')]];
+  const out: { field: string; match: string }[] = [];
+  for (const [field, text] of fields) {
+    const m = text.match(SOURCE_LEAK);
+    if (m) { const i = m.index ?? 0; out.push({ field, match: text.slice(Math.max(0, i - 60), i + m[0].length + 60) }); }
+  }
+  return out;
+}
+
 export function standAloneProblem(q: ClinicalQuestion): string | null {
   const text = [q.stem, q.questionText, q.explanation, ...(q.options ?? []).map((o) => o.text)].join('\n');
   if (SOURCE_LEAK.test(text)) return 'mentions-source: never write "the passage", "the notes" or "the supplied text"; state the fact itself';
@@ -386,13 +389,16 @@ export interface FactInfo { fact: string; subtopic: string; picturable?: boolean
  * has three or more other facts; calculation goes to facts with numbers; image goes to picturable facts. A fact that
  * cannot carry its style falls back to a short case (a one-liner for NEET-PG-style mixes).
  */
-export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], leadIns: LeadIn[], tierChoice: 'ALL' | 'LOW' | 'MEDIUM' | 'HIGH', subject?: string): Slot[] {
+/** Exam-pipeline overrides for planning (NEET PG and INI-CET each pass their own; see src/lib/pipelines). */
+export interface PlanOverrides { styleMix?: [StyleId, number][]; leadInMix?: [LeadIn, number][]; tierMix?: [('LOW' | 'MEDIUM' | 'HIGH'), number][] }
+
+export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], leadIns: LeadIn[], tierChoice: 'ALL' | 'LOW' | 'MEDIUM' | 'HIGH', subject?: string, overrides?: PlanOverrides): Slot[] {
   const n = facts.length;
   const styleSeq: StyleId[] = picked.length
     ? spread(n, picked.map((s) => [s, 1] as [StyleId, number]))
-    : spread(n, mixFor(exam, subject));
-  const leadSeq: LeadIn[] = spread(n, leadIns.length ? leadIns.map((l) => [l, 1] as [LeadIn, number]) : /pharmac/i.test(subject ?? '') ? PHARMACOLOGY_LEAD_INS : EXAM_LEAD_INS[exam]);
-  const tiers: ('LOW' | 'MEDIUM' | 'HIGH')[] = tierChoice === 'ALL' ? spread(n, [['LOW', 20], ['MEDIUM', 45], ['HIGH', 35]] as [('LOW' | 'MEDIUM' | 'HIGH'), number][]) : Array(n).fill(tierChoice);
+    : spread(n, overrides?.styleMix ?? mixFor(exam, subject));
+  const leadSeq: LeadIn[] = spread(n, leadIns.length ? leadIns.map((l) => [l, 1] as [LeadIn, number]) : /pharmac/i.test(subject ?? '') ? PHARMACOLOGY_LEAD_INS : overrides?.leadInMix ?? EXAM_LEAD_INS[exam]);
+  const tiers: ('LOW' | 'MEDIUM' | 'HIGH')[] = tierChoice === 'ALL' ? spread(n, overrides?.tierMix ?? ([['LOW', 20], ['MEDIUM', 45], ['HIGH', 35]] as [('LOW' | 'MEDIUM' | 'HIGH'), number][])) : Array(n).fill(tierChoice);
   const bySub = new Map<string, number[]>();
   facts.forEach((f, i) => bySub.set(f.subtopic, [...(bySub.get(f.subtopic) ?? []), i]));
   const fits = (style: StyleId, i: number): boolean => {

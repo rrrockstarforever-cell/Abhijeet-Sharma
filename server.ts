@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import { scopeInstruction } from './src/lib/scopeRules.ts';
+import { passageMatchesQuery } from './src/lib/pipelines/shared.ts';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -544,7 +545,8 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
       ? `Evidence from the textbook library and the web on this topic (a guide: list every subtopic the evidence supports, and every other subtopic an examiner tests on this topic):\n${evidence}`
       : 'No evidence was found, so list the subtopics an exam would test.',
     `Split the topic "${topic}" into its distinct subtopics, sorted as an examiner would sort them:`,
-    'for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. List every distinct subtopic an examiner tests on this topic: a narrow topic may have only two or three, a broad one thirty or more. Do not stop at a fixed number.',
+    'for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications), and always include the drugs used with their adverse effects and the national programme regimen (for example NTEP for tuberculosis) when the disease has them; for anatomy or physiology, use the structures or systems. ' +
+      'Keep one clinical area as one subtopic: do not split a single area (for example skin involvement) into several overlapping subtopics. List every distinct subtopic an examiner tests on this topic: a narrow topic may have only two or three, a broad one thirty or more. Do not stop at a fixed number.',
     'Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.',
     `Subtopic lock: list only subtopics inside the boundary. ${scopeInstruction()} Do not broaden a narrow topic to its whole chapter.`,
     'If several medical specialties examine this topic (for example pathology, general medicine, surgery, radiology, pharmacology, community medicine), list subtopics from each of those specialties, each written from that specialty point of view. No single specialty may take more than a third of the list.',
@@ -1756,11 +1758,28 @@ async function withInternetSources(messages: OAuthChatMessage[], groundOn: { que
  * books themselves differ on the point, and then only to settle that point. With no passage the writer is told so,
  * and its item is dropped rather than written from memory.
  */
+// The last 300 book lookups for writing (query, passages found, how many matched it, whether the internet was used
+// instead), so a run's source problems can be read: GET /api/diagnostics/sources.
+const sourceLog: { at: string; query: string; subject: string; passages: number; relevant: number; usedWeb: boolean; titles: string[] }[] = [];
+
 async function withBookSources(messages: OAuthChatMessage[], query: string, subject: string): Promise<OAuthChatMessage[]> {
-  const passages = searchMyBooks(query, subject, 4, 1800);
+  const found = searchMyBooks(query, subject, 4, 1800);
+  // Only passages that are about the query count; unrelated chapters are not handed to the writer.
+  const passages = found.filter((p: any) => passageMatchesQuery(`${p.title} ${p.heading} ${p.text}`, query));
   const last = messages[messages.length - 1];
   const withText = (extra: string): OAuthChatMessage[] => [...messages.slice(0, -1), { ...last, content: `${last.content}\n\n${extra}` }];
+  const logEntry = { at: new Date().toISOString(), query: query.slice(0, 160), subject, passages: found.length, relevant: passages.length, usedWeb: false, titles: found.map((p: any) => `${p.title} / ${p.heading}`.slice(0, 120)) };
+  sourceLog.push(logEntry);
+  if (sourceLog.length > 300) sourceLog.splice(0, sourceLog.length - 300);
   if (!passages.length) {
+    // The books do not cover this point: the internet is used for it instead (books where possible, the internet when
+    // they fall short), and the writer is told plainly, so it writes a question rather than a note about missing passages.
+    const web = await webResearch(query, 1200).then((r: any) => r.sources).catch(() => []);
+    const sources = (web || []).filter((w: any) => w?.text).slice(0, 4);
+    if (sources.length) {
+      logEntry.usedWeb = true;
+      return withText(`The learner's books have no passage on this point, so use these internet sources for it. Base the correct option and keyFact on them; never mention the books, passages or sources in the question or the explanation. Sources: """${sources.map((w: any, i: number) => `[W${i + 1}] ${w.title}\n${w.url}\n${String(w.text).slice(0, 1500)}`).join('\n\n')}"""`);
+    }
     return withText('MY BOOKS: no passage in the learner\'s books matches this topic. Write nothing from memory: set "sourceCheck" to "not supported".');
   }
   const bookBlock = passages.map((p: any, i: number) => `[B${i + 1}] ${p.title}\nSection: ${p.heading}\n${p.text}`).join('\n\n');
@@ -1774,6 +1793,21 @@ async function withBookSources(messages: OAuthChatMessage[], query: string, subj
   }
   return withText(extra);
 }
+
+// Diagnostics: the run report the app sends after each generation, saved under <PULSE_DATA_DIR>/diagnostics/, and the
+// recent book lookups for writing.
+app.post('/api/diagnostics/run-report', (req: Request, res: Response) => {
+  try {
+    const dir = path.join(DATA_DIR, 'diagnostics');
+    fs.mkdirSync(dir, { recursive: true });
+    const name = `run-report-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    fs.writeFileSync(path.join(dir, name), JSON.stringify({ ...req.body, sourceLog: sourceLog.slice(-300) }, null, 2), 'utf8');
+    return res.json({ ok: true, file: path.join(dir, name) });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Could not save the run report.' });
+  }
+});
+app.get('/api/diagnostics/sources', (_req: Request, res: Response) => res.json({ lookups: sourceLog.slice(-300) }));
 
 // GET /api/mybooks/status -> which of the learner's books are installed.
 app.get('/api/mybooks/status', (_req: Request, res: Response) => {

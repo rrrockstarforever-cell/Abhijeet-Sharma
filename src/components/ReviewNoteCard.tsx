@@ -7,7 +7,7 @@ import { renderKeyPoints } from './KeyText.tsx';
 // why each wrong option is wrong, a memory hook, a trap to watch for, and a short recall check at the end.
 // Each marker keeps one meaning: yellow = key point, teal = the big idea, rose = wrong or a trap, amber = remember this.
 
-const HIGH_YIELD = /^\s*(?:[-•*]\s*)?(high[- ]yield|exam tip|remember|pearl|trap)\b[:\-–]?\s*/i;
+const HIGH_YIELD = /^\s*(?:[-•]\s*)?(?:\*\*)?(high[- ]yield|exam tip|remember|pearl|trap)\b[:\-–]?(?:\*\*)?[:\-–]?\s*/i;
 const BULLET = /^\s*[-•*]\s+/;
 const strip = (s: string) => s.replace(/\*\*/g, '').trim();
 
@@ -24,6 +24,14 @@ function parse(q: ClinicalQuestion): Parsed {
     else out.more.push(line);
   });
   if (!out.bigIdea) out.bigIdea = (q.keyFact || '').trim() || (correct ? `The answer is ${correct}.` : '');
+  // When the explanation has no bullets, the per-option reasons (NEET PG / INI-CET questions carry them) say why each
+  // wrong option is wrong.
+  if (!out.wrong.length && q.optionReasons) {
+    for (const o of q.options) {
+      const why = q.optionReasons[o.id];
+      if (o.id !== q.correctOption && why) out.wrong.push(`**${o.text}:** ${why}`);
+    }
+  }
   return out;
 }
 

@@ -75,6 +75,10 @@ export interface ClinicalQuestion {
   boardPearl: string;
   /** The one textbook or guideline fact that makes the keyed answer right. Used as the evidence search. */
   keyFact?: string;
+  /** Why each option is right or wrong, by letter (shown beside each option after answering). */
+  optionReasons?: Partial<Record<'A' | 'B' | 'C' | 'D' | 'E', string>>;
+  /** Options are combinations, match codes, assertion-reason or numbers: never shuffled or re-lettered. */
+  fixedOptionOrder?: boolean;
   citations: string[];
   targetAccuracy: number;
   nationalPercentile?: number;

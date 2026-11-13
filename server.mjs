@@ -34,6 +34,16 @@ function scopeInstruction() {
   return `${SCOPE_RULE} ${DRUG_TOPIC_RULE} Subject boundaries: ${SUBJECT_BOUNDARIES.join(" ")}`;
 }
 
+// src/lib/pipelines/shared.ts
+var RELEVANCE_STOP = /* @__PURE__ */ new Set(["which", "their", "there", "about", "after", "before", "drugs", "agents", "effects", "effect", "adverse", "treatment", "therapy", "management", "clinical", "features", "patient", "patients", "disease", "diseases", "causes", "caused", "common", "commonly", "important", "standard", "between", "within", "without", "during", "mechanism", "mechanisms", "action", "used", "using", "first", "second", "third"]);
+function passageMatchesQuery(text, query) {
+  const terms = [...new Set(String(query).toLowerCase().match(/[a-z][a-z0-9-]{4,}/g) ?? [])].filter((w) => !RELEVANCE_STOP.has(w)).map((w) => w.slice(0, 6));
+  if (!terms.length) return true;
+  const body = String(text).toLowerCase();
+  const hits = terms.filter((t) => body.includes(t)).length;
+  return hits >= Math.min(terms.length >= 4 ? 2 : 1, terms.length);
+}
+
 // server.ts
 import path4 from "path";
 import os4 from "os";
@@ -2596,6 +2606,23 @@ function serverDebugLog(hypothesis, message) {
   }
 }
 
+// src/lib/diagnostics.ts
+var g = globalThis;
+function downloadRunReport() {
+  const report = g.__runReport;
+  if (!report || typeof document === "undefined") {
+    console.warn("No run report yet.");
+    return;
+  }
+  const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `pulse-run-report-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5e3);
+}
+g.pulseRunReport = downloadRunReport;
+
 // src/lib/ai.ts
 var RESEARCH_TTL_MS = 5 * 6e4;
 var PLAN_FACTS_SYSTEM = 'You list distinct, high-yield, exam-testable facts about one subtopic that the sources state. Do not repeat a fact already planned. Each fact must be a definite statement a student can be tested on (a cause, a feature, a number, a test, a drug effect, a warning), never an uncertain or open one ("may", "remains uncertain", "has been evaluated"). Prefer statements from an official drug label or textbook over research papers. ' + scopeInstruction() + ' Every fact must sit inside that boundary. Copy the supporting words exactly from one source. Reply with ONLY JSON: {"facts":[{"fact":"one sentence","quote":"exact words from that source","source":<source number>}]}. Skip facts an exam would not ask: experimental or investigational products and trial codes (for example a named nanocarrier or formulation under study), drug-delivery carrier science (liposome, transfersome, hydrogel), and labels that textbooks disagree on (such as which "generation" an older drug belongs to). Prefer what NEET-PG and INI-CET papers ask: uses and the drug of choice, mechanism, the key adverse effect, interactions, contraindications, how to tell similar drugs apart. Give at most the number of facts asked for; give fewer if the sources do not support that many.';
@@ -3038,7 +3065,7 @@ ${s.text}`).join("\n").slice(0, 6e3);
     evidence ? `Evidence from the textbook library and the web on this topic (a guide: list every subtopic the evidence supports, and every other subtopic an examiner tests on this topic):
 ${evidence}` : "No evidence was found, so list the subtopics an exam would test.",
     `Split the topic "${topic}" into its distinct subtopics, sorted as an examiner would sort them:`,
-    "for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. List every distinct subtopic an examiner tests on this topic: a narrow topic may have only two or three, a broad one thirty or more. Do not stop at a fixed number.",
+    "for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications), and always include the drugs used with their adverse effects and the national programme regimen (for example NTEP for tuberculosis) when the disease has them; for anatomy or physiology, use the structures or systems. Keep one clinical area as one subtopic: do not split a single area (for example skin involvement) into several overlapping subtopics. List every distinct subtopic an examiner tests on this topic: a narrow topic may have only two or three, a broad one thirty or more. Do not stop at a fixed number.",
     "Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.",
     `Subtopic lock: list only subtopics inside the boundary. ${scopeInstruction()} Do not broaden a narrow topic to its whole chapter.`,
     "If several medical specialties examine this topic (for example pathology, general medicine, surgery, radiology, pharmacology, community medicine), list subtopics from each of those specialties, each written from that specialty point of view. No single specialty may take more than a third of the list.",
@@ -4022,13 +4049,26 @@ ${String(s.text).slice(0, 1200)}`).join("\n\n");
 Internet sources found for this topic. Read them, then check the keyed option against them before you answer: """${block}"""` }
   ];
 }
+var sourceLog = [];
 async function withBookSources(messages, query, subject) {
-  const passages = searchMyBooks(query, subject, 4, 1800);
+  const found = searchMyBooks(query, subject, 4, 1800);
+  const passages = found.filter((p) => passageMatchesQuery(`${p.title} ${p.heading} ${p.text}`, query));
   const last = messages[messages.length - 1];
   const withText = (extra2) => [...messages.slice(0, -1), { ...last, content: `${last.content}
 
 ${extra2}` }];
+  const logEntry = { at: (/* @__PURE__ */ new Date()).toISOString(), query: query.slice(0, 160), subject, passages: found.length, relevant: passages.length, usedWeb: false, titles: found.map((p) => `${p.title} / ${p.heading}`.slice(0, 120)) };
+  sourceLog.push(logEntry);
+  if (sourceLog.length > 300) sourceLog.splice(0, sourceLog.length - 300);
   if (!passages.length) {
+    const web = await research(query, 1200).then((r) => r.sources).catch(() => []);
+    const sources = (web || []).filter((w) => w?.text).slice(0, 4);
+    if (sources.length) {
+      logEntry.usedWeb = true;
+      return withText(`The learner's books have no passage on this point, so use these internet sources for it. Base the correct option and keyFact on them; never mention the books, passages or sources in the question or the explanation. Sources: """${sources.map((w, i) => `[W${i + 1}] ${w.title}
+${w.url}
+${String(w.text).slice(0, 1500)}`).join("\n\n")}"""`);
+    }
     return withText(`MY BOOKS: no passage in the learner's books matches this topic. Write nothing from memory: set "sourceCheck" to "not supported".`);
   }
   const bookBlock = passages.map((p, i) => `[B${i + 1}] ${p.title}
@@ -4048,6 +4088,18 @@ ${String(w.text).slice(0, 1200)}`).join("\n\n")}"""`;
   }
   return withText(extra);
 }
+app.post("/api/diagnostics/run-report", (req, res) => {
+  try {
+    const dir = path4.join(DATA_DIR3, "diagnostics");
+    fs4.mkdirSync(dir, { recursive: true });
+    const name = `run-report-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`;
+    fs4.writeFileSync(path4.join(dir, name), JSON.stringify({ ...req.body, sourceLog: sourceLog.slice(-300) }, null, 2), "utf8");
+    return res.json({ ok: true, file: path4.join(dir, name) });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Could not save the run report." });
+  }
+});
+app.get("/api/diagnostics/sources", (_req, res) => res.json({ lookups: sourceLog.slice(-300) }));
 app.get("/api/mybooks/status", (_req, res) => {
   try {
     return res.json(myBooksStatus());
