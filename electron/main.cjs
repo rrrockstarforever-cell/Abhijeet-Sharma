@@ -29,7 +29,7 @@ else {
       // user's data dir, never inside the app bundle or repo.
       PULSE_DATA_DIR: app.getPath('userData'),
       // The study library shipped inside the installer (see build/library). In development it is read from the user's own folder.
-      ...(app.isPackaged ? { PULSE_LIBRARY_DB: path.join(process.resourcesPath, 'library', 'pulse-library.db') } : {}),
+      ...(app.isPackaged ? { PULSE_LIBRARY_DB: path.join(process.resourcesPath, 'library', 'pulse-library.db'), PULSE_MYBOOKS_DB: path.join(process.resourcesPath, 'library', 'pulse-mybooks.db') } : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

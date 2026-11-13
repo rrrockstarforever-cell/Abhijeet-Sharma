@@ -15,15 +15,43 @@ import { AITutorView } from './components/AITutorView.tsx';
 import { PDFReaderView } from './components/PDFReaderView.tsx';
 import { ImageQuestionReviewView } from './components/ImageQuestionReviewView.tsx';
 import { JobsBanner } from './components/JobsBanner.tsx';
+import { StudyPlanView } from './components/StudyPlanView.tsx';
+import { SyllabusTrackerView } from './components/SyllabusTrackerView.tsx';
+import { RemindersView } from './components/RemindersView.tsx';
+import { SyncView } from './components/SyncView.tsx';
+import { TestReviewsView } from './components/TestReviewsView.tsx';
+import { TodayView } from './components/TodayView.tsx';
+import { FirstRunGuide } from './components/FirstRunGuide.tsx';
+import { playPageSwitch } from './lib/sounds.ts';
 import { dueCount } from './utils/flashcardStore.ts';
 import { listCapturedQuestions } from './utils/mistakeStore.ts';
 import { subscribeDataChanged } from './utils/dataEvents.ts';
 import { loadActiveTest, saveActiveTest, signature } from './utils/sessionStore.ts';
 import { saveModule, storedQuestions, withoutStoredDuplicates } from './utils/moduleStore.ts';
 import { cleanQuestions } from './lib/questionCleanup.ts';
+import { PanelLeftClose, PanelLeftOpen, Maximize2, Minimize2, Sun, Moon } from 'lucide-react';
+
+// Remembered on this computer: hide the left sidebar, or hide every bar and keep only the screen itself.
+const readFlag = (key: string) => { try { return localStorage.getItem(key) === '1'; } catch { return false; } };
+const writeFlag = (key: string, on: boolean) => { try { localStorage.setItem(key, on ? '1' : '0'); } catch { /* storage may be blocked */ } };
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<AppView>('analytics');
+  const [currentView, setCurrentView] = useState<AppView>('today');
+  const [sidebarHidden, setSidebarHidden] = useState(() => readFlag('pulse.sidebarHidden'));
+  const [focusMode, setFocusMode] = useState(() => readFlag('pulse.focusMode'));
+  useEffect(() => writeFlag('pulse.sidebarHidden', sidebarHidden), [sidebarHidden]);
+  useEffect(() => writeFlag('pulse.focusMode', focusMode), [focusMode]);
+  // Ctrl+B hides or shows the sidebar; Ctrl+Shift+F turns focus mode on or off.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const k = e.key.toLowerCase();
+      if (k === 'b' && !e.shiftKey) { e.preventDefault(); setSidebarHidden((v) => !v); }
+      else if (k === 'f' && e.shiftKey) { e.preventDefault(); setFocusMode((v) => !v); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
   // The launched test is restored from storage so a restart never loses generated questions.
   const [restoredTest] = useState(() => loadActiveTest());
   const [currentExam, setCurrentExam] = useState<ExamType>((restoredTest?.exam as ExamType) ?? 'INI_CET');
@@ -51,6 +79,14 @@ export default function App() {
   // on, leave them where they are and offer the finished module instead of yanking them away.
   const currentViewRef = useRef<AppView>(currentView);
   useEffect(() => { currentViewRef.current = currentView; }, [currentView]);
+  // The first-run guide shows once, on the first launch; closing it (or finishing it) records that it was seen.
+  const [showGuide, setShowGuide] = useState<boolean>(() => {
+    try { return localStorage.getItem('pulse-first-run-guide-seen') !== '1'; } catch { return false; }
+  });
+  const closeGuide = () => {
+    try { localStorage.setItem('pulse-first-run-guide-seen', '1'); } catch { /* the guide may then show again */ }
+    setShowGuide(false);
+  };
   const [readyNotice, setReadyNotice] = useState<{ count: number } | null>(null);
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
     try {
@@ -81,6 +117,7 @@ export default function App() {
 
   const handleNavigate = (view: AppView, targetId?: string) => {
     if (view === 'test-runner') setReadyNotice(null);
+    if (view !== currentView) playPageSwitch();
     setCurrentView(view);
     if (targetId) {
       setActiveQuestionId(targetId);
@@ -248,6 +285,18 @@ export default function App() {
             onNavigate={handleNavigate}
           />
         );
+      case 'today':
+        return <TodayView exam={currentExam} onNavigate={handleNavigate} />;
+      case 'reviews':
+        return <TestReviewsView onNavigate={handleNavigate} darkMode={isDarkMode} />;
+      case 'study-plan':
+        return <StudyPlanView exam={currentExam} onNavigate={handleNavigate} />;
+      case 'syllabus':
+        return <SyllabusTrackerView exam={currentExam} onNavigate={handleNavigate} />;
+      case 'reminders':
+        return <RemindersView exam={currentExam} />;
+      case 'sync':
+        return <SyncView />;
       case 'settings':
         return (
           <SettingsAIView />
@@ -271,7 +320,7 @@ export default function App() {
       isDarkMode ? 'dark' : ''
     }`}>
       {/* Persistent Clinical Navy Sidebar */}
-      <Sidebar
+      {!sidebarHidden && !focusMode && <Sidebar
         currentView={currentView}
         onNavigate={handleNavigate}
         selectedExam={currentExam}
@@ -280,16 +329,20 @@ export default function App() {
         onToggleDarkMode={() => setIsDarkMode(!isDarkMode)}
         unresolvedMistakesCount={unresolvedMistakes}
         srsDueCount={srsDue}
-      />
+      />}
+
+      {showGuide && <FirstRunGuide exam={currentExam} onNavigate={(v) => { closeGuide(); handleNavigate(v); }} onClose={closeGuide} />}
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 h-screen overflow-y-auto">
         {/* Sticky Top Clinical Header Bar */}
-        <TopBar
-          selectedExam={currentExam}
-          onSearchSubmit={handleSearchSubmit}
-          onNavigate={handleNavigate}
-        />
+        {!focusMode && (
+          <TopBar
+            selectedExam={currentExam}
+            onSearchSubmit={handleSearchSubmit}
+            onNavigate={handleNavigate}
+          />
+        )}
 
         {/* Dynamic Canvas Container */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-[1600px] w-full mx-auto">
@@ -318,12 +371,42 @@ export default function App() {
             </div>
           )}
           {KEEP_ALIVE.filter((v) => mountedViews.includes(v) || v === currentView).map((v) => (
-            <div key={v} className={v === currentView ? '' : 'hidden'}>
+            <div key={v} className={v === currentView ? 'page-enter' : 'hidden'}>
               {renderView(v)}
             </div>
           ))}
-          {!KEEP_ALIVE.includes(currentView) && renderView(currentView)}
+          {!KEEP_ALIVE.includes(currentView) && <div key={currentView} className="page-enter">{renderView(currentView)}</div>}
         </main>
+      </div>
+
+      {/* Small floating controls: hide/show the sidebar, focus mode (only the question screen), light/dark */}
+      <div className="fixed bottom-3 right-3 z-40 flex items-center gap-1 rounded-full border border-slate-300 bg-white/90 p-1 shadow-md backdrop-blur dark:border-slate-600 dark:bg-slate-800/90">
+        {!focusMode && (
+          <button
+            onClick={() => setSidebarHidden((v) => !v)}
+            title={sidebarHidden ? 'Show sidebar (Ctrl+B)' : 'Hide sidebar (Ctrl+B)'}
+            aria-label={sidebarHidden ? 'Show sidebar' : 'Hide sidebar'}
+            className="rounded-full p-2 text-slate-600 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+          >
+            {sidebarHidden ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+          </button>
+        )}
+        <button
+          onClick={() => setFocusMode((v) => !v)}
+          title={focusMode ? 'Leave focus mode (Ctrl+Shift+F)' : 'Focus mode: hide the sidebar and top bar (Ctrl+Shift+F)'}
+          aria-label={focusMode ? 'Leave focus mode' : 'Focus mode'}
+          className="rounded-full p-2 text-slate-600 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+        >
+          {focusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+        </button>
+        <button
+          onClick={() => setIsDarkMode((v) => !v)}
+          title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+          aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+          className="rounded-full p-2 text-slate-600 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+        >
+          {isDarkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+        </button>
       </div>
 
       {/* Background task registry banner (OCR, page notes, indexing) */}

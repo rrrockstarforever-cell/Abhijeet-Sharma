@@ -120,8 +120,8 @@ export const STYLES: Record<StyleId, StyleSpec> = {
   negative: {
     id: 'negative', chips: ['NOT / EXCEPT'], needsRelated: true, codedOptions: false,
     judge: 'a NOT/EXCEPT/FALSE question where exactly one option is the false one',
-    instruction: (slot) => `Style: negative lead-in. The question line is "Which of the following is NOT true about ...?" (or "All of the following are features of ... EXCEPT"). Exactly three options are true statements about the topic and exactly one is false; the false one is the key.${relatedLine(slot)}`,
-    validate: (q) => (/\b(NOT|EXCEPT|FALSE|INCORRECT|LEAST|UNTRUE|exception)\b/i.test(questionLine(q)) || /\b(EXCEPT)\b/.test(q.stem ?? '') ? null : 'no-negative-lead-in: the question line must say NOT, EXCEPT or FALSE'),
+    instruction: (slot) => `Style: negative lead-in. The question line is "Which of the following is NOT true about ...?" (or "All of the following are features of ... EXCEPT"). Exactly three options are true statements about the topic and exactly one is false; the false one is the key. The stem is one plain sentence naming the subject (a drug, class or condition): no patient, no laboratory team, no invented scene. Do not put two options that are opposites of each other on the same fact (for example oral against intravenous), because that gives the answer away.${relatedLine(slot)}`,
+    validate: (q) => (/\b\d{1,3}[- ](year|month)s?[- ]old\b|^\s*(A|An)\s+(patient|laboratory|lab|clinician|team|student|pharmacist|physician|doctor|researcher)\b/i.test(q.stem ?? '') ? 'negative-has-scene: a NOT or EXCEPT stem is one plain sentence about the subject, with no patient or invented scene' : /\b(NOT|EXCEPT|FALSE|INCORRECT|LEAST|UNTRUE|exception)\b/i.test(questionLine(q)) || /\b(EXCEPT)\b/.test(q.stem ?? '') ? null : 'no-negative-lead-in: the question line must say NOT, EXCEPT or FALSE'),
   },
   match: {
     id: 'match', chips: ['Match the following'], needsRelated: true, codedOptions: true,
@@ -256,8 +256,38 @@ export function explainsDistractors(q: ClinicalQuestion): boolean {
 }
 
 /** The style problem of a question, or null. Common rules first, then the style's own. */
+// A question must stand alone: it never mentions the passages or notes it was written from, and it never opens with a
+// made-up teaching scene ("During a pharmacology tutorial, a student reviews ...") that carries no clinical information.
+const SOURCE_LEAK = /\b(the|this|these|your)\s+(supplied|cited|provided|attached|given)\s+(pharmacology |textbook |book |source )?(passages?|notes|excerpt|extract|text)\b|according to (the|your) (supplied |provided )?(passage|notes)\b/i;
+const FILLER_SCENE = /^\s*(during|in|at|while)\s+(a|an|the)\s+[a-z\- ]{0,40}?\b(tutorial|teaching session|lecture|seminar|revision (class|session))\b|\b(a|the)\s+(medical\s+)?(student|trainee)\s+(reviews?|revises?|is studying|compares|discusses)\b/i;
+const META_TEXT = /\b(the|this) (stem|question|lead-in|vignette) (asks|states|describes|gives|provides|tells|mentions)\b|\bthe (identifying|key) detail here\b|\bplausible, but\b/i;
+const FILLER_COMMITTEE = /\b(during|at|in|while)\s+(a|an|the)\s+[a-z\- ]{0,30}\b(journal club|case conference|formulary (review|meeting)|pharmacy committee)\b/i;
+const NO_CLASS_ASKED = /\b(mechanism of action|molecular target|classif|class of)/i;
+const ADVERSE_ASKED = /adverse|toxicit|side effect|complication/i;
+// A drug or class name in the stem hands over the answer when the question asks for that drug's mechanism, target or class.
+const CLASS_WORD = /\b(\w*(azoles?|candins?)|echinocandins?|allylamines?|polyenes?|hydroxypyridones?|morpholines?|statins?|sartans?|prils?|olols?|gliptins?|gliflozins?|cyclines?|penems?|cillins?|floxacins?|mycins?|glitazones?|bisphosphonates?|benzodiazepines?|fibrates?|triptans?|nitrates?|thiazides?|sulfonylureas?|macrolides?|aminoglycosides?|cephalosporins?)\b/i;
+export function standAloneProblem(q: ClinicalQuestion): string | null {
+  const text = [q.stem, q.questionText, q.explanation, ...(q.options ?? []).map((o) => o.text)].join('\n');
+  if (SOURCE_LEAK.test(text)) return 'mentions-source: never write "the passage", "the notes" or "the supplied text"; state the fact itself';
+  if (META_TEXT.test(String(q.explanation || '') + ' ' + String(q.stem || ''))) return 'meta-text: the explanation must teach the fact, not talk about the stem or the question';
+  // A stem must be whole sentences: a question word glued onto the previous sentence, or a stem that stops mid-phrase, is broken.
+  const stemText = String(q.stem ?? '').trim();
+  if (/[a-z0-9)]\s+(Which|What|How|Why|Who|When)\b[^.?!]{0,200}\?/.test(stemText) || /\b(is|are|was|were|the|a|an|of|to|by|with|and|or)\s*$/i.test(stemText)) return 'stem-fragment: the stem has a broken or run-on sentence; write whole sentences, with the question only in the question line';
+  // Options that all start with the same words before a dash ("Condition X - treatment A", "Condition X - treatment B") test only the second part.
+  const optTexts = (q.options ?? []).map((o) => String(o.text ?? '').trim());
+  const heads = optTexts.map((t) => t.split(/\s*[—–]\s*/)[0].toLowerCase());
+  if (optTexts.length >= 3 && optTexts.every((t) => /\s*[—–]\s*/.test(t)) && heads.every((h) => h === heads[0])) return 'options-repeat-prefix: every option starts with the same words; make the options differ in what they say';
+  // Scene and class-name checks are off: they rejected too many questions (2025-11 test). Only a leaked source mention or meta text is dropped.
+  void FILLER_SCENE; void FILLER_COMMITTEE;
+  const ask = String(q.questionText || '');
+  void ask; void NO_CLASS_ASKED; void ADVERSE_ASKED; void CLASS_WORD;
+  return null;
+}
+
 export function styleProblem(q: ClinicalQuestion, slot: Slot | undefined, optionCount: number, skipPicture = false): string | null {
   if ((q.options?.length ?? 0) !== optionCount) return `wrong-option-count: exactly ${optionCount} options are required`;
+  const alone = standAloneProblem(q);
+  if (alone) return alone;
   if (!skipPicture && pointsAtMissingPicture(q) && !(slot?.style === 'image' && q.figureQuery)) return 'refers-to-missing-picture: describe the finding in words instead of pointing at a picture';
   return slot ? STYLES[slot.style].validate(q, slot) : null;
 }
@@ -292,7 +322,7 @@ export function mixFor(exam: ExamType, subject?: string): [StyleId, number][] {
   const known = subject && Object.keys(profile.subjects).find((k) => k.toLowerCase() === subject.toLowerCase());
   const sh: StyleShares = known ? profile.subjects[known] : profile.all;
   // A few percent of the one-liners are calculations and mechanism questions; the rest of the numbers are the papers'.
-  const calc = exam === 'NEET_PG' && subject === 'PSM' ? 5 : 1;
+  const calc = exam === 'NEET_PG' && subject === 'PSM' ? 5 : 0;
   const mech = 2;
   const oneLiner = Math.max(0, sh['one-liner'] - calc - mech);
   const mix: [StyleId, number][] = [['one-liner', oneLiner], ['short-case', sh['short-case']], ['vignette', sh.vignette], ['negative', sh.negative], ['image', sh.image], ['calculation', calc], ['mechanism', mech]];
@@ -306,6 +336,10 @@ const EXAM_LEAD_INS: Record<ExamType, [LeadIn, number][]> = {
   NEET_PG: [['diagnosis', 35], ['finding', 30], ['next-step', 12], ['drug-of-choice', 10], ['investigation-of-choice', 8], ['treatment-of-choice', 5]],
   INI_CET: [['diagnosis', 35], ['finding', 30], ['next-step', 12], ['drug-of-choice', 10], ['investigation-of-choice', 8], ['treatment-of-choice', 5]],
 };
+
+// A pharmacology paper asks about the drug: what it is, how it works, its adverse effect, interaction or dose. It does not ask the
+// candidate to diagnose the disease, so the diagnosis and investigation lead-ins are left out for a pharmacology topic.
+const PHARMACOLOGY_LEAD_INS: [LeadIn, number][] = [['finding', 40], ['drug-of-choice', 25], ['next-step', 15], ['treatment-of-choice', 10], ['advice', 10]];
 
 /** Spreads `n` picks over weighted entries so equal kinds are interleaved, not clustered (largest remainder). */
 export function spread<T>(n: number, weighted: [T, number][]): T[] {
@@ -357,7 +391,7 @@ export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], 
   const styleSeq: StyleId[] = picked.length
     ? spread(n, picked.map((s) => [s, 1] as [StyleId, number]))
     : spread(n, mixFor(exam, subject));
-  const leadSeq: LeadIn[] = spread(n, leadIns.length ? leadIns.map((l) => [l, 1] as [LeadIn, number]) : EXAM_LEAD_INS[exam]);
+  const leadSeq: LeadIn[] = spread(n, leadIns.length ? leadIns.map((l) => [l, 1] as [LeadIn, number]) : /pharmac/i.test(subject ?? '') ? PHARMACOLOGY_LEAD_INS : EXAM_LEAD_INS[exam]);
   const tiers: ('LOW' | 'MEDIUM' | 'HIGH')[] = tierChoice === 'ALL' ? spread(n, [['LOW', 20], ['MEDIUM', 45], ['HIGH', 35]] as [('LOW' | 'MEDIUM' | 'HIGH'), number][]) : Array(n).fill(tierChoice);
   const bySub = new Map<string, number[]>();
   facts.forEach((f, i) => bySub.set(f.subtopic, [...(bySub.get(f.subtopic) ?? []), i]));
@@ -409,7 +443,7 @@ export function planSlots(facts: FactInfo[], exam: ExamType, picked: StyleId[], 
 
 /** The exam-specific rules that stay in force whatever the style (option count, wording, sources). */
 /** Style of options and explanation seen in the real papers, appended for every item. */
-export const COMMON_STYLE_RULES = 'Never cite a guideline, survey, study, shortage or any source that the case does not give: describe the case itself. ' + 'Options are short: a term or a phrase of 1 to 6 words, unless the item needs a sentence. Explanation: 130 to 190 words of clinical reasoning only. Start with the key fact in **bold**, then one bullet per other option saying why it is wrong, naming the option by its text and never by its letter ("Hyperkalaemia: ..."), then one line "High-yield: ...". Never mention sources, pages, attachments, the examiner or the question itself.';
+export const COMMON_STYLE_RULES = 'Never cite a guideline, survey, study, shortage or any source that the case does not give: describe the case itself. ' + 'Options are short: a term or a phrase of 1 to 6 words, unless the item needs a sentence. Explanation: 70 to 110 words of clinical reasoning only, in short plain sentences with everyday words (explain a hard term in a few words); keep each bullet to one short line. Start with the key fact in **bold**, and put the 1 to 4 words a candidate must remember in each later line in **bold** too (never a whole sentence), then one bullet per other option saying why it is wrong, naming the option by its text and never by its letter ("Hyperkalaemia: ..."), then one line "High-yield: ...". Never mention sources, pages, attachments, the examiner or the question itself.';
 
 export const EXAM_RULES: Record<ExamType, string> = {
   NEET_PG: 'NEET PG (NBEMS): exactly 4 options (A-D), one correct. Options are homogeneous and close. Avoid "all of the above" and "none of the above".',

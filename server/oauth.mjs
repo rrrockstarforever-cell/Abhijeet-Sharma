@@ -258,7 +258,8 @@ export async function listModels(provider) {
       Authorization: `Bearer ${tok}`,
       ...(claims.chatgpt_account_id ? { 'ChatGPT-Account-ID': claims.chatgpt_account_id } : {}),
     };
-    for (const v of ['0.50.0', '0.63.0', '0.44.0']) {
+    // The backend answers an empty list to client versions it considers old (0.80 and below), so ask as a recent client first.
+    for (const v of ['1.0.0', '0.200.0', '0.150.0', '0.120.0']) {
       const r = await fetch(`${CODEX.base}/models?client_version=${v}`, { headers });
       if (!r.ok) continue;
       const b = await r.json().catch(() => ({}));
@@ -277,7 +278,7 @@ export async function listModels(provider) {
 }
 
 // ---------- chat ----------
-export async function chat({ provider, model, system, messages, json, effort, search, signal }) {
+export async function chat({ provider, model, system, messages, json, effort, search, signal, _retried = false }) {
   const tok = await token(provider);
   if (provider === 'claude') {
     // Anthropic rejects an empty text block ("system: text content blocks must be
@@ -405,7 +406,8 @@ export async function chat({ provider, model, system, messages, json, effort, se
     },
     body: JSON.stringify({
       model, instructions: system, store: false, stream: true,
-      input: messages.map((m) => ({ role: m.role, content: [{ type: m.role === 'assistant' ? 'output_text' : 'input_text', text: m.content }] })),
+      // OpenAI's JSON mode refuses a request unless the word "json" appears in the input messages (the instructions do not count).
+      input: messages.map((m, i) => ({ role: m.role, content: [{ type: m.role === 'assistant' ? 'output_text' : 'input_text', text: json && i === messages.length - 1 && !messages.some((x) => /json/i.test(x.content)) ? `${m.content}\n\n(Reply as JSON.)` : m.content }] })),
       ...(json ? { text: { format: { type: 'json_object' } } } : {}),
       ...(/^(gpt-5|o\d)/i.test(model || '') ? { reasoning: { effort: { min: 'low', low: 'low', medium: 'medium', high: 'high', extra: 'high', ultra: 'high' }[effort || 'medium'] || 'medium' } } : {}),
     }),
@@ -415,6 +417,16 @@ export async function chat({ provider, model, system, messages, json, effort, se
     const t = await r.text();
     let msg = t.slice(0, 300);
     try { const j = JSON.parse(t); msg = j?.error?.message || j?.detail || msg; } catch {}
+    // The model name saved from an earlier account may not be one this account can use. Ask the account which models it
+    // can run and try its first one, once, so switching to a new account just works.
+    if (!_retried && provider === 'codex' && /not supported when using Codex with a ChatGPT account|model .*(not available|not found|does not exist)|unknown model/i.test(msg)) {
+      const listed = await listModels('codex').catch(() => ({ models: [] }));
+      const pick = (listed.models || []).find((m) => m.id && m.id !== model);
+      if (pick) {
+        aiLog({ provider: 'codex', model, status: r.status, retry_with: pick.id });
+        return chat({ provider, model: pick.id, system, messages, json, effort, search, signal, _retried: true });
+      }
+    }
     // A ChatGPT subscription that does not include Codex models answers 400 for every
     // model name. Say so plainly instead of surfacing a bare model-not-supported error.
     if (/not supported when using Codex with a ChatGPT account/i.test(msg)) {
@@ -452,7 +464,7 @@ export async function chat({ provider, model, system, messages, json, effort, se
         } else if (j.type === 'response.incomplete') {
           finishReason = j.response?.incomplete_details?.reason || 'incomplete';
         } else if (j.type === 'response.failed' || j.type === 'error') {
-          throw new Error(j.response?.error?.message || j.message || 'Request failed');
+          throw new Error(j.response?.error?.message || j.error?.message || j.message || 'Request failed');
         }
       } catch (e) { if (e.message && !(e instanceof SyntaxError)) throw e; }
     }

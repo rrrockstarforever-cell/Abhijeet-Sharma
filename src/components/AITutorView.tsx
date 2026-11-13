@@ -65,6 +65,9 @@ import {
   setExplanationImagesEnabled,
 } from '../utils/explanationImages.ts';
 import { ExplanationFigure } from './ExplanationFigure.tsx';
+import { takeTutorSeed } from '../lib/tutorSeed.ts';
+import { rewardForLesson } from '../utils/gameStore.ts';
+import { KeyPoint } from './KeyText.tsx';
 
 interface AITutorViewProps {
   initialQuestionId?: string;
@@ -181,10 +184,10 @@ function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
   return parts.map((part, i) => {
     const key = `${keyPrefix}-${i}`;
     if (part.length > 4 && part.startsWith('**') && part.endsWith('**')) {
-      return <strong key={key} className="font-medium text-slate-900 ">{part.slice(2, -2)}</strong>;
+      return <KeyPoint key={key}>{part.slice(2, -2)}</KeyPoint>;
     }
     if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) {
-      return <code key={key} className="px-1 py-0.5 rounded-[6px] bg-teal-50    font-mono text-[11px] border  ">{part.slice(1, -1)}</code>;
+      return <code key={key} className="px-1 py-0.5 rounded-[6px] bg-teal-50 font-mono text-[11px] border border-[#0f8b8d]/25 text-[#0f8b8d]">{part.slice(1, -1)}</code>;
     }
     return <React.Fragment key={key}>{part}</React.Fragment>;
   });
@@ -299,7 +302,7 @@ function ConversationPendingDot({ id }: { id: string }) {
   const pending = useConversationPending(id);
   return pending ? (
     <span
-      className="inline-block h-1.5 w-1.5 rounded-full   "
+      className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500"
       aria-label="Awaiting reply"
     />
   ) : null;
@@ -845,10 +848,22 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
 
   const connectedCount = connectedProviders.length;
 
+  // A lesson requested from another screen (for example "Teach me" on the performance review) is sent once, when the tutor opens.
+  const seedDone = useRef(false);
+  useEffect(() => {
+    if (seedDone.current || !activeId || !provider) return;
+    const seed = takeTutorSeed();
+    seedDone.current = true;
+    if (!seed) return;
+    rewardForLesson();
+    window.setTimeout(() => { void send(seed); }, 300);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, provider]);
+
   return (
     <div className="h-[calc(100vh-64px)] flex flex-col max-w-7xl mx-auto w-full px-2">
       {/* Hero band */}
-      <div className="relative overflow-hidden mt-2 rounded-[20px] border   via-white dark:dark:dark:">
+      <div className="relative overflow-hidden mt-2 rounded-[20px] border border-slate-200 bg-gradient-to-br from-teal-50 via-white to-white shadow-sm dark:border-[#1f3a52] dark:from-[#0e2a3a] dark:via-[#0b1f33] dark:to-[#0b1f33]">
         <div aria-hidden className="pointer-events-none absolute inset-0 opacity-[0.10] dark:opacity-[0.12]" />
         <div
           aria-hidden
@@ -857,13 +872,13 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
         <div className="relative p-4 sm:p-5 flex flex-col gap-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
-              <div className="w-11 h-11 rounded-[16px]   border   flex items-center justify-center shrink-0">
-                <Sparkles className="w-5 h-5  " />
+              <div className="w-11 h-11 rounded-[16px] border border-[#0f8b8d]/40 bg-teal-100 dark:bg-teal-900/40 flex items-center justify-center shrink-0">
+                <Sparkles className="w-5 h-5 text-[#00696b]" />
               </div>
               <div className="min-w-0">
-                <div className="font-[''] tracking-wide text-[10px] uppercase  ">Clinical AI Tutor</div>
-                <h1 className="font-['Cormorant'] text-xl sm:text-2xl font-semibold text-slate-900  leading-tight truncate">Ask anything clinical</h1>
-                <p className="text-[11px] text-slate-600  truncate">
+                <div className=" tracking-wide text-[10px] uppercase text-[#00696b] dark:text-teal-300">Clinical AI Tutor</div>
+                <h1 className=" text-xl sm:text-2xl font-semibold text-slate-900 dark:text-white leading-tight truncate">Ask anything clinical</h1>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300 truncate">
                   {provider && providerMap[provider]?.connected
                     ? `Live · ${provider} · ${model || getEffectiveModel(provider)}`
                     : `No connected provider · ${NOT_CONNECTED_MESSAGE}`}
@@ -872,7 +887,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
             </div>
             <button
               onClick={createConversation}
-              className="inline-flex items-center justify-center gap-1.5 rounded-[14px] border border-slate-900/80  bg-white  px-3.5 py-2 text-[11px] font-medium text-slate-900  hover:-translate-y-0.5 transition-transform shrink-0"
+              className="inline-flex items-center justify-center gap-1.5 rounded-[14px] border border-slate-900/80 dark:border-slate-500 bg-white dark:bg-slate-800 px-3.5 py-2 text-[11px] font-medium text-slate-900 dark:text-white hover:-translate-y-0.5 transition-transform shrink-0"
             >
               <Plus className="w-3.5 h-3.5" /> New chat
             </button>
@@ -881,7 +896,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
           <div className="flex flex-col xl:flex-row xl:items-center gap-3">
             <div className="flex items-center gap-2 flex-wrap">
               {/* Persona segmented */}
-              <div className="inline-flex rounded-[14px] border   bg-white/80  p-0.5">
+              <div className="inline-flex rounded-[14px] border border-slate-200 bg-white/80 p-0.5 dark:border-slate-700 dark:bg-slate-900/70">
                 {PERSONAS.map((p) => (
                   <button
                     key={p.id}
@@ -889,8 +904,8 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                     title={p.hint}
                     className={`px-2.5 py-1.5 rounded-[11px] text-[10px] font-medium transition-colors ${
                       persona === p.id
-                        ? '  '
-                        : 'text-slate-600   '
+                        ? 'bg-[#001432] text-white dark:bg-teal-600'
+                        : 'text-slate-600 hover:bg-white hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white'
                     }`}
                   >
                     {p.label}
@@ -903,7 +918,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                 <select
                   value={provider ?? ''}
                   onChange={(e) => handleProviderChange(e.target.value as AiProviderId)}
-                  className="appearance-none bg-white  border border-slate-300  text-[11px] font-semibold text-slate-800  rounded-[12px] pl-2.5 pr-7 py-2 focus:outline-none focus:ring-2 focus: disabled:opacity-50"
+                  className="appearance-none bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 text-[11px] font-semibold text-slate-800 dark:text-slate-100 rounded-[12px] pl-2.5 pr-7 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] disabled:opacity-50"
                   disabled={connectedCount === 0}
                 >
                   {connectedCount === 0 && <option value="">No provider connected</option>}
@@ -922,7 +937,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                 list="tutor-model-options"
                 placeholder="model id"
                 title={model || (provider ? getEffectiveModel(provider) : '')}
-                className="w-56 bg-white  border border-slate-300  text-[11px] font-mono text-slate-800  rounded-[12px] px-2 py-2 focus:outline-none focus:ring-2 focus: disabled:opacity-50 placeholder-slate-500"
+                className="w-56 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 text-[11px] font-mono text-slate-800 dark:text-slate-100 rounded-[12px] px-2 py-2 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] disabled:opacity-50 placeholder-slate-500"
               />
               <datalist id="tutor-model-options">
                 {provider && providerMap[provider]?.connected && (
@@ -932,15 +947,15 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
             </div>
 
             {/* Effort segmented (Min..Ultra), persisted */}
-            <div className="inline-flex rounded-[14px] border   bg-white/80  p-0.5 shrink-0" title="Reasoning effort (subscription providers)">
+            <div className="inline-flex rounded-[14px] border border-slate-200 bg-white/80 p-0.5 dark:border-slate-700 dark:bg-slate-900/70 shrink-0" title="Reasoning effort (subscription providers)">
               {EFFORT_LEVELS.map((level) => (
                 <button
                   key={level}
                   onClick={() => handleEffortChange(level)}
                   className={`px-2.5 py-1.5 rounded-[11px] text-[10px] font-medium transition-colors ${
                     effort === level
-                      ? '  '
-                      : 'text-slate-600   '
+                      ? 'bg-[#001432] text-white dark:bg-teal-600'
+                      : 'text-slate-600 hover:bg-white hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white'
                   }`}
                 >
                   {level}
@@ -962,7 +977,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
               </span>
               <button
                 onClick={() => setContextOpen((open) => !open)}
-                className="font-medium  hover:underline shrink-0"
+                className="font-bold text-[#00696b] hover:underline shrink-0"
                 aria-expanded={contextOpen}
               >
                 {contextOpen ? 'Hide' : 'Show full question'}
@@ -999,7 +1014,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
         <div className="hidden md:flex flex-col w-60 shrink-0 bg-white rounded-2xl border border-slate-200 shadow-sm">
           <button
             onClick={createConversation}
-            className="m-3 mb-2 px-3 py-2 rounded-xl   text-white text-xs font-medium flex items-center justify-center gap-1.5"
+            className="m-3 mb-2 px-3 py-2 rounded-xl bg-[#001432] hover:bg-[#13294b] text-white text-xs font-medium flex items-center justify-center gap-1.5"
           >
             <Plus className="w-3.5 h-3.5" /> New chat
           </button>
@@ -1018,8 +1033,8 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                   onClick={() => setActiveId(c.id)}
                   className={`group flex items-center justify-between px-3 py-2.5 rounded-[20px] cursor-pointer text-xs transition-all duration-200 border ${
                     isActive
-                      ? '  '
-                      : 'bg-white  border-slate-200  text-slate-700  hover:translate-x-1  '
+                      ? 'bg-teal-50 border-[#0f8b8d]/30 text-[#00696b]'
+                      : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:translate-x-1'
                   }`}
                 >
                   {renamingId === c.id ? (
@@ -1029,26 +1044,26 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                       onChange={(e) => setRenameText(e.target.value)}
                       onBlur={commitRename}
                       onKeyDown={(e) => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenamingId(null); }}
-                      className="flex-1 min-w-0 bg-white  border border-slate-200  rounded-[8px] px-1.5 py-0.5 text-xs text-slate-900  focus:outline-none focus:ring-2 focus:"
+                      className="flex-1 min-w-0 bg-white border border-slate-200 rounded-[8px] px-1.5 py-0.5 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
                     />
                   ) : (
                     <>
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <MessageSquare className={`w-3.5 h-3.5 shrink-0 ${isActive ? '' : 'text-slate-400'}`} />
+                        <MessageSquare className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-[#0f8b8d]' : 'text-slate-400'}`} />
                         <span className="truncate font-medium">{c.title}</span>
                         <ConversationPendingDot id={c.id} />
                       </div>
                       <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 transition-opacity">
                         <button
                           onClick={(e) => { e.stopPropagation(); setRenamingId(c.id); setRenameText(c.title); }}
-                          className="p-1 rounded-[8px] hover:bg-slate-200  text-slate-500  focus:outline-none focus:ring-2 focus:"
+                          className="p-1 rounded-[8px] hover:bg-slate-200 text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
                           title="Rename"
                         >
                           <Pencil className="w-3 h-3" />
                         </button>
                         <button
                           onClick={(e) => { e.stopPropagation(); deleteConversation(c.id); }}
-                          className="p-1 rounded-[8px] hover:bg-rose-100  text-slate-500  hover:text-rose-600 focus:outline-none focus:ring-2 focus:"
+                          className="p-1 rounded-[8px] hover:bg-rose-100 text-slate-500 hover:text-rose-600 focus:outline-none focus:ring-2 focus:ring-rose-300"
                           title="Delete"
                         >
                           <Trash2 className="w-3 h-3" />
@@ -1086,14 +1101,14 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
           {/* Messages */}
           <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
             {messages.length === 0 && (
-              <div className="relative h-full flex flex-col items-center justify-center text-center space-y-3 py-10 overflow-hidden rounded-[20px] border border-slate-200  bg-white ">
+              <div className="relative h-full flex flex-col items-center justify-center text-center space-y-3 py-10 overflow-hidden rounded-[20px] border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
                 <div aria-hidden className="pointer-events-none absolute inset-0 opacity-[0.10] dark:opacity-[0.12]" />
                 <div aria-hidden className={`pointer-events-none absolute inset-0 opacity-[0.05] dark:opacity-[0.10] [mask-image:radial-gradient(circle_at_center,transparent_20%,black_120%)] ${reduceMotion ? 'hidden' : ''}`} />
-                <div className="relative w-12 h-12 rounded-[16px] bg-teal-50  border   flex items-center justify-center ">
-                  <Bot className="w-6 h-6  " />
+                <div className="relative w-12 h-12 rounded-[16px] bg-teal-50 dark:bg-teal-900/40 border border-[#0f8b8d]/20 flex items-center justify-center">
+                  <Bot className="w-6 h-6 text-[#0f8b8d]" />
                 </div>
-                <h3 className="relative font-['Cormorant'] text-xl font-semibold text-slate-900 ">Ask anything clinical</h3>
-                <p className="relative text-xs text-slate-600  max-w-sm leading-relaxed">
+                <h3 className="relative text-xl font-semibold text-slate-900 dark:text-white">Ask anything clinical</h3>
+                <p className="relative text-xs text-slate-600 dark:text-slate-300 max-w-sm leading-relaxed">
                   Replies are generated live by your connected provider ({provider ? `currently ${provider}` : 'none connected'})
                   with the last 10 turns of this conversation as context. Attach an exam question with the chip above, attach
                   a real page from your PDF library with the paperclip, or start with a quick prompt below.
@@ -1106,10 +1121,10 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                 <div className={`group max-w-[85%] ${msg.role === 'user' ? 'items-end' : 'items-start'} flex flex-col gap-1`}>
                   <div
                     className={`px-4 py-3 rounded-[20px] text-xs leading-relaxed ${msg.role === 'user'
-                      ? 'bg-white  border   text-slate-900  rounded-tr-sm'
+                      ? 'bg-white border border-slate-200 text-slate-900 rounded-tr-sm'
                       : msg.isError
-                        ? 'bg-rose-50  border  text-rose-900 dark:text-rose-100 rounded-tl-sm ring-4 ring-[rgba(255,95,109,0.15)]'
-                        : 'bg-white  border border-slate-200  text-slate-900  rounded-tl-sm'}`}
+                        ? 'bg-rose-50 border border-rose-300 text-rose-900 dark:text-rose-100 rounded-tl-sm ring-4 ring-[rgba(255,95,109,0.15)]'
+                        : 'bg-white border border-slate-200 text-slate-900 rounded-tl-sm'}`}
                   >
                     {msg.role === 'assistant' && !msg.isError && msg.citations && msg.citations.length > 0 && (
                       <div className="flex flex-wrap items-center gap-1.5 pb-2 mb-1.5 border-b border-slate-200/70">
@@ -1160,7 +1175,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                         <button
                           onClick={() => regenerate(index)}
                           disabled={loading}
-                          className="inline-flex items-center gap-1.5 rounded-[12px] border  bg-white  px-3 py-1.5 text-[11px] font-medium   hover:-translate-y-0.5 disabled:opacity-40 transition-transform"
+                          className="inline-flex items-center gap-1.5 rounded-[12px] border border-slate-300 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:-translate-y-0.5 disabled:opacity-40 transition-transform"
                         >
                           <RotateCcw className="w-3.5 h-3.5" /> Retry
                         </button>
@@ -1173,8 +1188,8 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
 
                   {/* reasoning steps / pearl from the server (rendered only when present) */}
                   {msg.role === 'assistant' && !msg.isError && msg.reasoningSteps && msg.reasoningSteps.length > 0 && (
-                    <div className="w-full p-3 bg-teal-50/60 border  rounded-xl text-[11px] text-slate-700 space-y-1.5">
-                      <div className="font-medium uppercase tracking-wider  flex items-center gap-1.5">
+                    <div className="w-full p-3 bg-teal-50/60 border border-[#0f8b8d]/20 rounded-xl text-[11px] text-slate-700 space-y-1.5">
+                      <div className="font-bold uppercase tracking-wider text-[#0f8b8d] flex items-center gap-1.5">
                         <Layers className="w-3 h-3" /> Reasoning trace
                       </div>
                       {msg.reasoningSteps.map((s, i) => (
@@ -1187,7 +1202,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                   )}
 
                   {msg.role === 'assistant' && !msg.isError && msg.pearl && (
-                    <div className="w-full p-3  text-white rounded-xl text-[11px] flex gap-2">
+                    <div className="w-full p-3 bg-[#001432] text-white rounded-xl text-[11px] flex gap-2">
                       <Brain className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
                       <span className="leading-relaxed">
                         <span className="font-medium text-amber-400 uppercase tracking-wider mr-1">Board pearl:</span>
@@ -1246,7 +1261,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
             {loading && (
               <div className="flex justify-start">
                 <div className="px-4 py-3 rounded-2xl rounded-tl-sm bg-slate-50 border border-slate-200 flex items-center gap-2">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin " />
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#0f8b8d]" />
                   <span className="text-[11px] text-slate-500">
                     Synthesising with {provider ? `${provider} · ${model || getEffectiveModel(provider)}` : 'AI'}…
                   </span>
@@ -1264,7 +1279,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                   key={p}
                   onClick={() => send(p)}
                   disabled={!provider || connectedCount === 0}
-                  className="text-[11px] px-3 py-1.5 rounded-[12px]   border border-slate-900/70   font-medium hover:-translate-y-0.5 transition-transform disabled:opacity-40 [clip-path:polygon(0%_15%,8%_0%,20%_12%,32%_0%,45%_10%,58%_0%,72%_10%,86%_0%,100%_14%,92%_30%,100%_48%,90%_62%,100%_80%,84%_92%,70%_84%,56%_100%,42%_88%,28%_100%,14%_88%,0%_100%,8%_78%,0%_60%,10%_44%)]"
+                  className="text-[11px] px-3 py-1.5 rounded-[12px] border border-slate-900/70 bg-white text-slate-900 font-medium hover:bg-teal-50 hover:-translate-y-0.5 transition-transform disabled:opacity-40 [clip-path:polygon(0%_15%,8%_0%,20%_12%,32%_0%,45%_10%,58%_0%,72%_10%,86%_0%,100%_14%,92%_30%,100%_48%,90%_62%,100%_80%,84%_92%,70%_84%,56%_100%,42%_88%,28%_100%,14%_88%,0%_100%,8%_78%,0%_60%,10%_44%)]"
                 >
                   {p}
                 </button>
@@ -1283,10 +1298,10 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                     return (
                       <span
                         key={a.id}
-                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[14px] border text-[10px] transition-transform hover:-${
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[14px] border text-[10px] transition-transform hover:-translate-y-0.5 ${
                           big
-                            ? 'bg-amber-50   text-amber-800  ring-4 ring-[rgba(255,95,109,0.15)]'
-                            : 'bg-teal-50     '
+                            ? 'border-amber-300 bg-amber-50 text-amber-800 ring-4 ring-[rgba(255,95,109,0.15)]'
+                            : 'border-[#0f8b8d]/30 bg-teal-50 text-[#00696b]'
                         }`}
                         title={a.tokens ? `Approx ${formatTokens(a.tokens)} of context` : undefined}
                       >
@@ -1297,7 +1312,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                         <button
                           onClick={() => removeAttachment(a.id)}
                           title="Remove this source from context"
-                          className=" hover:text-rose-600 shrink-0"
+                          className="text-[#0f8b8d] hover:text-rose-600 shrink-0"
                         >
                           <X className="w-3 h-3" />
                         </button>
@@ -1311,7 +1326,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                 <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
                   <div className="flex items-center justify-between">
                     <div className="text-[11px] font-medium text-slate-700 flex items-center gap-1.5">
-                      <BookOpen className="w-3.5 h-3.5 " />
+                      <BookOpen className="w-3.5 h-3.5 text-[#0f8b8d]" />
                       Attach pages from your PDF library
                     </div>
                     <button
@@ -1343,7 +1358,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                           setAttachEndPage('1');
                           setAttachError(null);
                         }}
-                        className="max-w-[300px] flex-1 min-w-[160px] text-[11px] px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:"
+                        className="max-w-[300px] flex-1 min-w-[160px] text-[11px] px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
                       >
                         {attachDocs.map((d) => (
                           <option key={d.id} value={d.id}>
@@ -1365,7 +1380,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                             if (Number.isFinite(s) && s > Number(attachEndPage || 1)) setAttachEndPage(String(s));
                             setAttachError(null);
                           }}
-                          className="w-16 text-[11px] font-mono px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:"
+                          className="w-16 text-[11px] font-mono px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
                         />
                         <span>to</span>
                         <input
@@ -1375,14 +1390,14 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                           value={attachEndPage}
                           onChange={(e) => { setAttachEndPage(e.target.value); setAttachError(null); }}
                           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); attachSelectedPage(); } }}
-                          className="w-16 text-[11px] font-mono px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:"
+                          className="w-16 text-[11px] font-mono px-2 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
                         />
                         <span>of {selectedAttachDoc?.numPages ?? '?'}</span>
                       </div>
                       <button
                         onClick={attachSelectedPage}
                         disabled={attachBusy}
-                        className="px-3 py-1.5 rounded-lg   text-white text-[11px] font-medium disabled:opacity-40 inline-flex items-center gap-1.5"
+                        className="px-3 py-1.5 rounded-lg bg-[#0f8b8d] hover:bg-[#00696b] text-white text-[11px] font-medium disabled:opacity-40 inline-flex items-center gap-1.5"
                       >
                         {attachBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Paperclip className="w-3.5 h-3.5" />}
                         {attachBusy ? 'Attaching…' : 'Attach'}
@@ -1448,7 +1463,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
               aria-pressed={imageEnabled}
               className={`p-2.5 rounded-[14px] border text-xs font-medium flex items-center gap-1.5 shrink-0 transition-transform hover:-translate-y-0.5 ${
                 imageEnabled
-                  ? 'bg-teal-50     '
+                  ? 'border-[#0f8b8d]/40 bg-teal-50 text-[#00696b]'
                   : 'bg-slate-50  border-slate-200  text-slate-400   '
               }`}
             >
@@ -1472,12 +1487,12 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
               title="Attach a page from your PDF library as context"
               className={`p-2.5 rounded-[14px] border text-xs font-medium flex items-center gap-1.5 shrink-0 transition-transform hover:-translate-y-0.5 ${
                 attachOpen || attachments.length
-                  ? 'bg-teal-50     '
+                  ? 'border-[#0f8b8d]/40 bg-teal-50 text-[#00696b]'
                   : 'bg-slate-50  border-slate-200  text-slate-500   '
               }`}
             >
               <Paperclip className="w-4 h-4" />
-              {attachments.length > 0 && <span className="font-[''] text-[12px]">{attachments.length}</span>}
+              {attachments.length > 0 && <span className=" text-[12px] text-[#00696b]">{attachments.length}</span>}
             </button>
             <textarea
               ref={textareaRef}
@@ -1495,12 +1510,12 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                 : attachments.length > 0
                   ? `Ask about page ${attachments[0].pageNumber} of ${attachments[0].docTitle.slice(0, 40)}… (Enter to send)`
                   : contextQuestion ? 'Ask about the attached question… (Enter to send, Shift+Enter for a new line)' : 'Type a clinical question… (Enter to send, Shift+Enter for a new line)'}
-              className="flex-1 resize-none text-xs font-['M_PLUS_Rounded_1c'] text-slate-900  px-3.5 py-2.5 rounded-[16px] bg-slate-50  border border-slate-200  focus:outline-none focus: focus:ring-4 focus:ring-[rgba(142,197,252,0.15)] placeholder-slate-400 dark:placeholder-[#8B8580]"
+              className="flex-1 resize-none text-xs text-slate-900 px-3.5 py-2.5 rounded-[16px] bg-slate-50 border border-slate-200 focus:outline-none focus:border-[#0f8b8d]/60 focus:ring-4 focus:ring-[rgba(142,197,252,0.15)] placeholder-slate-400 dark:placeholder-[#8B8580]"
             />
             <button
               onClick={() => send(input)}
               disabled={loading || !input.trim() || connectedCount === 0}
-              className="px-4 py-2.5 rounded-[14px] hover:-translate-y-[3px] hover:scale-[1.03] disabled:opacity-40  text-xs font-medium flex items-center gap-2 shrink-0 transition-transform"
+              className="px-4 py-2.5 rounded-[14px] bg-[#0f8b8d] hover:bg-[#00696b] text-white hover:-translate-y-[3px] hover:scale-[1.03] disabled:opacity-40 text-xs font-medium flex items-center gap-2 shrink-0 transition-transform"
             >
               {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
               Send
@@ -1516,7 +1531,7 @@ export const AITutorView: React.FC<AITutorViewProps> = ({ initialQuestionId, att
                   key={action.label}
                   onClick={() => send(action.prompt)}
                   disabled={loading || connectedCount === 0}
-                  className="px-2.5 py-1.5 rounded-full border border-slate-200 bg-white text-[11px] font-semibold text-slate-600   disabled:opacity-40"
+                  className="px-2.5 py-1.5 rounded-full border border-slate-200 bg-white text-[11px] font-semibold text-slate-600 hover:text-[#00696b] hover:border-[#0f8b8d]/40 disabled:opacity-40"
                 >
                   {action.label}
                 </button>

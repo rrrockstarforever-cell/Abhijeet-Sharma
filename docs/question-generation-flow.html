@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How Pulse Med writes questions</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#ffffff; --ink:#14202b; --mute:#5b6b7a; --line:#d8dee5; --db:#0f8b8d; --books:#7a5ad6; --ai:#c9741a; --check:#b5334a; --out:#2b7a3d; --chip:#eef2f6; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f151b; --card:#17202a; --ink:#e8eef3; --mute:#97a6b4; --line:#2a3744; --chip:#1f2b37; --db:#46c3c5; --books:#a48cf0; --ai:#f0a24a; --check:#ef7a90; --out:#6cc27f; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 80px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  .lead { color:var(--mute); margin:0 0 20px; }
+  .legend { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 28px; font-size:13px; }
+  .legend span { padding:3px 10px; border-radius:999px; border:1px solid var(--line); background:var(--card); }
+  .legend i { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
+  .step { position:relative; background:var(--card); border:1px solid var(--line); border-left:6px solid var(--c,var(--db)); border-radius:12px; padding:14px 16px 14px 18px; margin:0 0 34px; }
+  .step::after { content:"\2193"; position:absolute; left:50%; bottom:-28px; transform:translateX(-50%); font-size:22px; color:var(--mute); }
+  .step:last-of-type::after { content:none; }
+  .num { font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--c,var(--db)); font-weight:700; }
+  h2 { font-size:19px; margin:2px 0 8px; }
+  p { margin:6px 0; }
+  .io { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:10px 0; }
+  .io div { background:var(--chip); border-radius:8px; padding:8px 10px; font-size:14px; }
+  .io b { display:block; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--mute); margin-bottom:2px; }
+  ul { margin:6px 0 6px 18px; padding:0; } li { margin:3px 0; }
+  .real { background:var(--chip); border-radius:8px; padding:8px 10px; font-size:14px; margin-top:8px; }
+  .real b { color:var(--out); }
+  code { font:13px ui-monospace,Consolas,monospace; background:var(--chip); padding:1px 5px; border-radius:4px; }
+  .where { font-size:12.5px; color:var(--mute); margin-top:8px; }
+  .gates { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:8px; margin:10px 0; }
+  .gates div { border:1px solid var(--line); border-radius:8px; padding:7px 10px; font-size:14px; }
+  .gates em { color:var(--check); font-style:normal; font-weight:600; }
+  @media (max-width:560px) { .io { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>How Pulse Med writes your questions</h1>
+  <p class="lead">From the topic you type to the finished test. Numbers in the green boxes are from a real run: <b>"Lung carcinoma", 100 questions</b>.</p>
+  <div class="legend">
+    <span><i style="background:var(--db)"></i>ChatGPT PYQ database</span>
+    <span><i style="background:var(--books)"></i>Your books</span>
+    <span><i style="background:var(--ai)"></i>AI model writes</span>
+    <span><i style="background:var(--check)"></i>Checks that can reject</span>
+    <span><i style="background:var(--out)"></i>Result</span>
+  </div>
+
+  <section class="step" style="--c:var(--db)">
+    <div class="num">Step 1 &middot; You type a topic</div>
+    <h2>The database is searched first</h2>
+    <div class="io"><div><b>In</b>"Lung carcinoma", exam, count (100)</div><div><b>Out</b>A list of database topics, each with a tier and a PYQ score</div></div>
+    <ul>
+      <li>Words that mean the same are matched together: cancer, carcinoma, tumour, malignancy.</li>
+      <li>All 19 specialties are searched, not just one. The biggest specialty is kept to about 14 topics; every other specialty with matches gets a few places.</li>
+      <li>If you ticked chapters in a specialty instead, each ticked name is looked up in the database (the whole name and its parts).</li>
+    </ul>
+    <div class="real"><b>Real run:</b> 20 database topics: Pathology 14, Surgery 3, Medicine 2, Radiodiagnosis 1.</div>
+    <div class="where">Code: <code>lookupTopicsBalanced</code> in <code>chapterTopics.ts</code>, <code>splitTopic</code> in <code>ai.ts</code></div>
+  </section>
+
+  <section class="step" style="--c:var(--ai)">
+    <div class="num">Step 2 &middot; Backup list</div>
+    <h2>The AI proposes its own subtopics, held in reserve</h2>
+    <p>One model call, helped by a web and book search, splits the topic into subtopics. With 6 or more database topics, these are kept apart as "extra" and used <b>only if the database cannot fill the count</b>. With fewer, they are merged in after the database topics. The prompt asks for subtopics from every specialty that examines the topic, with none taking more than a third.</p>
+    <div class="where">Code: <code>/api/ai/split-topic</code> in <code>server.ts</code></div>
+  </section>
+
+  <section class="step" style="--c:var(--books)">
+    <div class="num">Step 3 &middot; Facts, not topics</div>
+    <h2>Every question starts from one quoted fact</h2>
+    <div class="io"><div><b>In</b>Each subtopic, searched in your books (and the web if books are not the only source)</div><div><b>Out</b>A fact plan: one fact per future question, with the exact quote and its source</div></div>
+    <ul>
+      <li>The model lists distinct, exam-testable facts. The quote must appear word for word in the source, or the fact is dropped.</li>
+      <li>Web facts are filtered: case reports, study statistics, hedged statements and formulation science are removed. Books are trusted.</li>
+      <li>Repeated facts are removed (word match, then one model pass).</li>
+      <li>Facts that an earlier saved question already tests are skipped, so old questions do not come back.</li>
+      <li>No specialty may take more than about a third of the plan.</li>
+      <li>If the database facts fall short of the count, the reserve subtopics from Step 2 are searched outside, and those facts are added.</li>
+      <li>The plan is kept for 24 hours per topic and count.</li>
+    </ul>
+    <div class="real"><b>Real run:</b> 85 facts planned: Pathology 34, Medicine 3, Surgery 1, Radiodiagnosis 1, and 46 from outside the database (Pharmacology, Community Medicine, Surgery, Medicine).</div>
+    <div class="where">Code: <code>planTopicFacts</code>, <code>dedupePlan</code> in <code>ai.ts</code>; builder in <code>PracticeModuleBuilderView.tsx</code></div>
+  </section>
+
+  <section class="step" style="--c:var(--db)">
+    <div class="num">Step 4 &middot; The count</div>
+    <h2>You get what the sources support</h2>
+    <p>The number of planned facts is the number of questions. If you asked for 100 and 81 facts exist, you get 81 and a note says so. Nothing is padded.</p>
+    <div class="real"><b>Real run:</b> asked 100, note said "Only about 81 relevant questions are available".</div>
+  </section>
+
+  <section class="step" style="--c:var(--ai)">
+    <div class="num">Step 5 &middot; One slot per fact</div>
+    <h2>Style, closing question and difficulty are decided</h2>
+    <ul>
+      <li><b>Style:</b> one-liner, short case, vignette, NOT-true item, image, calculation, mechanism, match-the-following (INI-CET only), mixed in the exam's own proportions.</li>
+      <li><b>Closing question:</b> diagnosis, finding, next step, drug of choice and so on. For a Pharmacology topic, diagnosis and investigation are removed, so the question is about the drug.</li>
+      <li><b>Difficulty:</b> about 20% easy, 45% medium, 35% hard.</li>
+      <li>Facts are ordered so that topics asked more often in the papers get more slots.</li>
+    </ul>
+    <div class="where">Code: <code>planSlots</code> in <code>questionStyles.ts</code>, <code>weightedOrder</code> in <code>ai.ts</code></div>
+  </section>
+
+  <section class="step" style="--c:var(--ai)">
+    <div class="num">Step 6 &middot; The prompt for one question</div>
+    <h2>What the writing model is told</h2>
+    <ul>
+      <li>It is a senior NEET-PG / INI-CET item writer. Plain patient or exam situations only: no study, audit or "a resident proposes" wording.</li>
+      <li>The exam's own pattern (options, marking, style mix).</li>
+      <li>The subtopic, the planned fact and its exact quote. The question must test that fact without giving it away.</li>
+      <li>How the exam asks that topic: ChatGPT's note from the PYQ research for this topic.</li>
+      <li>The style and closing-question rules for this slot.</li>
+      <li>For Pharmacology: the answer must be a drug, mechanism, adverse effect, interaction, dose or antidote, never a diagnosis or organism.</li>
+      <li>What is already in the set: patients, drugs, answers and key facts to avoid repeating.</li>
+    </ul>
+    <p>Up to 20 questions are written at the same time (your parallel limit). Each returns one JSON question with options, key, explanation and key fact.</p>
+    <div class="where">Code: <code>GENERATOR_SYSTEM</code>, the prompt array in <code>generateExamQuestions</code>, <code>ai.ts</code></div>
+  </section>
+
+  <section class="step" style="--c:var(--check)">
+    <div class="num">Step 7 &middot; Checks</div>
+    <h2>A question that fails any check is thrown away and rewritten</h2>
+    <div class="gates">
+      <div><em>Shape:</em> stem too thin, wrong closing question, bad option set</div>
+      <div><em>Repeats:</em> same patient, same answer or same fact as one already kept</div>
+      <div><em>Wording:</em> research, audit or resident-review language; animal or veterinary cases</div>
+      <div><em>Subject:</em> Pharmacology item asking for a diagnosis, disease or organism</div>
+      <div><em>Source:</em> the key must be supported (web sources are re-checked; books are trusted)</div>
+      <div><em>Examiner:</em> a second model call rejects a wrong key, two defensible answers, out-of-scope or non-exam items</div>
+    </div>
+    <p>Passing questions get a repaired explanation if it does not say why each other option is wrong, the correct letter is rotated across A to D, and a picture is planned when the fact has a typical image.</p>
+    <p>A failed slot is rewritten, or filled from a spare fact. If the set is still short, up to 60 further rounds run until the target is met.</p>
+    <div class="real"><b>Real run:</b> 6 rounds, 0 questions permanently dropped, 81 of 81 kept.</div>
+  </section>
+
+  <section class="step" style="--c:var(--ai)">
+    <div class="num">Step 8 &middot; Optional</div>
+    <h2>Image questions</h2>
+    <p>If images are on, a slice of the set is built from curated bank pictures. The question is written from the picture and then verified. A question that fails is dropped, and the text questions remain.</p>
+  </section>
+
+  <section class="step" style="--c:var(--out)">
+    <div class="num">Step 9 &middot; Opening the test</div>
+    <h2>Saved, de-duplicated, opened</h2>
+    <ul>
+      <li>Every batch is refined, saved to the question bank and QA-checked while the next batch is still being written.</li>
+      <li>A last duplicate check removes any question whose wording is 60% or more like a stored one.</li>
+      <li>The set is stored as a saved question bank, and the test runner opens. Your answers, flags and position are saved per bank, so you can leave and return.</li>
+    </ul>
+    <div class="where">Code: <code>launchWith</code> in the builder; <code>handleLaunchModule</code> in <code>App.tsx</code>; <code>moduleStore.ts</code></div>
+  </section>
+
+  <section class="step" style="--c:var(--out)">
+    <div class="num">Result</div>
+    <h2>The 100-question request, in numbers</h2>
+    <div class="real">100 asked &rarr; 20 database topics &rarr; 85 facts planned &rarr; <b>81 questions written and kept</b>, spread over Pathology, Pharmacology, Community Medicine, General Medicine, General Surgery and Radiodiagnosis.</div>
+  </section>
+</main>
+</body>
+</html>

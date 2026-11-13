@@ -20,6 +20,7 @@ import {
 import { aiLog } from './server/oauth.mjs';
 import { research as webResearch, literatureSources, SOURCE_REGISTRY } from './server/web.mjs';
 import { pyqWeights, pyqSource } from './server/pyqFrequency.mjs';
+import { searchMyBooks, myBooksStatus } from './server/mybooks.mjs';
 import { searchImages, fetchImage, REFERENCE_SOURCES, buildVisionVerificationPrompt, parseVisionVerdict } from './server/images.mjs';
 import { generateQuestionFromImage } from './server/visionQuestion.mjs';
 import { buildImageBank, loadImageBank, queryImageBank, getBankImage, bankStats, rejectImage, searchBankByText } from './server/imageBank.mjs';
@@ -546,6 +547,7 @@ app.post('/api/ai/split-topic', async (req: Request, res: Response) => {
     'for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. List every distinct subtopic an examiner tests on this topic: a narrow topic may have only two or three, a broad one thirty or more. Do not stop at a fixed number.',
     'Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.',
     `Subtopic lock: list only subtopics inside the boundary. ${scopeInstruction()} Do not broaden a narrow topic to its whole chapter.`,
+    'If several medical specialties examine this topic (for example pathology, general medicine, surgery, radiology, pharmacology, community medicine), list subtopics from each of those specialties, each written from that specialty point of view. No single specialty may take more than a third of the list.',
     'Give each subtopic a priority from 1 to 10 for how often it is tested.',
     'Give each subtopic "facts": the number of high-yield, exam-testable facts in it (1 to 6). Count only facts an examiner would ask, not background detail.',
     // JSON mode returns one object, so the list sits inside it under "subtopics".
@@ -771,7 +773,24 @@ app.post('/api/ai/plan-topics', async (req: Request, res: Response) => {
       const prior = bestByTopic.get(key);
       if (!prior || (entry.priority || 0) > (prior.priority || 0)) bestByTopic.set(key, entry);
     }
-    const sorted = [...bestByTopic.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0));
+    // The model's reply may leave whole subjects out (it only lists about as many entries as asked for); give
+    // every unlisted subtopic a low priority so each selected subject can still appear.
+    for (const p of pool) {
+      const key = `${p.subject}|${p.subtopic}`;
+      if (!bestByTopic.has(key)) bestByTopic.set(key, { subject: p.subject, subtopic: p.subtopic, priority: 1 });
+    }
+    const byPriority = [...bestByTopic.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0));
+    // With several subjects, the model's top priorities come from a few subjects and fill the whole set (a 100-question
+    // run over 19 subjects covered only 7). Interleave: each subject gives its best topic, then its next best, and so on.
+    const perSubject = new Map<string, any[]>();
+    for (const entry of byPriority) {
+      if (!perSubject.has(entry.subject)) perSubject.set(entry.subject, []);
+      perSubject.get(entry.subject)!.push(entry);
+    }
+    const sorted: any[] = [];
+    for (let i = 0; sorted.length < byPriority.length; i++) {
+      for (const list of perSubject.values()) if (list[i]) sorted.push(list[i]);
+    }
     const weighted: { subject: string; subtopic: string; focus?: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH' }[] = [];
     for (let round = 0; sorted.length > 0 && weighted.length < countN && round < 20; round++) {
       for (const entry of sorted) {
@@ -1707,10 +1726,11 @@ app.get('/api/models/catalog', async (_req: Request, res: Response) => {
  * Adds internet sources for a topic to the last message, so the writing call can check its own keyed answer
  * against them in the same call. Web pages and Europe PMC are searched here; the book and drug labels come from literatureSources.
  */
-async function withInternetSources(messages: OAuthChatMessage[], groundOn: { query?: unknown; subject?: unknown }): Promise<OAuthChatMessage[]> {
+async function withInternetSources(messages: OAuthChatMessage[], groundOn: { query?: unknown; subject?: unknown; books?: unknown }): Promise<OAuthChatMessage[]> {
   const query = String(groundOn.query || '').trim().slice(0, 200);
   if (!query) return messages;
   const subject = String(groundOn.subject || '');
+  if (groundOn.books) return withBookSources(messages, query, subject);
   const [web, found] = await Promise.all([
     webResearch(query, 1200).then((r) => r.sources).catch(() => []),
     literatureSources(query, subject).catch(() => []),
@@ -1729,6 +1749,36 @@ async function withInternetSources(messages: OAuthChatMessage[], groundOn: { que
     { ...last, content: `${last.content}\n\nInternet sources found for this topic. Read them, then check the keyed option against them before you answer: """${block}"""` },
   ];
 }
+
+
+/**
+ * "My books" mode: the book passages are the only source. The internet is searched only when a passage says the
+ * books themselves differ on the point, and then only to settle that point. With no passage the writer is told so,
+ * and its item is dropped rather than written from memory.
+ */
+async function withBookSources(messages: OAuthChatMessage[], query: string, subject: string): Promise<OAuthChatMessage[]> {
+  const passages = searchMyBooks(query, subject, 4, 1800);
+  const last = messages[messages.length - 1];
+  const withText = (extra: string): OAuthChatMessage[] => [...messages.slice(0, -1), { ...last, content: `${last.content}\n\n${extra}` }];
+  if (!passages.length) {
+    return withText('MY BOOKS: no passage in the learner\'s books matches this topic. Write nothing from memory: set "sourceCheck" to "not supported".');
+  }
+  const bookBlock = passages.map((p: any, i: number) => `[B${i + 1}] ${p.title}\nSection: ${p.heading}\n${p.text}`).join('\n\n');
+  let extra = `MY BOOKS (the learner's own books, the only source for this item). Base the correct option and keyFact ONLY on these passages, never on outside knowledge. In "citations" give the book and chapter you used. If these passages do not state a fact you can test, set "sourceCheck" to "not supported". Passages: """${bookBlock}"""`;
+  if (passages.some((p: any) => p.disputed)) {
+    const web = await webResearch(query, 1200).then((r: any) => r.sources).catch(() => []);
+    const sources = web.filter((w: any) => w?.text).slice(0, 3);
+    if (sources.length) {
+      extra += `\n\nThe books say their sources differ on a point here. Use these internet sources ONLY to settle that disputed point, and prefer a different fact if it stays unsettled: """${sources.map((w: any, i: number) => `[W${i + 1}] ${w.title}\n${w.url}\n${String(w.text).slice(0, 1200)}`).join('\n\n')}"""`;
+    }
+  }
+  return withText(extra);
+}
+
+// GET /api/mybooks/status -> which of the learner's books are installed.
+app.get('/api/mybooks/status', (_req: Request, res: Response) => {
+  try { return res.json(myBooksStatus()); } catch (err: any) { return res.status(500).json({ error: err?.message || 'Could not read the books.' }); }
+});
 
 
 // Checks one generated item against the sources: is the keyed answer correct, and is every fact it relies on
@@ -1790,6 +1840,29 @@ app.post('/api/export/questions', (req: Request, res: Response) => {
 let lastEngine: { provider: string; model: string; at: string } | null = null;
 
 
+// Gate for /api/ai/complete: at most 30 calls at once to the provider, and a call refused with HTTP 429 (rate limit)
+// waits and tries again instead of failing. Long batch jobs (topic lists, merges) then lose almost nothing.
+let completeActive = 0;
+const completeWaiters: Array<() => void> = [];
+async function gatedCompletion(args: Parameters<typeof runCompletion>[0]): Promise<string> {
+  while (completeActive >= 30) await new Promise<void>((r) => completeWaiters.push(r));
+  completeActive++;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await runCompletion(args);
+      } catch (err: any) {
+        const limited = (err instanceof ApiError && err.status === 429) || /rate limit|429/i.test(String(err?.message || ''));
+        if (!limited || attempt >= 5 || args.signal?.aborted) throw err;
+        await new Promise((r) => setTimeout(r, 3000 * (attempt + 1) + Math.random() * 2000));
+      }
+    }
+  } finally {
+    completeActive--;
+    completeWaiters.shift()?.();
+  }
+}
+
 app.post('/api/ai/complete', async (req: Request, res: Response) => {
   const { provider, model, system, messages, json, effort, groundOn } = req.body || {};
   if (!provider) {
@@ -1806,7 +1879,7 @@ app.post('/api/ai/complete', async (req: Request, res: Response) => {
   });
   try {
     const grounded = groundOn && typeof groundOn === 'object' ? await withInternetSources(messages, groundOn) : messages;
-    const text = await runCompletion({ provider, model, system, messages: grounded, json, effort, purpose: 'write', signal: controller.signal, session: req.header('x-opencode-session') || undefined });
+    const text = await gatedCompletion({ provider, model, system, messages: grounded, json, effort, purpose: 'write', signal: controller.signal, session: req.header('x-opencode-session') || undefined });
     if (controller.signal.aborted) return;
     if (!text || !text.trim()) {
       return res.status(502).json({ error: 'The AI provider returned an empty response. Try again.' });
@@ -1886,7 +1959,7 @@ app.delete('/api/ai/jobs/:id', (req: Request, res: Response) => {
 // ---------- tutor-chat (kept for AITutorView; backed by the same real completion path) ----------
 
 const PERSONA_PROMPTS: Record<string, string> = {
-  BOARD_MASTER: 'You are the PULSE MED Board Exam Master for NEET-PG / INI-CET / AMC CAT: razor-sharp high-yield clinical breakdowns, distractor (trap) dissection, and exam-board pearls.',
+  BOARD_MASTER: 'You are the PULSE MED Board Exam Master for NEET-PG / INI-CET: razor-sharp high-yield clinical breakdowns, distractor (trap) dissection, and exam-board pearls.',
   ATTENDING: 'You are the PULSE MED Socratic Attending Physician on teaching rounds: reason step by step with the resident, ask and answer like a senior clinician.',
   PHARMACOLOGIST: 'You are the PULSE MED Mechanism & Kinetics Specialist: pharmacodynamics, pharmacokinetics, receptor and antimicrobial-resistance mechanisms explained precisely.',
 };
@@ -1928,9 +2001,9 @@ app.post('/api/ai/tutor-chat', async (req: Request, res: Response) => {
   }
 
   const system = [
-    'You are the PULSE MED clinical AI tutor for postgraduate medical exams (NEET-PG, INI-CET, AMC CAT).',
+    'You are the PULSE MED clinical AI tutor for postgraduate medical exams (NEET-PG, INI-CET).',
     typeof body.exam === 'string' && body.exam
-      ? `The learner's active exam is ${String(body.exam).replace('_', '-')}. Tailor depth, terminology and guidelines to that exam (AMC CAT: Australian eTG/TGA and RACGP guidance; NEET-PG/INI-CET: Indian and international standard references).`
+      ? `The learner's active exam is ${String(body.exam).replace('_', '-')}. Tailor depth, terminology and guidelines to that exam (NEET-PG/INI-CET: Indian and international standard references).`
       : '',
     PERSONA_PROMPTS[persona] || PERSONA_PROMPTS.BOARD_MASTER,
     'Rules:',
@@ -2487,6 +2560,11 @@ app.post('/api/web/research', async (req: Request, res: Response) => {
   const query = typeof req.body?.query === 'string' ? req.body.query : '';
   try {
     const pageChars = Math.min(30000, Math.max(2500, Number(req.body?.pageChars) || 2500));
+    // My books mode: the sources are the learner's own books only, the subject's book first and then the others.
+    if (req.body?.books) {
+      const found = searchMyBooks(query, typeof req.body?.subject === 'string' ? req.body.subject : '', 6, Math.min(pageChars, 2500));
+      return res.json({ success: true, sources: found.map((f: any) => ({ title: `${f.title} — ${f.heading}`, url: `mybooks:${f.title}`, text: f.text, kind: 'book' })), retrievedAt: new Date().toISOString() });
+    }
     const out = await webResearch(query, pageChars);
     return res.json({ success: true, sources: out.sources, retrievedAt: out.retrievedAt });
   } catch (err: any) {
@@ -2495,7 +2573,7 @@ app.post('/api/web/research', async (req: Request, res: Response) => {
 });
 
 // POST /api/exams/dates {exam} -> look for the next sitting's date on the OFFICIAL body
-// only (NBEMS / AIIMS / AMC). Internet-backed, dependency-free.
+// only (NBEMS / AIIMS). Internet-backed, dependency-free.
 //
 // Deliberately conservative: coaching sites and aggregators routinely *guess* dates, and
 // a wrong countdown actively harms a student, so a source is only used if its hostname is
@@ -2512,18 +2590,13 @@ const OFFICIAL_EXAM_SOURCES: Record<string, { label: string; hosts: string[]; qu
     hosts: ['aiimsexams.ac.in', 'aiims.edu'],
     queries: ['AIIMS INI-CET exam date notification', 'aiimsexams INI-CET 2027 schedule prospectus'],
   },
-  AMC_CAT: {
-    label: 'Australian Medical Council (amc.org.au)',
-    hosts: ['amc.org.au'],
-    queries: ['AMC MCQ examination dates', 'AMC CAT MCQ exam dates 2027 schedule'],
-  },
 };
 
 app.post('/api/exams/dates', async (req: Request, res: Response) => {
   const exam = String(req.body?.exam || '').trim().toUpperCase();
   const spec = OFFICIAL_EXAM_SOURCES[exam];
   if (!spec) {
-    return res.status(400).json({ error: 'Unknown exam. Use NEET_PG, INI_CET or AMC_CAT.' });
+    return res.status(400).json({ error: 'Unknown exam. Use NEET_PG or INI_CET.' });
   }
   try {
     const batches = await Promise.allSettled(spec.queries.map((q) => webResearch(q)));

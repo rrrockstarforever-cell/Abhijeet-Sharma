@@ -35,12 +35,12 @@ interface SubjectRow {
 }
 
 const statusConfig = {
-  Mastered: { label: 'Mastered', color: 'bg-teal-50 text-teal-800 border-teal-200', bar: '' },
-  Solid: { label: 'Solid', color: 'bg-emerald-50 text-emerald-700 border-emerald-200', bar: '' },
-  Steady: { label: 'Steady', color: 'bg-slate-100 text-slate-700 border-slate-200', bar: '' },
-  Developing: { label: 'Developing', color: 'bg-amber-50 text-amber-700 border-amber-200', bar: '' },
- 'Needs Focus': { label: 'Needs Focus', color: 'bg-amber-50 text-amber-700 border-amber-200', bar: '' },
- 'Red Flag': { label: 'Red Flag', color: 'bg-red-50 text-red-700 border-red-200', bar: '' },
+  Mastered: { label: 'Mastered', color: 'bg-teal-50 text-teal-800 border-teal-200', bar: 'bg-[#0f8b8d]' },
+  Solid: { label: 'Solid', color: 'bg-emerald-50 text-emerald-700 border-emerald-200', bar: 'bg-[#1f9d55]' },
+  Steady: { label: 'Steady', color: 'bg-slate-100 text-slate-700 border-slate-200', bar: 'bg-[#0f8b8d]' },
+  Developing: { label: 'Developing', color: 'bg-amber-50 text-amber-700 border-amber-200', bar: 'bg-amber-400' },
+  'Needs Focus': { label: 'Needs Focus', color: 'bg-amber-50 text-amber-700 border-amber-200', bar: 'bg-amber-400' },
+  'Red Flag': { label: 'Red Flag', color: 'bg-red-50 text-red-700 border-red-200', bar: 'bg-[#d64545]' },
 };
 
 function getStatus(accuracy: number, solved: number): keyof typeof statusConfig {
@@ -162,38 +162,38 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
   const cohortAccuracy = cohortQuestions > 0 ? Math.round((cohortCorrect / cohortQuestions) * 100) : null;
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6 font-['M_PLUS_Rounded_1c'] text-[16px] leading-[1.7]  ">
+    <div className="p-6 max-w-7xl mx-auto space-y-6 text-[16px] leading-[1.7] text-slate-900 dark:text-slate-100">
       {/* Top Header & Cohort Switcher */}
-      <div className="relative overflow-hidden rounded-[24px] border   p-5   dark:">
-        <div className="pointer-events-none absolute inset-0 opacity-[0.08] dark:" />
+      <div className="relative overflow-hidden rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-600 dark:bg-[#0f1a2b] shadow-sm">
+        <div className="pointer-events-none absolute inset-0  [background-size:8px_8px] opacity-[0.08] " />
         <div className="relative flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
-            <div className="mb-1 flex flex-wrap items-center gap-2 text-xs font-semibold  ">
+            <div className="mb-1 flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
               <span>Performance Analytics</span>
               <span>›</span>
-              <span className="rounded-full border   px-2 py-0.5 font-[''] text-[11px] uppercase tracking-wider  ">
+              <span className="rounded-full border-2 border-slate-200 bg-teal-50 px-2 py-0.5 text-[11px] uppercase tracking-wider text-slate-900 dark:border-slate-700">
                 Accuracy Matrix
               </span>
             </div>
-            <div className="mb-1 inline-flex items-center rounded-lg border   px-2.5 py-1 font-[''] text-sm uppercase tracking-[0.18em]   dark:">
+            <div className="mb-1 inline-flex items-center rounded-lg border border-slate-200 bg-amber-100 px-2.5 py-1 text-sm uppercase tracking-[0.18em] text-slate-900 shadow-sm dark:border-slate-700 shadow-sm">
               Training Arc
             </div>
-            <h1 className="font-['Cormorant'] text-3xl font-medium leading-tight tracking-tight   md:text-4xl">
+            <h1 className=" text-3xl font-medium leading-tight tracking-tight text-slate-900 dark:text-slate-100 md:text-4xl">
               Comprehensive Learning Progress & Accuracy Matrix
             </h1>
-            <p className="mt-1 max-w-2xl text-sm  ">
+            <p className="mt-1 max-w-2xl text-sm text-slate-600 dark:text-slate-300">
               Cohort-scoped attempts, accuracy bands, and remediation targets from saved practice.
             </p>
           </div>
 
           {/* Cohort Tabs */}
-          <div className="flex shrink-0 items-center gap-2 rounded-2xl border   p-1.5  ">
+          <div className="flex shrink-0 items-center gap-2 rounded-2xl border border-slate-200 bg-slate-100 p-1.5 dark:border-slate-600 dark:bg-[#0a1220]">
             <button
               onClick={() => setActiveCohort('NEET_PG')}
               className={`min-h-[44px] rounded-xl px-4 py-2 text-xs font-medium uppercase tracking-wider transition-all ${
                 activeCohort === 'NEET_PG'
-                  ? 'border    dark:'
-                  : 'border border-transparent    '
+                              ? 'border border-slate-200 bg-[#0f8b8d] text-slate-900 shadow-sm dark:border-slate-700 shadow-sm'
+                  : 'border border-transparent text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white'
               }`}
             >
               NEET PG
@@ -202,8 +202,8 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
               onClick={() => setActiveCohort('INI_CET')}
               className={`min-h-[44px] rounded-xl px-4 py-2 text-xs font-medium uppercase tracking-wider transition-all ${
                 activeCohort === 'INI_CET'
-                  ? 'border    dark:'
-                  : 'border border-transparent    '
+                              ? 'border border-slate-200 bg-[#0f8b8d] text-slate-900 shadow-sm dark:border-slate-700 shadow-sm'
+                  : 'border border-transparent text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white'
               }`}
             >
               INI-CET
@@ -215,42 +215,42 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
       {/* 4-Stat Metric Row */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {/* Coverage Velocity */}
-        <Card className="relative min-h-[190px] overflow-hidden rounded-[20px] border   p-4   dark:">
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-16 opacity-[0.08] dark:" />
-          <div className="relative flex items-center justify-between gap-2 text-[11px] font-medium uppercase tracking-wider  ">
+        <Card className="relative min-h-[190px] overflow-hidden rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-600 dark:bg-[#0f1a2b] shadow-sm">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-16  [background-size:8px_8px] opacity-[0.08] " />
+          <div className="relative flex items-center justify-between gap-2 text-[11px] font-medium uppercase tracking-wider text-slate-600 dark:text-slate-300">
             <span>Coverage Velocity</span>
-            <span className="rounded-full border   px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal    ">
+            <span className="rounded-full border-2 border-slate-200 bg-slate-100 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-slate-600 dark:border-slate-600 dark:bg-[#0a1220] dark:text-slate-100">
               From saved attempts
             </span>
           </div>
           <div className="relative mt-4 flex items-baseline gap-1.5">
-            <span className="font-[''] text-5xl leading-none tracking-wide  ">
+            <span className=" text-5xl leading-none tracking-wide text-slate-900 dark:text-slate-100">
               {cohortHasData ? cohortQuestions.toLocaleString() : '—'}
             </span>
-            <span className="text-xs font-semibold  ">
+            <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
               questions in {activeCohort}
             </span>
           </div>
-          <p className="relative mt-2 text-xs  ">
+          <p className="relative mt-2 text-xs text-slate-600 dark:text-slate-300">
             Saved answers from completed practice modules for the active cohort.
           </p>
-          <div className="relative mt-3 border-t-2  pt-2 ">
+          <div className="relative mt-3 border-t-2 border-slate-200 pt-2 dark:border-slate-700">
             <div className="flex items-center justify-between text-xs font-semibold">
-              <span className={cohortAccuracy !== null ? ' ' : ' '}>
+              <span className={cohortAccuracy !== null ? 'text-[#1f9d55] dark:text-emerald-400' : 'text-slate-600 dark:text-slate-300'}>
                 {cohortAccuracy !== null ? `${cohortAccuracy}% accuracy` : 'No answers marked yet'}
               </span>
-              <span className=" ">
+            <span className="text-slate-600 dark:text-slate-300">
                 {cohortHasData ? `${cohortCorrect.toLocaleString()} correct` : '—'}
               </span>
             </div>
             {!cohortHasData && (
               <div className="mt-2">
-                <p className="text-xs  ">
+              <p className="text-xs text-slate-600 dark:text-slate-300">
                   Finish a practice set for {activeCohort} and your results will show here.
                 </p>
                 <button
                   onClick={() => onNavigate('practice')}
-                  className="  mt-2 px-3 py-1.5 text-sm"
+                  className="  mt-2 px-3 py-1.5 text-sm border border-slate-200 bg-[#0f8b8d] text-slate-900 shadow-sm hover:brightness-105 dark:border-slate-700 shadow-sm"
                 >
                   Start practice
                 </button>
@@ -260,23 +260,23 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
         </Card>
 
         {/* Cumulative Accuracy */}
-        <Card className="relative min-h-[190px] overflow-hidden rounded-[20px] border   p-4   dark:">
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-16 opacity-[0.08] dark:" />
-          <div className="relative flex items-center justify-between text-[11px] font-medium uppercase tracking-wider  ">
+        <Card className="relative min-h-[190px] overflow-hidden rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-600 dark:bg-[#0f1a2b] shadow-sm">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-16  [background-size:8px_8px] opacity-[0.08] " />
+          <div className="relative flex items-center justify-between text-[11px] font-medium uppercase tracking-wider text-slate-600 dark:text-slate-300">
             <span>Cumulative Accuracy</span>
-            <ShieldCheck className="h-4 w-4  " />
+            <ShieldCheck className="h-4 w-4 text-[#0f8b8d] dark:text-teal-300" />
           </div>
           <div className="relative mt-4 flex items-center gap-2">
-            <span className="font-[''] text-5xl leading-none tracking-wide  ">
+            <span className=" text-5xl leading-none tracking-wide text-slate-900 dark:text-slate-100">
               {cohortAccuracy !== null ? `${cohortAccuracy}%` : '—'}
             </span>
             {cohortAccuracy !== null && cohortAccuracy >= 70 && (
-              <span className="rounded-md border   px-2 py-0.5 font-[''] text-xs uppercase tracking-wider   dark:">
+              <span className="rounded-md border border-slate-200 bg-teal-50 px-2 py-0.5 text-xs uppercase tracking-wider text-slate-900 shadow-sm dark:border-slate-700 shadow-sm">
                 On track
               </span>
             )}
           </div>
-          <p className="relative mt-2 text-xs  ">
+          <p className="relative mt-2 text-xs text-slate-600 dark:text-slate-300">
             {cohortAccuracy !== null
               ? `Based on ${cohortQuestions.toLocaleString()} saved answers for ${activeCohort}`
               : `No saved answers yet for ${activeCohort}. Finish a practice set to see your overall accuracy.`}
@@ -284,29 +284,29 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
           {cohortAccuracy === null && (
             <button
               onClick={() => onNavigate('practice')}
-              className="  relative mt-2 px-3 py-1.5 text-sm"
+              className="  relative mt-2 px-3 py-1.5 text-sm border border-slate-200 bg-[#0f8b8d] text-slate-900 shadow-sm hover:brightness-105 dark:border-slate-700 shadow-sm"
             >
               Start practice
             </button>
           )}
-          <div className="relative mt-3 flex items-center gap-3 border-t-2  pt-2 text-xs font-semibold ">
+          <div className="relative mt-3 flex items-center gap-3 border-t-2 border-slate-200 pt-2 text-xs font-semibold dark:border-slate-700">
             {cohortHasData ? (
               <>
-                <span className="flex items-center gap-1  ">
-                  <span className="h-2 w-2 rounded-full "></span>
+                <span className="flex items-center gap-1 text-slate-900 dark:text-slate-100">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
                   <strong className="font-mono">{cohortCorrect.toLocaleString()}</strong> Correct
                 </span>
-                <span className="flex items-center gap-1  ">
-                  <span className="h-2 w-2 rounded-full "></span>
+                <span className="flex items-center gap-1 text-slate-900 dark:text-slate-100">
+                  <span className="h-2 w-2 rounded-full bg-rose-100"></span>
                   <strong className="font-mono">{cohortWrong.toLocaleString()}</strong> Wrong
                 </span>
               </>
             ) : (
               <div className="flex w-full flex-wrap items-center gap-2">
-                <span className=" ">No answers marked yet for {activeCohort}.</span>
+                <span className="text-slate-600 dark:text-slate-300">No answers marked yet for {activeCohort}.</span>
                 <button
                   onClick={() => onNavigate('practice')}
-                  className="  px-3 py-1.5 text-sm"
+                  className="  px-3 py-1.5 text-sm border border-slate-200 bg-[#0f8b8d] text-slate-900 shadow-sm hover:brightness-105 dark:border-slate-700 shadow-sm"
                 >
                   Practice now
                 </button>
@@ -316,58 +316,58 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
         </Card>
 
         {/* Response Partition */}
-        <Card className="relative min-h-[190px] overflow-hidden rounded-[20px] border   p-4   dark:">
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-16 opacity-[0.08] dark:" />
-          <div className="relative flex items-center justify-between text-[11px] font-medium uppercase tracking-wider  ">
+        <Card className="relative min-h-[190px] overflow-hidden rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-600 dark:bg-[#0f1a2b] shadow-sm">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-16  [background-size:8px_8px] opacity-[0.08] " />
+          <div className="relative flex items-center justify-between text-[11px] font-medium uppercase tracking-wider text-slate-600 dark:text-slate-300">
             <span>Response Partition</span>
-            <PieChart className="h-4 w-4  " />
+            <PieChart className="h-4 w-4 text-slate-600 dark:text-slate-300" />
           </div>
           <div className="relative mt-4 grid grid-cols-3 gap-2 text-center">
             <div>
-              <div className="text-[11px] font-semibold  ">Correct</div>
-              <div className="font-[''] text-2xl  ">
+              <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">Correct</div>
+              <div className=" text-2xl text-[#1f9d55] dark:text-emerald-400">
                 {cohortHasData ? cohortCorrect.toLocaleString() : '—'}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-semibold  ">Incorrect</div>
-              <div className="font-[''] text-2xl ">
+              <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">Incorrect</div>
+              <div className=" text-2xl text-rose-600">
                 {cohortHasData ? cohortWrong.toLocaleString() : '—'}
               </div>
             </div>
             <div>
-              <div className="text-[11px] font-semibold  ">Skipped</div>
-              <div className="font-[''] text-2xl ">—</div>
+              <div className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">Skipped</div>
+              <div className=" text-2xl text-amber-600">—</div>
             </div>
           </div>
-          <div className="relative mt-4 flex h-3 w-full overflow-hidden rounded-full border    ">
+          <div className="relative mt-4 flex h-3 w-full overflow-hidden rounded-full border-2 border-slate-200 bg-slate-100 dark:border-slate-600 dark:bg-[#0a1220]">
             {cohortAccuracy !== null && (
               <>
-                <div className="h-full " style={{ width: `${cohortAccuracy}%` }} title={`Correct: ${cohortAccuracy}%`}></div>
-                <div className="h-full " style={{ width: `${100 - cohortAccuracy}%` }} title={`Incorrect: ${100 - cohortAccuracy}%`}></div>
+                <div className="h-full bg-emerald-500" style={{ width: `${cohortAccuracy}%` }} title={`Correct: ${cohortAccuracy}%`}></div>
+                <div className="h-full bg-rose-100" style={{ width: `${100 - cohortAccuracy}%` }} title={`Incorrect: ${100 - cohortAccuracy}%`}></div>
               </>
             )}
           </div>
-          <p className="relative mt-2 text-[11px] font-medium  ">
+          <p className="relative mt-2 text-[11px] font-medium text-slate-600 dark:text-slate-300">
             Skipped data is not tracked in saved attempts.
           </p>
         </Card>
 
         {/* Exam Countdown */}
-        <Card className="relative min-h-[190px] overflow-hidden rounded-[20px] border   p-4   dark:">
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-16 opacity-[0.08] dark:" />
-          <div className="relative flex items-center justify-between gap-2 text-[11px] font-medium uppercase tracking-wider  ">
+        <Card className="relative min-h-[190px] overflow-hidden rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-600 dark:bg-[#0f1a2b] shadow-sm">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-16  [background-size:8px_8px] opacity-[0.08] " />
+          <div className="relative flex items-center justify-between gap-2 text-[11px] font-medium uppercase tracking-wider text-slate-600 dark:text-slate-300">
             <span>Exam Countdown</span>
-            <span className="rounded-full border   px-2 py-0.5 text-[10px] font-medium tracking-normal  ">
+            <span className="rounded-full border-2 border-slate-200 bg-amber-100 px-2 py-0.5 text-[10px] font-medium tracking-normal text-slate-900 dark:border-slate-700">
               {activeCohort}
             </span>
           </div>
           <div className="relative mt-4 flex items-baseline gap-2">
-            <span className="font-[''] text-5xl leading-none tracking-wide  ">
+            <span className=" text-5xl leading-none tracking-wide text-slate-900 dark:text-slate-100">
               {daysToExam !== null && daysToExam > 0 ? `${daysToExam}d` : daysToExam !== null && daysToExam <= 0 ? 'TODAY' : '—'}
             </span>
           </div>
-          <p className="relative mt-2 text-xs font-semibold  ">
+          <p className="relative mt-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
             {examDate
               ? daysToExam !== null && daysToExam > 0
                 ? `${daysToExam} days until ${activeCohort} (${formatDateForCountdown(examDate)})`
@@ -376,17 +376,17 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
                 : `No exam date set for ${activeCohort}. Add it in Sidebar to see the countdown.`
               : `No exam date set for ${activeCohort}. Add it in Sidebar to see the countdown.`}
           </p>
-          <div className="relative mt-3 border-t-2  pt-2 text-xs font-semibold   ">
+          <div className="relative mt-3 border-t-2 border-slate-200 pt-2 text-xs font-semibold text-slate-900 dark:border-slate-700 dark:text-slate-100">
             <div className="flex items-center gap-1.5">
-              <Trophy className="h-3.5 w-3.5 " />
+              <Trophy className="h-3.5 w-3.5 text-amber-600" />
               {cohortAccuracy !== null ? `Cohort accuracy: ${cohortAccuracy}%` : 'No answers yet for this cohort'}
             </div>
             {cohortAccuracy === null && (
               <div className="mt-2">
-                <p className="text-xs  ">Finish a practice set to see cohort accuracy.</p>
+                <p className="text-xs text-slate-600 dark:text-slate-300">Finish a practice set to see cohort accuracy.</p>
                 <button
                   onClick={() => onNavigate('practice')}
-                  className="  mt-2 px-3 py-1.5 text-sm"
+                  className="  mt-2 px-3 py-1.5 text-sm border border-slate-200 bg-[#0f8b8d] text-slate-900 shadow-sm hover:brightness-105 dark:border-slate-700 shadow-sm"
                 >
                   Start practice
                 </button>
@@ -399,25 +399,25 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
       {/* Main Split: Subject Accuracy Table (Left) + Difficulty & Synthesis Insights (Right) */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Column (2 Cols wide): Specialty & Subject Table */}
-        <div className="lg:col-span-2 overflow-hidden rounded-[20px] border   p-5   dark:">
-          <div className="flex flex-col gap-3 border-b-2  pb-4 sm:flex-row sm:items-center sm:justify-between ">
+        <div className="lg:col-span-2 overflow-hidden rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-600 dark:bg-[#0f1a2b] shadow-sm">
+          <div className="flex flex-col gap-3 border-b-2 border-slate-200 pb-4 sm:flex-row sm:items-center sm:justify-between dark:border-slate-700">
             <div>
-              <div className="mb-1 inline-flex rounded-md border   px-2 py-0.5 font-[''] text-xs uppercase tracking-[0.16em]   dark:">
+              <div className="mb-1 inline-flex rounded-md border border-slate-200 bg-teal-50 px-2 py-0.5 text-xs uppercase tracking-[0.16em] text-slate-900 shadow-sm dark:border-slate-700 shadow-sm">
                 Subject Matrix
               </div>
-              <h2 className="font-['Cormorant'] text-2xl font-medium  ">
+              <h2 className=" text-2xl font-medium text-slate-900 dark:text-slate-100">
                 Specialty & Subject Accuracy Table
               </h2>
-              <p className="text-sm  ">
+              <p className="text-sm text-slate-600 dark:text-slate-300">
                 Continuous mastery tracking from saved {activeCohort} attempts
               </p>
             </div>
             <div className="flex items-center gap-2 text-xs">
-              <span className="font-semibold  ">SORT BY:</span>
+              <span className="font-semibold text-slate-600 dark:text-slate-300">SORT BY:</span>
               <select
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value as any)}
-                className="min-h-[44px] rounded-xl border   px-3 py-2 text-xs font-medium  focus:outline-none focus:ring-4 focus:   "
+                className="min-h-[44px] rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-xs font-medium text-slate-900 focus:outline-none focus:ring-4 focus:ring-[#8EC5FC]/30 dark:border-slate-600 dark:bg-[#0a1220] dark:text-slate-100"
               >
                 <option value="lowest">Lowest Accuracy</option>
                 <option value="highest">Highest Accuracy</option>
@@ -429,7 +429,7 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
           <div className="mt-3 overflow-x-auto">
             <table className="w-full min-w-[760px] text-left text-[15px] leading-6">
               <thead>
-                <tr className="border-b-2  text-[11px] font-medium uppercase tracking-wider   ">
+                <tr className="border-b-2 border-slate-200/30 text-[11px] font-medium uppercase tracking-wider text-slate-600 dark:border-slate-700 dark:text-slate-300">
                   <th className="px-3 py-2.5">Subject</th>
                   <th className="px-3 py-2.5">Solved / Wrong</th>
                   <th className="px-3 py-2.5">Accuracy Band</th>
@@ -440,38 +440,38 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
               <tbody className="divide-y-2 divide-[#543828]/10 dark:divide-[#A9A9C4]/20">
                 {cohortHasData && sortedSubjects.length > 0 ? (
                   sortedSubjects.map((sub) => (
-                    <tr key={sub.name} className="transition-colors  ">
+                    <tr key={sub.name} className="transition-colors hover:bg-slate-100/80 dark:hover:bg-[#090F12]/60">
                       <td className="px-3 py-3">
-                        <div className="text-sm font-medium  ">{sub.name}</div>
-                        <div className="text-[11px] font-medium  ">{sub.sub}</div>
+                        <div className="text-sm font-medium text-slate-900 dark:text-slate-100">{sub.name}</div>
+                        <div className="text-[11px] font-medium text-slate-600 dark:text-slate-300">{sub.sub}</div>
                       </td>
                       <td className="px-3 py-3">
-                        <div className="font-mono text-sm font-medium  ">{sub.solved} Qs</div>
-                        <div className="font-mono text-[11px] font-semibold ">
+                        <div className="font-mono text-sm font-medium text-slate-900 dark:text-slate-100">{sub.solved} Qs</div>
+                        <div className="font-mono text-[11px] font-semibold text-rose-600">
                           {sub.incorrect} Incorrect
                         </div>
                       </td>
                       <td className="min-w-36 px-3 py-3">
                         <div className="flex items-center gap-2">
-                          <div className="h-3 flex-1 overflow-hidden rounded-full border    ">
+                          <div className="h-3 flex-1 overflow-hidden rounded-full border-2 border-slate-200 bg-slate-100 dark:border-slate-600 dark:bg-[#0a1220]">
                             <div
                               className={`h-full rounded-full ${sub.barColor}`}
                               style={{ width: `${sub.accuracy}%` }}
                             ></div>
                           </div>
-                          <span className="w-9 text-right font-mono text-xs font-medium  ">
+                          <span className="w-9 text-right font-mono text-xs font-medium text-slate-900 dark:text-slate-100">
                             {sub.accuracy}%
                           </span>
                         </div>
                       </td>
                       <td className="px-3 py-3">
                         <span
-                          className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium ${
+                          className={`inline-flex items-center rounded-md border-2 px-2 py-0.5 text-[11px] font-medium ${
                             sub.status === 'Red Flag' || sub.status === 'Needs Focus'
-                              ? '   '
+                              ? 'border-[#FF5F6D] bg-rose-100/15 text-rose-600 dark:text-rose-600'
                               : sub.status === 'Developing'
-                              ? '   '
-                              : '   '
+                              ? 'border-[#D4982B] bg-amber-100/20 text-[#8a5a00] dark:text-[#FFB703]'
+                              : 'border-[#1f9d55] bg-emerald-500/15 text-[#1f9d55] dark:text-emerald-400'
                           }`}
                         >
                           {sub.status === 'Red Flag' && '● '}
@@ -484,8 +484,8 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
                           title="Opens the Question Bank filtered to this subject"
                           className={`min-h-[40px] rounded-xl border px-3 py-1.5 text-xs font-medium transition-all ${
                             sub.accuracy < 65
-                              ? '     dark:'
-                              : '  hover:brightness-105  dark:'
+                              ? 'border-slate-200 bg-rose-100 text-slate-900 shadow-sm hover:bg-rose-200 dark:border-slate-700 shadow-sm'
+                              : 'border-slate-200 bg-[#0f8b8d] text-slate-900 shadow-sm hover:brightness-105 dark:border-slate-700 shadow-sm'
                           }`}
                         >
                           Remediate
@@ -496,16 +496,16 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
                 ) : (
                   <tr>
                     <td colSpan={5} className="px-3 py-8">
-                      <div className="mx-auto max-w-md rounded-[20px] border   p-4 text-center   dark:">
-                        <div className="font-[''] text-lg uppercase tracking-wider  ">
+                      <div className="mx-auto max-w-md rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-600 dark:bg-[#0f1a2b] shadow-sm text-center">
+                        <div className=" text-lg uppercase tracking-wider text-slate-900 dark:text-slate-100">
                           No marked questions yet
                         </div>
-                        <p className="mt-1 text-sm  ">
+                        <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
                           You have not finished a practice set for {activeCohort} yet. Finish one to fill this table.
                         </p>
                         <button
                           onClick={() => onNavigate('practice')}
-                          className="  mt-3 px-3 py-1.5 text-sm"
+                          className="  mt-2 px-3 py-1.5 text-sm border border-slate-200 bg-[#0f8b8d] text-slate-900 shadow-sm hover:brightness-105 dark:border-slate-700 shadow-sm"
                         >
                           Start practice
                         </button>
@@ -521,34 +521,34 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
         {/* Right Column (1 Col wide): Weak Subjects & Synthesis Cards */}
         <div className="space-y-4">
           {/* Weak Subjects Card (from summarizeAttempts) */}
-          <div className="relative overflow-hidden rounded-[20px] border   p-5   dark:">
-            <div className="pointer-events-none absolute inset-x-0 top-0 h-16 opacity-[0.08] dark:" />
+          <div className="relative overflow-hidden rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-600 dark:bg-[#0f1a2b] shadow-sm">
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-16  [background-size:8px_8px] opacity-[0.08] " />
             <div className="relative">
-              <h3 className="font-['Cormorant'] text-xl font-medium  ">Weak Subjects (All-time Focus Areas)</h3>
-              <p className="mb-4 text-xs font-medium  ">
+              <h3 className=" text-xl font-medium text-slate-900 dark:text-slate-100">Weak Subjects (All-time Focus Areas)</h3>
+              <p className="mb-4 text-xs font-medium text-slate-600 dark:text-slate-300">
                 Subjects with accuracy below 70% (minimum 3 questions)
               </p>
 
               {weakSubjects.length > 0 ? (
                 <div className="space-y-3">
                   {weakSubjects.map((w, idx) => (
-                    <div key={`${w.subject}-${idx}`} className="rounded-xl border   p-3  ">
-                      <div className="mb-1 flex items-center justify-between text-xs font-medium  ">
+                    <div key={`${w.subject}-${idx}`} className="rounded-xl border-2 border-slate-200 bg-slate-100/70 p-3 dark:border-slate-700 dark:bg-[#0a1220]/50">
+                      <div className="mb-1 flex items-center justify-between text-xs font-medium text-slate-900 dark:text-slate-100">
                         <span className="flex items-center gap-1.5">
-                          <span className="h-2 w-2 rounded-full "></span>
+                          <span className="h-2 w-2 rounded-full bg-rose-100"></span>
                           {w.subject}
                         </span>
-                        <span className="font-mono font-medium ">{w.accuracy}%</span>
+                        <span className="font-mono font-medium text-rose-600">{w.accuracy}%</span>
                       </div>
-                      <div className="h-3 w-full overflow-hidden rounded-full border    ">
-                        <div className="h-full rounded-full " style={{ width: `${w.accuracy}%` }}></div>
+                      <div className="h-3 w-full overflow-hidden rounded-full border-2 border-slate-200 bg-white dark:border-slate-600 dark:bg-[#0f1a2b]">
+                      <div className="h-full rounded-full bg-rose-100" style={{ width: `${w.accuracy}%` }}></div>
                       </div>
-                      <div className="mt-1 flex items-center justify-between text-[11px] font-medium  ">
+                      <div className="mt-1 flex items-center justify-between text-[11px] font-medium text-slate-600 dark:text-slate-300">
                         <span>{w.correct} / {w.total} correct</span>
                         <button
                           onClick={() => onLaunchRemediation(w.subject)}
                           title="Opens the Question Bank filtered to this subject"
-                          className="text-xs font-medium  hover:underline "
+                          className="text-xs font-medium text-rose-600 hover:underline dark:text-rose-600"
                         >
                           Remediate
                         </button>
@@ -557,11 +557,11 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
                   ))}
                 </div>
               ) : (
-                <div className="mx-auto max-w-xs rounded-[20px] border   p-4 text-center   dark:">
-                  <div className="font-[''] text-lg uppercase tracking-wider  ">
+                <div className="mx-auto max-w-xs rounded-[20px] border border-slate-200 bg-white p-4 text-center shadow-sm dark:border-slate-600 dark:bg-[#0f1a2b] shadow-sm">
+                  <div className=" text-lg uppercase tracking-wider text-slate-900 dark:text-slate-100">
                     {hasData ? 'No weak subjects detected' : 'No practice results yet'}
                   </div>
-                  <p className="mt-1 text-sm  ">
+                  <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
                     {hasData
                       ? 'All tracked subjects are at or above 70%. Keep going to stay on track.'
                       : 'You have not finished a practice set yet. Finish one to find weak areas.'}
@@ -569,7 +569,7 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
                   {!hasData && (
                     <button
                       onClick={() => onNavigate('practice')}
-                      className="  mt-3 px-3 py-1.5 text-sm"
+                      className="  mt-2 px-3 py-1.5 text-sm border border-slate-200 bg-[#0f8b8d] text-slate-900 shadow-sm hover:brightness-105 dark:border-slate-700 shadow-sm"
                     >
                       Start practice
                     </button>
@@ -580,14 +580,14 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
           </div>
 
           {/* Cognitive Synthesis Insight Callout */}
-          <div className="rounded-[20px] border   p-4   dark:">
+          <div className="rounded-[20px] border border-slate-200 bg-slate-100 p-4 shadow-sm dark:border-slate-600 dark:bg-[#0a1220] shadow-sm">
             <div className="flex items-start gap-2.5">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border    ">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border-2 border-slate-200 bg-amber-100 text-slate-900 dark:border-slate-700">
                 <Lightbulb className="h-4 w-4" />
               </div>
               <div>
-                <h4 className="font-['Cormorant'] text-lg font-medium  ">Cognitive Synthesis Insight</h4>
-                <p className="mt-1 text-sm leading-relaxed  ">
+                <h4 className=" text-lg font-medium text-slate-900 dark:text-slate-100">Cognitive Synthesis Insight</h4>
+                <p className="mt-1 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
                   {hasData && weakSubjects.length > 0
                     ? `Your weakest area is ${weakSubjects[0].subject} at ${weakSubjects[0].accuracy}%. Prioritize remediation before the next mock test.`
                     : hasData
@@ -597,7 +597,7 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
                 {!hasData && (
                   <button
                     onClick={() => onNavigate('practice')}
-                    className="  mt-2 px-3 py-1.5 text-sm"
+                    className="  mt-2 px-3 py-1.5 text-sm border border-slate-200 bg-[#0f8b8d] text-slate-900 shadow-sm hover:brightness-105 dark:border-slate-700 shadow-sm"
                   >
                     Start practice
                   </button>
@@ -609,15 +609,15 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
           {/* Mistake Notebook Sync Action Card */}
           <div
             onClick={() => onNavigate('mistakes')}
-            className="group flex cursor-pointer items-center justify-between rounded-[20px] border   p-4 transition-all hover:-translate-y-0.5   dark:"
+            className="group flex cursor-pointer items-center justify-between rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 dark:border-slate-600 dark:bg-[#0f1a2b] shadow-sm"
           >
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl border    transition-transform group-hover:scale-105 ">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl border-2 border-slate-200 bg-teal-50 text-slate-900 transition-transform group-hover:scale-105 dark:border-slate-700">
                 <FileCheck className="h-5 w-5" />
               </div>
               <div>
-                <div className="text-sm font-medium  ">Mistake Notebook Sync</div>
-                <div className="text-xs  ">
+                <div className="text-sm font-medium text-slate-900 dark:text-slate-100">Mistake Notebook Sync</div>
+                <div className="text-xs text-slate-600 dark:text-slate-300">
                   {hasData
                     ? `${summary.questionsAnswered - summary.correct} questions queued for spaced review`
                     : 'No mistakes saved yet. Finish a practice set and wrong answers will appear here.'}
@@ -625,31 +625,31 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
                 {!hasData && (
                   <button
                     onClick={() => onNavigate('mistakes')}
-                    className="  mt-2 px-3 py-1.5 text-sm"
+                    className="  mt-2 px-3 py-1.5 text-sm border border-slate-200 bg-[#0f8b8d] text-slate-900 shadow-sm hover:brightness-105 dark:border-slate-700 shadow-sm"
                   >
                     Open mistakes
                   </button>
                 )}
               </div>
             </div>
-            <ArrowRight className="h-4 w-4  transition-all group-hover:translate-x-1 group-hover:  dark:group-hover:" />
+            <ArrowRight className="h-4 w-4 text-slate-600 transition-all group-hover:translate-x-1 group-hover:text-slate-900 dark:text-slate-300 dark:group-hover:text-[#EEEEED]" />
           </div>
         </div>
       </div>
 
       {/* Bottom Section: Recent Completed Modules History (from real attempts) */}
-      <div className="overflow-hidden rounded-[20px] border   p-5   dark:">
-        <div className="flex flex-col gap-3 border-b-2  pb-3 sm:flex-row sm:items-center sm:justify-between ">
+      <div className="overflow-hidden rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-600 dark:bg-[#0f1a2b] shadow-sm">
+        <div className="flex flex-col gap-3 border-b-2 border-slate-200 pb-3 sm:flex-row sm:items-center sm:justify-between dark:border-slate-700">
           <div>
-            <div className="mb-1 inline-flex rounded-md border   px-2 py-0.5 font-[''] text-xs uppercase tracking-[0.16em]   dark:">
+            <div className="mb-1 inline-flex rounded-md border border-slate-200 bg-teal-50 px-2 py-0.5 text-xs uppercase tracking-[0.16em] text-slate-900 shadow-sm dark:border-slate-700 shadow-sm">
               History
             </div>
-            <h3 className="font-['Cormorant'] text-2xl font-medium  ">Recent Completed Modules History</h3>
-            <p className="text-sm  ">Log of recently completed mock tests, timed blocks, and tutor sessions</p>
+            <h3 className=" text-2xl font-medium text-slate-900 dark:text-slate-100">Recent Completed Modules History</h3>
+            <p className="text-sm text-slate-600 dark:text-slate-300">Log of recently completed mock tests, timed blocks, and tutor sessions</p>
           </div>
           <button
             onClick={handleExportPDF}
-            className="flex min-h-[44px] items-center justify-center gap-1.5 rounded-2xl border  px-4 py-2 text-sm font-medium  transition-all hover:brightness-105 focus:outline-none focus:ring-4 focus:  dark:"
+            className="flex min-h-[44px] items-center justify-center gap-1.5 rounded-2xl border border-slate-200 bg-[#0f8b8d] px-4 py-2 text-sm font-medium text-slate-900 shadow-sm transition-all hover:brightness-105 focus:outline-none focus:ring-4 focus:ring-[#8EC5FC]/30 dark:border-slate-700 shadow-sm"
           >
             <Download className="h-4 w-4" />
             <span>{downloadSuccess ? 'Export ready' : 'Export summary'}</span>
@@ -667,20 +667,20 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
               >
                 <div className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <div className="font-mono text-[11px] font-semibold  ">
+                    <div className="font-mono text-[11px] font-semibold text-slate-600 dark:text-slate-300">
                       {new Date(a.at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
                     </div>
-                    <div className="flex flex-wrap items-center gap-2 text-sm font-medium  ">
+                    <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-slate-900 dark:text-slate-100">
                       <span>{a.exam}: {a.mode} ({a.total} Qs)</span>
-                      <span className={`rounded-md border px-2 py-0.5 text-[10px] font-medium ${
+                      <span className={`rounded-md border-2 px-2 py-0.5 text-[10px] font-medium ${
                         a.mode === 'EXAM'
-                          ? '   '
-                          : '     '
+                              ? 'border-[#0f8b8d] bg-teal-50/20 text-[#0f8b8d] dark:text-teal-300'
+                          : 'border-slate-200 bg-slate-100 text-slate-600 dark:border-slate-600 dark:bg-[#0a1220] dark:text-slate-300'
                       }`}>
                         {a.mode}
                       </span>
                     </div>
-                    <div className="text-xs  ">
+                    <div className="text-xs text-slate-600 dark:text-slate-300">
                       {Object.entries(a.subjects)
                         .map(([s, v]) => `${s}: ${v.correct}/${v.total}`)
                         .join(', ')}
@@ -688,16 +688,16 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
                   </div>
                   <div className="flex items-center gap-4">
                     <div className="text-right">
-                      <span className="font-mono text-sm font-medium  ">
+                      <span className="font-mono text-sm font-medium text-slate-900 dark:text-slate-100">
                         {a.correct} / {a.attempted}
                       </span>
-                      <span className="ml-1.5 font-medium  ">
+                      <span className="ml-1.5 font-medium text-[#1f9d55] dark:text-emerald-400">
                         ({a.attempted > 0 ? Math.round((a.correct / a.attempted) * 100) : 0}%)
                       </span>
                     </div>
                     <button
                       onClick={() => onNavigate('test-runner')}
-                      className="flex items-center gap-1 text-xs font-medium  hover:underline "
+                      className="flex items-center gap-1 text-xs font-medium text-[#0f8b8d] hover:underline dark:text-teal-300"
                     >
                       Review Answers →
                     </button>
@@ -707,16 +707,16 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
             ))
           ) : (
             <div className="py-8">
-              <div className="mx-auto max-w-md rounded-[20px] border   p-4 text-center   dark:">
-                <div className="font-[''] text-lg uppercase tracking-wider  ">
+              <div className="mx-auto max-w-md rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-600 dark:bg-[#0f1a2b] shadow-sm text-center">
+                <div className=" text-lg uppercase tracking-wider text-slate-900 dark:text-slate-100">
                   No completed modules yet
                 </div>
-                <p className="mt-1 text-sm  ">
+                <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
                   You have not finished a practice set for {activeCohort} yet. Finish one to start this history.
                 </p>
                 <button
                   onClick={() => onNavigate('practice')}
-                  className="  mt-3 px-3 py-1.5 text-sm"
+                  className="  mt-2 px-3 py-1.5 text-sm border border-slate-200 bg-[#0f8b8d] text-slate-900 shadow-sm hover:brightness-105 dark:border-slate-700 shadow-sm"
                 >
                   Start practice
                 </button>
@@ -729,12 +729,12 @@ export const PerformanceAnalyticsView: React.FC<PerformanceAnalyticsViewProps> =
       {downloadSuccess && (
         <div
           role="status"
-          className="fixed bottom-6 right-6 z-50 max-w-xs rounded-[20px] border   p-4 backdrop-blur-[14px]  "
+          className="fixed bottom-6 right-6 z-50 max-w-xs rounded-[20px] border border-slate-200 bg-white/95 p-4 shadow-[0_10px_40px_rgba(0,0,0,0.35)] backdrop-blur-[14px] dark:border-slate-600 dark:bg-[#0f1a2b]/95"
         >
-          <div className="font-[''] text-lg uppercase tracking-wider  ">
+          <div className=" text-lg uppercase tracking-wider text-slate-900 dark:text-slate-100">
             Export ready
           </div>
-          <p className="mt-1 text-sm  ">
+          <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
             Saved attempt summary prepared. No PDF download is triggered in this demo.
           </p>
         </div>

@@ -60,7 +60,7 @@ export const GeneratedBanksPanel: React.FC = () => {
   }, [rows]);
 
   return (
-    <div className="relative overflow-hidden rounded-[20px] border   p-4 ring-[3px]  ring-offset-0   dark: sm:p-5">
+    <div className="relative overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-sm ring-[#0f8b8d]/15   p-4 ring-[3px]  ring-offset-0   dark:bg-slate-900 dark:border-slate-700 sm:p-5">
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-0 opacity-[0.10] dark:opacity-[0.08]"
@@ -83,32 +83,32 @@ export const GeneratedBanksPanel: React.FC = () => {
 
       <div className="relative flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-sm font-medium  ">
-            <Layers className="h-4 w-4 shrink-0 " />
+          <div className="flex items-center gap-2 text-sm font-medium text-slate-900  ">
+            <Layers className="h-4 w-4 shrink-0 text-[#0f8b8d] " />
             <span className="min-w-0 break-words">Generated question banks by category</span>
           </div>
 
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-baseline gap-1 rounded-full border   px-2.5 py-0.5 text-[11px] font-medium  ">
-              <span className="font-[''] text-sm leading-none">{totalQuestions}</span>
+            <span className="inline-flex items-baseline gap-1 rounded-full border border-slate-200 bg-slate-50 text-slate-700   px-2.5 py-0.5 text-[11px] font-medium  ">
+              <span className=" text-sm leading-none">{totalQuestions}</span>
               generated question{totalQuestions === 1 ? '' : 's'}
             </span>
-            <span className="inline-flex items-baseline gap-1 rounded-full border   px-2.5 py-0.5 text-[11px] font-medium    ">
-              <span className="font-[''] text-sm leading-none">{categories.length}</span>
+            <span className="inline-flex items-baseline gap-1 rounded-full border border-slate-200 bg-slate-50 text-slate-700   px-2.5 py-0.5 text-[11px] font-medium    ">
+              <span className=" text-sm leading-none">{categories.length}</span>
               categor{categories.length === 1 ? 'y' : 'ies'}
             </span>
             {examSplit.map(([exam, n]) => (
               <span
                 key={exam}
-                className="inline-flex items-baseline gap-1 rounded-full border   px-2.5 py-0.5 text-[11px] font-medium    "
+                className="inline-flex items-baseline gap-1 rounded-full border border-teal-200 bg-teal-50 text-[#00696b]   px-2.5 py-0.5 text-[11px] font-medium    "
               >
                 {EXAM_LABEL[exam] ?? exam}
-                <span className="font-[''] text-sm leading-none">{n}</span>
+                <span className=" text-sm leading-none">{n}</span>
               </span>
             ))}
           </div>
 
-          <p className="mt-2 text-[11px]  ">
+          <p className="mt-2 text-[11px] text-slate-500  ">
             Each question is filed under the subject it was generated for.
           </p>
         </div>
@@ -116,7 +116,7 @@ export const GeneratedBanksPanel: React.FC = () => {
         <button
           type="button"
           onClick={load}
-          className="inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl border   px-3.5 py-2 text-xs font-medium  transition-transform hover:-translate-y-0.5 focus:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:translate-y-0    dark:focus-visible:"
+          className="inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl border border-slate-200 bg-white text-slate-700 hover:border-[#0f8b8d]/40   px-3.5 py-2 text-xs font-medium  transition-transform hover:-translate-y-0.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0f8b8d] focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:translate-y-0    dark:focus-visible:"
         >
           <RefreshCw className="h-3.5 w-3.5" /> Refresh
         </button>
@@ -128,13 +128,13 @@ export const GeneratedBanksPanel: React.FC = () => {
           {[0, 1].map((i) => (
             <div
               key={i}
-              className="animate-pulse rounded-[16px] border   p-4 motion-reduce:animate-none  "
+              className="animate-pulse rounded-[16px] border border-slate-200 bg-white   p-4 motion-reduce:animate-none  "
             >
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="h-4 w-2/5 min-w-[120px] rounded-full  " />
+                <div className="h-4 w-2/5 min-w-[120px] rounded-full bg-slate-200  " />
                 <div className="flex gap-1.5">
-                  <div className="h-5 w-20 rounded-full  " />
-                  <div className="h-5 w-14 rounded-full  " />
+                  <div className="h-5 w-20 rounded-full bg-slate-200  " />
+                  <div className="h-5 w-14 rounded-full bg-slate-200  " />
                 </div>
               </div>
             </div>
@@ -145,13 +145,13 @@ export const GeneratedBanksPanel: React.FC = () => {
       {error && (
         <div
           role="alert"
-          className="relative flex flex-wrap items-center justify-between gap-3 rounded-2xl border   px-3.5 py-3 text-xs font-semibold  ring-1   "
+          className="relative flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-200 bg-rose-50 text-rose-700 ring-rose-200   px-3.5 py-3 text-xs font-semibold  ring-1   "
         >
           <span className="min-w-0 break-words">{error}</span>
           <button
             type="button"
             onClick={load}
-            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl border  bg-transparent px-3 py-1.5 text-xs font-medium transition-colors  focus:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 motion-reduce:transition-none dark:focus-visible:"
+            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-2xl border border-rose-200 text-rose-700  bg-transparent px-3 py-1.5 text-xs font-medium transition-colors  focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0f8b8d] focus-visible:ring-offset-2 motion-reduce:transition-none dark:focus-visible:"
           >
             <RefreshCw className="h-3.5 w-3.5" /> Retry
           </button>
@@ -159,11 +159,11 @@ export const GeneratedBanksPanel: React.FC = () => {
       )}
 
       {rows && categories.length === 0 && (
-        <div className="relative rounded-[16px] border border-dashed   px-4 py-6 text-center  ">
-          <div className="font-[''] text-lg leading-none  ">
+        <div className="relative rounded-[16px] border border-dashed border-slate-300 text-slate-500   px-4 py-6 text-center  ">
+          <div className=" text-lg leading-none text-slate-900  ">
             No banks yet
           </div>
-          <p className="mx-auto mt-2 max-w-sm text-xs  ">
+          <p className="mx-auto mt-2 max-w-sm text-xs text-slate-500  ">
             No generated questions yet. Build a module in the Practice Builder and it will appear here.
           </p>
         </div>
@@ -177,8 +177,8 @@ export const GeneratedBanksPanel: React.FC = () => {
               key={cat.id}
               className={`rounded-[16px] border transition-shadow duration-200 motion-reduce:transition-none ${
                 expanded
-                  ? '  dark:'
-                  : '  dark:'
+                  ? '  border-[#0f8b8d]/40 bg-white shadow-sm dark:'
+                  : '  border-slate-200 bg-white dark:'
               }`}
             >
               <button
@@ -186,30 +186,30 @@ export const GeneratedBanksPanel: React.FC = () => {
                 onClick={() => setOpen(expanded ? null : cat.id)}
                 aria-expanded={expanded}
                 aria-controls={`generated-banks-${cat.id}`}
-                className={`flex min-h-[44px] w-full flex-wrap items-center justify-between gap-2 rounded-[16px] px-3.5 py-3 text-left transition-transform duration-200 hover:-focus:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:dark:focus-visible: sm:px-4 ${
+                className={`flex min-h-[44px] w-full flex-wrap items-center justify-between gap-2 rounded-[16px] px-3.5 py-3 text-left transition-transform duration-200 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0f8b8d] focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:dark:focus-visible: sm:px-4 ${
                   expanded
-                    ? ' '
+                    ? 'bg-teal-50/60 text-[#00696b]'
                     : 'bg-transparent  '
                 }`}
               >
-                <span className="flex min-w-0 items-center gap-2 text-sm font-medium  ">
+                <span className="flex min-w-0 items-center gap-2 text-sm font-medium text-slate-900  ">
                   {expanded ? (
-                    <ChevronDown className="h-4 w-4 shrink-0  transition-transform duration-200 motion-reduce:transition-none" />
+                    <ChevronDown className="h-4 w-4 shrink-0 text-slate-500  transition-transform duration-200 motion-reduce:transition-none" />
                   ) : (
-                    <ChevronRight className="h-4 w-4 shrink-0  transition-transform duration-200 motion-reduce:transition-none" />
+                    <ChevronRight className="h-4 w-4 shrink-0 text-slate-500  transition-transform duration-200 motion-reduce:transition-none" />
                   )}
                   <span className="min-w-0 break-words">{cat.name}</span>
                 </span>
                 <span className="flex flex-wrap items-center gap-1.5 text-[10px] font-medium">
-                  <span className="rounded-full border   px-2 py-0.5  ">
-                    <span className="font-[''] text-[13px] leading-none">{cat.total}</span> questions
+                  <span className="rounded-full border border-slate-200 bg-slate-100 text-slate-700   px-2 py-0.5  ">
+                    <span className=" text-[13px] leading-none">{cat.total}</span> questions
                   </span>
                   {Object.entries(cat.byExam).map(([exam, n]) => (
                     <span
                       key={exam}
-                      className="rounded-full border   px-2 py-0.5    "
+                      className="rounded-full border border-teal-200 bg-teal-50 text-[#00696b]   px-2 py-0.5    "
                     >
-                      {EXAM_LABEL[exam] ?? exam}: <span className="font-[''] text-[13px] leading-none">{n}</span>
+                      {EXAM_LABEL[exam] ?? exam}: <span className=" text-[13px] leading-none">{n}</span>
                     </span>
                   ))}
                 </span>
@@ -218,16 +218,16 @@ export const GeneratedBanksPanel: React.FC = () => {
               {expanded && (
                 <div
                   id={`generated-banks-${cat.id}`}
-                  className="space-y-2.5 border-t-2  px-3 pb-4 pt-3  sm:px-4"
+                  className="space-y-2.5 border-t-2 border-slate-100  px-3 pb-4 pt-3  sm:px-4"
                 >
                   {Object.entries(cat.bySubtopic).sort((a, b) => b[1].length - a[1].length).map(([sub, items]) => (
                     <div
                       key={sub}
-                      className="rounded-xl border   px-2.5 py-2.5   sm:px-3"
+                      className="rounded-xl border border-slate-200 bg-white   px-2.5 py-2.5   sm:px-3"
                     >
-                      <div className="mb-1.5 flex flex-wrap items-baseline gap-1.5 text-[11px] font-medium  ">
+                      <div className="mb-1.5 flex flex-wrap items-baseline gap-1.5 text-[11px] text-slate-700 font-medium  ">
                         <span className="min-w-0 break-words">{sub.replace(/-/g, ' ')}</span>
-                        <span className="rounded-full border  px-1.5 py-px text-[10px] font-medium   ">
+                        <span className="rounded-full border border-slate-200 bg-slate-100 text-slate-600  px-1.5 py-px text-[10px] font-medium   ">
                           {items.length}
                         </span>
                       </div>
@@ -235,21 +235,21 @@ export const GeneratedBanksPanel: React.FC = () => {
                         {items.slice(0, 50).map((q) => (
                           <li
                             key={q.id}
-                            className="rounded-lg border   px-2 py-1.5 text-[11px] leading-snug    "
+                            className="rounded-lg border border-slate-200 bg-slate-50 text-slate-700   px-2 py-1.5 text-[11px] leading-snug    "
                           >
-                            <span className="mr-1.5 inline-block rounded border  px-1 font-mono text-[10px]   ">
+                            <span className="mr-1.5 inline-block rounded border border-slate-200 text-slate-500  px-1 font-mono text-[10px]   ">
                               {EXAM_LABEL[q.examId] ?? q.examId}
                             </span>
                             {(q.stem || q.questionText || '').replace(/\s+/g, ' ').slice(0, 220)}
                             {(q.stem || q.questionText || '').length > 220 ? '…' : ''}
-                            <span className="ml-1.5 inline-block rounded-full border   px-1.5 font-medium    ">
+                            <span className="ml-1.5 inline-block rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700   px-1.5 font-medium    ">
                               Key {q.correctOption}
                             </span>
                           </li>
                         ))}
                       </ul>
                       {items.length > 50 && (
-                        <div className="mt-1 text-[10px]  ">
+                        <div className="mt-1 text-[10px] text-slate-400  ">
                           Showing 50 of {items.length}.
                         </div>
                       )}

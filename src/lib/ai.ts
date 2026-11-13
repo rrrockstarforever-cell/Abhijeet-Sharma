@@ -2,6 +2,8 @@
 // Real provider calls only (via /api/ai/complete on the local Express server).
 // No silent fallbacks: every failure is thrown as a typed AiError and must be shown in the UI.
 import type { ClinicalQuestion, ExamType, DifficultyTier, DifficultySubLevel } from '../types.ts';
+import { lookupTopicsBalanced, howAskedFor, subjectOfTopic, subjectFromPrefix } from '../data/chapterTopics.ts';
+import { getMcqConcurrencyOverride } from './mcqConcurrency.ts';
 
 import { findLiveImage, liveImageCaption, isLiveImageSearchEnabled } from '../utils/liveImages.ts';
 import { DUPLICATE_SIMILARITY, stemSimilarity, toBenchItem } from './benchmark.ts';
@@ -180,11 +182,8 @@ export function workBody(): { provider: AiProviderId | 'opencode'; model?: strin
  * with no rate limit) the limit is wider.
  */
 export function parallelRequestLimit(): number {
-  // Test override: localStorage 'pulse.parallelLimit' sets how many questions run at once.
-  try {
-    const forced = Number(localStorage.getItem('pulse.parallelLimit'));
-    if (Number.isFinite(forced) && forced >= 1) return forced;
-  } catch { /* storage unavailable */ }
+  const override = getMcqConcurrencyOverride();
+  if (override !== null) return override;
   // Mixed mode (Deep Relay / DeepSeek): 10 lanes, so 10 questions at once. The service refuses more concurrent streams than about 10.
   if (isMixedMode()) return 10;
   // OpenCode runs 20 questions at a time. Other paid providers get 5, so each call costs what it must and no more.
@@ -224,7 +223,7 @@ export interface AiCompleteOptions {
   json?: boolean;
   effort?: string;
   /** Internet sources for this topic are searched by the server and read with the request, so the answer is checked in the same call. */
-  groundOn?: { query: string; subject: string };
+  groundOn?: { query: string; subject: string; books?: boolean };
   provider?: AiProviderId;
   model?: string;
   /** Question writing and repair: sent to the selected engine. See writeRoute. */
@@ -257,8 +256,18 @@ function openCodeSessionId(): string {
 interface PlannedTopic { subject: string; subtopic: string; focus?: string; difficultyTier: 'LOW' | 'MEDIUM' | 'HIGH'; assigned?: AssignedFact; slot?: Slot }
 
 /** Splits a typed topic into its distinct subtopics with the selected engine. Falls back to the topic itself. */
-export async function splitTopic(topic: string, exam: string): Promise<{ subtopics: string[]; priorities: number[]; facts: number[] }> {
-  const fallback = { subtopics: [topic], priorities: [10], facts: [1] };
+export async function splitTopic(topic: string, exam: string): Promise<{ subtopics: string[]; priorities: number[]; facts: number[]; extra?: { subtopics: string[]; priorities: number[]; facts: number[] } }> {
+  // The ChatGPT PYQ database is searched first. Its topics come first, in order of how often they are asked; the
+  // engine's own split follows and only adds what the database does not already cover.
+  const known = lookupTopicsBalanced(topic, 60);
+  const knownSubtopics = known.map((k) => k.topic);
+  const knownPriorities = known.map((k) => Math.max(1, Math.min(10, Math.round(k.score / 10))));
+  // Facts planned per topic: a drug topic holds many testable facts (uses, adverse effects, interactions, doses), so the
+  // counts are generous; the plan itself still keeps only the facts the sources really state.
+  const knownFacts = known.map((k) => (k.tier === 'Very high' ? 6 : k.tier === 'High' ? 5 : k.tier === 'Medium' ? 4 : 3));
+  const fallback = known.length
+    ? { subtopics: knownSubtopics, priorities: knownPriorities, facts: knownFacts }
+    : { subtopics: [topic], priorities: [10], facts: [1] };
   const provider = getActiveProvider();
   if (!provider) return fallback;
   try {
@@ -272,7 +281,21 @@ export async function splitTopic(topic: string, exam: string): Promise<{ subtopi
     if (!list.length) return fallback;
     const priorities: number[] = list.map((_, i) => Number(data?.priorities?.[i]) || 10);
     const facts: number[] = list.map((_, i) => Math.min(6, Math.max(1, Number(data?.facts?.[i]) || 1)));
-    return { subtopics: list, priorities, facts };
+    if (!known.length) return { subtopics: list, priorities, facts };
+    // With enough database topics, the database is the boundary: the engine's own subtopics are not added, so the set does
+    // not wander outside the topics the PYQ research found.
+    // They are kept apart as "extra": the set is written from the database first, and these are searched outside only if the
+    // database topics cannot fill the number asked for.
+    if (known.length >= 6) {
+      const seenDb = knownSubtopics.map((t) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
+      const extras = list.map((t, i) => ({ t, p: priorities[i], f: facts[i] })).filter((e) => { const n = e.t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); return !seenDb.some((x) => x === n || x.includes(n) || n.includes(x)); });
+      return { ...fallback, extra: { subtopics: extras.map((e) => e.t), priorities: extras.map((e) => e.p), facts: extras.map((e) => e.f) } };
+    }
+    // Database first; the engine's subtopics are added when they are not the same topic as one already listed.
+    const seen = knownSubtopics.map((t) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
+    const covered = (t: string) => { const n = t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); return seen.some((x) => x === n || x.includes(n) || n.includes(x)); };
+    const extra = list.map((t, i) => ({ t, p: priorities[i], f: facts[i] })).filter((e) => !covered(e.t));
+    return { subtopics: [...knownSubtopics, ...extra.map((e) => e.t)], priorities: [...knownPriorities, ...extra.map((e) => e.p)], facts: [...knownFacts, ...extra.map((e) => e.f)] };
   } catch {
     return fallback;
   }
@@ -300,9 +323,10 @@ export async function pickSourcedFact(
   provider: AiProviderId,
   signal?: AbortSignal,
   avoid: string[] = [],
+  booksOnly?: boolean,
 ): Promise<{ fact: string; quote: string; source: string } | null> {
   // The search uses the topic alone: the focus alone often finds thin abstracts that do not state the fact.
-  const cacheKey = topic.toLowerCase();
+  const cacheKey = (booksOnly ? 'books:' : '') + topic.toLowerCase();
   const cached = researchCache.get(cacheKey);
   let sources: { title: string; text: string }[] = cached && Date.now() - cached.at < RESEARCH_TTL_MS ? cached.sources : [];
   if (!sources.length) {
@@ -310,7 +334,7 @@ export async function pickSourcedFact(
       const res = await fetch('/api/web/research', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: topic }),
+        body: JSON.stringify({ query: topic, books: booksOnly || undefined }),
         signal,
       });
       const data = await res.json().catch(() => ({}));
@@ -366,6 +390,8 @@ const PLAN_FACTS_SYSTEM =
   scopeInstruction() + ' Every fact must sit inside that boundary. ' +
  'Copy the supporting words exactly from one source. Reply with ONLY JSON: ' +
  '{"facts":[{"fact":"one sentence","quote":"exact words from that source","source":<source number>}]}. ' +
+ 'Skip facts an exam would not ask: experimental or investigational products and trial codes (for example a named nanocarrier or formulation under study), drug-delivery carrier science (liposome, transfersome, hydrogel), and labels that textbooks disagree on (such as which "generation" an older drug belongs to). '+
+ 'Prefer what NEET-PG and INI-CET papers ask: uses and the drug of choice, mechanism, the key adverse effect, interactions, contraindications, how to tell similar drugs apart. '+
  'Give at most the number of facts asked for; give fewer if the sources do not support that many.';
 
 /**
@@ -378,16 +404,19 @@ export async function planTopicFacts(
   subtopics: string[],
   facts: number[],
   provider: AiProviderId,
+  booksOnly?: boolean,
+  requested = 0,
 ): Promise<AssignedFact[]> {
   const kindOf = (s: unknown) => (s as { kind?: string }).kind;
   // Each subtopic is searched on its own, so its facts come from text about that subtopic and not from one narrow
   // set of results for the whole topic. The searches run together.
   const [topicSources, ...subSourceLists] = await Promise.all([
-    fetchTopicSources(topic),
-    ...subtopics.map((s) => fetchTopicSources(`${topic} ${s.split(':')[0].trim()}`)),
+    fetchTopicSources(topic, booksOnly),
+    ...subtopics.map((s) => fetchTopicSources(`${topic} ${s.split(':')[0].trim()}`, booksOnly)),
   ]);
   const planned: AssignedFact[] = [];
   const usedFacts: string[] = [];
+  const perSource = new Map<string, number>();
   // The model calls for all subtopics run together; their answers are then filtered one subtopic after another, so
   // a fact repeated under two subtopics is still caught by the comparison below.
   const extractions = await Promise.all(subtopics.map(async (_, i) => {
@@ -395,10 +424,12 @@ export async function planTopicFacts(
     const sources = found.length ? found : topicSources;
     if (!sources.length) return null;
     const ordered = [...sources.filter((s) => kindOf(s) === 'label' || kindOf(s) === 'book'), ...sources.filter((s) => kindOf(s) !== 'label' && kindOf(s) !== 'book')];
-    const evidence = ordered.map((s, n) => `[source ${n + 1}] ${s.title}\n${s.text}`).join('\n\n').slice(0, 9000);
+    const evidence = ordered.map((s, n) => `[source ${n + 1}] ${s.title}\n${s.text}`).join('\n\n').slice(0, requested > 40 ? 16000 : 9000);
     // Spare facts (about half again) let a slot whose question fails its checks be replaced by another planned fact.
     // At most four facts per subtopic, so one detail (for example MRCP) does not fill the set.
-    const want = Math.min(4, Math.max(1, facts[i] ?? 1));
+    // A big request raises the per-subtopic share, so 100 questions are not squeezed into 4 facts per subtopic.
+    const share = requested > 0 ? Math.ceil((requested * 1.15) / Math.max(1, subtopics.length)) : 0;
+    const want = Math.min(12, Math.max(1, facts[i] ?? 1, share));
     const ask = want + Math.ceil(want / 2);
     const raw = await aiComplete({
       system: PLAN_FACTS_SYSTEM,
@@ -426,14 +457,20 @@ export async function planTopicFacts(
       if (!fact || !src || squeezeText(quote).length < 20) { skip('no-fact-or-short-quote'); continue; }
       if (!squeezeText(src.text).includes(squeezeText(quote))) { skip('quote-not-in-source'); continue; }
       // A single case report or a paediatric study is not a general exam fact.
-      if (/case report|case series|a case of|successful management|fatal|pediatric|paediatric|in children/i.test(src.title)) { skip('case-report'); continue; }
+      // The learner's own books are trusted as written: these paper-style filters apply to web sources only.
+      const fromBook = kindOf(src) === 'book';
+      if (!fromBook && /case report|case series|a case of|successful management|fatal|pediatric|paediatric|in children/i.test(src.title)) { skip('case-report'); continue; }
       // Research-paper detail (statistics, gene or protein expression, open questions) is not a high-yield exam fact.
-      if (/\b(AUC|expression|interleukin|odds ratio|hazard ratio|cohort|95% ?CI|biomarker|incompletely characteri[sz]ed|not well characteri[sz]ed|further studies|remain unclear|protocol|this study|the study|trial|muscle density|sample size|banked|enrol(l)?ed|follow-up|mendelian|randomi[sz]ation|subjects|participants|were reported|studied|analysis|meta-analysis|observational|compared with|compared to|committee|hospitali[sz]ation|significantly (more|less|higher|lower)|no association|reporting rate|MedDRA|incidence of \d|uncertain|unclear|(has|have) been evaluated|raising the question|awareness|whether|potentially|were more commonly|retrospective|umbrella|meta-analyses|no significant|between groups|few and mostly)\b|\d+\.\d+ ?%/i.test(fact)) continue;
+      if (!fromBook && /\b(AUC|expression|interleukin|odds ratio|hazard ratio|cohort|95% ?CI|biomarker|incompletely characteri[sz]ed|not well characteri[sz]ed|further studies|remain unclear|protocol|this study|the study|trial|muscle density|sample size|banked|enrol(l)?ed|follow-up|mendelian|randomi[sz]ation|subjects|participants|were reported|studied|analysis|meta-analysis|observational|compared with|compared to|committee|hospitali[sz]ation|significantly (more|less|higher|lower)|no association|reporting rate|MedDRA|incidence of \d|uncertain|unclear|(has|have) been evaluated|raising the question|awareness|whether|potentially|were more commonly|retrospective|umbrella|meta-analyses|no significant|between groups|few and mostly)\b|\d+\.\d+ ?%/i.test(fact)) continue;
       // Hedged or rarity statements ("is described as encouraging", "may be septate or nonseptate", "is very rare") have no
       // clear exam answer, and the examiner rejects every question built on them.
-      if (/\b(described as|has been described|have been described|encouraging|promising|investigational|experimental|has been reported|have been reported|may be (?:either )?\w+ or (?:non|un)\w+|(?:is|are) very rare|anecdotal)\b/i.test(fact)) { skip('hedged'); continue; }
+      // Formulation and delivery-carrier science from web papers is not an exam fact.
+      if (!fromBook && /\b(nanoparticles?|nanocarriers?|nanoemulsions?|microemulsions?|liposom\w*|transfersomes?|niosomes?|emulgels?|hydrogels?|penetration enhancers?)\b/i.test(fact)) { skip('formulation'); continue; }
+      if (!fromBook && /\b(described as|has been described|have been described|encouraging|promising|investigational|experimental|has been reported|have been reported|may be (?:either )?\w+ or (?:non|un)\w+|(?:is|are) very rare|anecdotal)\b/i.test(fact)) { skip('hedged'); continue; }
+      // No more than three questions from one book section or source, so a set spreads over the whole topic.
       // The same fact planned under two subtopics is one fact: compare with abbreviations and generic words normalised.
       if (usedFacts.some((u) => stemSimilarity(factKey(u), factKey(fact)) >= 0.5)) { skip('duplicate'); continue; }
+      perSource.set(src.title, (perSource.get(src.title) ?? 0) + 1);
       planned.push({ subtopic: subtopics[i], fact, quote, source: src.title, origin: kindOf(src) === 'book' ? 'book' : 'web' });
       usedFacts.push(fact);
       kept += 1;
@@ -500,7 +537,7 @@ async function repairExplanation(q: ClinicalQuestion, signal?: AbortSignal): Pro
   const provider = getActiveProvider();
   if (!provider) return;
   const raw = await aiComplete({
-    system: 'You improve the explanation of one exam MCQ. Write 90 to 150 words of clinical reasoning only: start with the key fact in **bold**, then one bullet per other option saying why it is wrong, naming the option by its text and never by its letter, then one line "High-yield: ...". Never mention sources, pages, attachments, the examiner or the question itself. Keep every fact and the marked answer exactly as they are; add no new claims. Reply with ONLY JSON: {"explanation":"..."}.',
+    system: 'You improve the explanation of one exam MCQ. Write 70 to 110 words of clinical reasoning only, in short plain sentences with everyday words: start with the key fact in **bold**, then one bullet per other option saying why it is wrong, naming the option by its text and never by its letter, then one line "High-yield: ...". Never mention sources, pages, attachments, the examiner or the question itself. Keep every fact and the marked answer exactly as they are; add no new claims. Reply with ONLY JSON: {"explanation":"..."}.',
     messages: [{ role: 'user', content: [q.stem, (q as { questionText?: string }).questionText ?? '', ...q.options.map((o) => `${o.id}) ${o.text}`), `Marked answer: ${q.correctOption}`, `Current explanation: ${String(q.explanation ?? '')}`].join('\n') }],
     json: true,
     effort: 'low',
@@ -530,19 +567,23 @@ async function tagPicturable(plan: AssignedFact[], provider: AiProviderId): Prom
 }
 
 /** Null when the examiner accepts the item, otherwise its one-sentence reason for rejecting it. */
-async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: AbortSignal): Promise<string | null> {
+async function examinerRejects(q: ClinicalQuestion, topic: string, signal?: AbortSignal, trustedKey?: boolean): Promise<string | null> {
   const provider = getActiveProvider();
   if (!provider) return null;
   const raw = await aiComplete({
-    system:
+    system: trustedKey ?
+ 'You are an examiner checking one MCQ written from the learner\'s own notes. The notes are trusted: treat the marked answer as true and do not judge it against other textbooks. ' +
+ 'Mark ok=false only when you are sure of one of these: (1) the stem, options or explanation contradict themselves; (2) more than one option is defensible or no option answers the question asked; ' +
+ '(3) the explanation supports a different option than the marked answer; (4) the stem or options are incomplete; (5) the item is about an unrelated drug, disease, animal exposure or a very rare reaction outside the requested topic, or its stem is research, audit or resident-review wording rather than a patient or exam situation. Judge the explanation only for contradicting the key; its wording and length do not matter. A NOT or EXCEPT item with exactly one false option is fine. Otherwise ok=true. ' +
+ 'Reply with ONLY JSON: {"ok":true,"problem":""} or {"ok":false,"problem":"one short sentence"}.' :
  'You are an examiner checking one MCQ before it is used. Mark ok=false only when you are sure of a problem: ' +
  '(1) the marked answer is wrong by standard textbooks and guidelines; (2) more than one option is defensible; ' +
  '(3) the answer only holds for one particular study, cohort, hospital, country or textbook layout, or it is a research detail no exam would ask; ' +
- '(4) the stem or options are incomplete or contradict themselves; (5) the question is out of scope: ' + scopeInstruction() + ' A NOT or EXCEPT question with a correct standard textbook key is ok=true. Otherwise ok=true. ' +
+ '(4) the stem or options are incomplete or contradict themselves; (5) the question is out of scope, or about an unrelated drug, disease or animal exposure, or a very rare reaction outside the requested topic, or written as research, audit or resident-review wording: ' + scopeInstruction() + ' A NOT or EXCEPT question with a correct standard textbook key is ok=true. Otherwise ok=true. ' +
  'Reply with ONLY JSON: {"ok":true,"problem":""} or {"ok":false,"problem":"one short sentence"}.',
     messages: [{
       role: 'user',
-      content: `Topic: ${topic}\n${q.stem}\n${q.questionText}\n` + q.options.map((o) => `${o.id}) ${o.text}`).join('\n') + `\nMarked answer: ${q.correctOption}\nExplanation: ${String(q.explanation ?? '').slice(0, 300)}`,
+      content: `Topic: ${topic}\n${q.stem}\n${q.questionText}\n` + q.options.map((o) => `${o.id}) ${o.text}`).join('\n') + `\nMarked answer: ${q.correctOption}\nExplanation: ${String(q.explanation ?? '').slice(0, 1500)}`,
     }],
     json: true,
     effort: 'low',
@@ -610,7 +651,7 @@ async function fetchPyqWeights(subtopics: string[], exam: string): Promise<Recor
 // A drop that only needs wording fixed keeps its draft (and its fact) and is repaired, which passes far more often than
 // a fresh rewrite. 'repeat-answer' is not here: the repair keeps the same answer, so it could never pass that check.
 const REPAIRABLE_DROPS = new Set([
- 'generic-lead-in', 'style-one-liner-too-long', 'examiner',
+ 'generic-lead-in', 'style-one-liner-too-long', 'examiner', 'style-mentions-source', 'style-stem-fragment', 'style-negative-has-scene', 'style-options-repeat-prefix',
  'hint-stem-words', 'hint-absolute', 'hint-length', 'similar-options',
  'stem-incomplete', 'stem-thin', 'stem-repeats-question', 'missing-statements', 'combination-list-missing',
  'refers-to-missing-picture', 'treatment-drift',
@@ -668,12 +709,12 @@ async function planFigure(q: ClinicalQuestion, topic: string, signal?: AbortSign
 }
 
 /** The web and library sources for a topic, from the research endpoint, kept for a few minutes. */
-async function fetchTopicSources(topic: string): Promise<{ title: string; text: string; kind?: string }[]> {
-  const cacheKey = topic.toLowerCase();
+async function fetchTopicSources(topic: string, booksOnly?: boolean): Promise<{ title: string; text: string; kind?: string }[]> {
+  const cacheKey = (booksOnly ? 'books:' : '') + topic.toLowerCase();
   const cached = researchCache.get(cacheKey);
   if (cached && Date.now() - cached.at < RESEARCH_TTL_MS) return cached.sources;
   try {
-    const res = await fetch('/api/web/research', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: topic }) });
+    const res = await fetch('/api/web/research', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: topic, books: booksOnly || undefined }) });
     const data = await res.json().catch(() => ({}));
     const sources = res.ok && Array.isArray(data.sources) ? data.sources : [];
     if (sources.length) researchCache.set(cacheKey, { at: Date.now(), sources });
@@ -694,6 +735,10 @@ export function logStage(stage: string, ms: number, lane?: string, detail?: Reco
 }
 
 /** Records a dropped question: the reason, and the question itself when it was written, so it can be examined later. */
+/** Research-paper or ward-review wording that no exam stem uses. Such a question is dropped and written again. */
+const NON_EXAM_WORDING = /\b(hypothetical|in a (research|laboratory|hypothetical) (assay|study|experiment|investigation|setting)|research (assay|susceptibility|study|laboratory)|laboratory (study|investigation|experiment) (of|in which|shows|finds|compares)|supplied (chapter|reference|text|passage|evidence)|(team|committee|audit)'s (review|assessment|proposal)|antimicrobial audit|(a |the )?(resident|trainee|pharmacist|registrar|intern|clinician|team) (proposes?|argues?|suggests?|reviews?|requests?|asks)|proposed (rescue|substitution|regimen change|dosing change)|an experimental)\b/i;
+const VET_OR_FRINGE = /\b(veterinary|ferret|equine antiserum|zoo|livestock)\b/i;
+
 function dropQ(ctx: { reason?: string; draft?: ClinicalQuestion; dropKey?: string; fact?: string; planned?: boolean } | undefined, reason: string): void {
   logStage(`drop:${reason}`, 0);
   if (ctx) ctx.dropKey = reason;
@@ -711,9 +756,9 @@ export function reportRepair(outcome: 'attempted' | 'accepted' | 'failed'): void
 
 /** Tells the server whether a question was kept, so the progress page counts the same questions the app shows. */
 export function reportQuestion(outcome: 'accepted' | 'dropped', reason?: string, draft?: unknown): void {
-  void outcome;
-  void reason;
-  void draft;
+  // Kept in memory so a run's drops can be read from the page (globalThis.__drops) while testing.
+  const g = globalThis as { __drops?: unknown[] };
+  (g.__drops ??= []).push({ outcome, reason, why: (draft as { why?: string } | undefined)?.why ?? null, q: (draft as { stem?: string } | undefined)?.stem?.slice(0, 160) });
 }
 
 /** Runs one step and records how long it took. */
@@ -918,6 +963,7 @@ export function extractJson<T = any>(raw: string): T | null {
 const GENERATOR_SYSTEM = `You are a senior item writer for the Indian and Australian postgraduate medical entrance exams (NEET-PG, INI-CET).
 Your questions are written to DISCRIMINATE between well-prepared candidates, not to confirm what everyone already knows. An item that a candidate can answer from a single buzzword is a failed item.
 Every question has exactly one defensible best answer. Distractors are real, plausible entities that a half-prepared candidate would genuinely choose, never absurd or obviously wrong.
+Write the stem as a real patient, exam or clinic situation. Never use research or committee framing: no "hypothetical study", "research assay", "laboratory study/investigation", "supplied chapter/reference", "the team's review", "a resident proposes/argues/reviews", "pharmacist/trainee proposes", and do not ask the candidate to judge someone's proposal or an audit. Stay inside the requested topic: no unrelated drugs, animal or veterinary exposures, or very rare reactions outside it.
 Always respond with ONLY a single valid JSON object (no markdown fences, no commentary).`;
 
 /**
@@ -947,6 +993,7 @@ const GENERATION_RULES =
  'Rules: medically accurate and current; do not invent doses or values; no two questions on the same fact; ' +
  'the stem must not contain a clue that gives the answer away; options must be homogeneous and of similar length; ' +
  'vary which option is correct across the batch (do not favour B or C). ' +
+ 'A NOT or EXCEPT question is a plain statement about one subject with no patient and no made-up scene. The explanation must say why the keyed option answers the lead-in, then why each other option is wrong; do not open it with unrelated background. ' +
  'No hints: the stem and lead-in must not name the drug class, drug, mechanism or diagnosis that the correct option names, ' +
  'and must not repeat its distinctive words; the correct option must not be the only option with absolute wording ' +
  '(absolutely, always, never, only, must, all, none) and must not be noticeably longer or more detailed than the others; ' +
@@ -996,7 +1043,7 @@ async function withVerifyLane<T>(task: () => Promise<T>): Promise<T> {
  * A check that the server could not complete (refused or failed) is retried, so a busy provider does not count as
  * a wrong answer. Returns 'error' only if every try fails.
  */
-async function verifyItem(q: ClinicalQuestion, groundOn: { query: string; subject: string }, signal?: AbortSignal): Promise<'supported' | 'unsupported' | 'error'> {
+async function verifyItem(q: ClinicalQuestion, groundOn: { query: string; subject: string; books?: boolean }, signal?: AbortSignal): Promise<'supported' | 'unsupported' | 'error'> {
   const provider = getActiveProvider();
   if (!provider) return 'error';
   return withVerifyLane(async () => {
@@ -1124,6 +1171,8 @@ export interface GenerateQuestionsOptions {
   presentingProblems?: string[];
   /** "My notes" source: real saved highlights/notes the questions must be derived from. */
   sourceMaterial?: string;
+  /** My books mode: questions are written only from passages of the learner's own books; the server attaches the passages. */
+  booksOnly?: boolean;
   /**
    * Ask for image-based items (~1 in 5) and attach a verified picture from the local
    * medical-image library when one matches the item's diagnosis.
@@ -1257,7 +1306,13 @@ function buildQuestion(raw: any, exam: ExamType, pool: { subject: string; subtop
     difficultyTier: aiTier,
     difficultySubLevel: subLevel || SUB_LEVEL_DEFAULT[aiTier],
     stem,
-    questionText: typeof raw.questionText === 'string' && raw.questionText.trim() ? raw.questionText.trim() : stem,
+    // The question line never repeats the stem: when the writer put the whole case in both, only the last sentence(s) after the stem are kept.
+    questionText: (() => {
+      const line = typeof raw.questionText === 'string' ? raw.questionText.trim() : '';
+      if (!line) return stem;
+      if (stem && line.length > stem.length && line.startsWith(stem)) return line.slice(stem.length).trim() || line;
+      return line;
+    })(),
     options: shuffled.entries.map((o) => ({ id: o.id as 'A' | 'B' | 'C' | 'D' | 'E', text: o.text })),
     correctOption: correct as ClinicalQuestion['correctOption'],
     boardPearl: typeof raw.boardPearl === 'string' ? raw.boardPearl.trim() : '',
@@ -1283,7 +1338,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     exam, count, subjectSubtopics, requestedTopic, factPlan, difficultyTier, difficultySubLevel, effort,
     onProgress, onBatch, batchPromises, shouldStop, existing, usedUnits: unitsUsed, signal, onRetry,
     questionTypes, stemPatterns, styles: explicitStyles, leadIns: explicitLeadIns, evidenceSources, patientGroup, presentingProblems,
-    sourceMaterial, customInstructions, includeImages,
+    sourceMaterial, customInstructions, includeImages, booksOnly,
   } = options;
   const learnerProfile = typeof customInstructions === 'string' ? customInstructions.trim().slice(0, 1500) : '';
   // Every picture comes from the internet at generation time (Wikimedia Commons + Open-i).
@@ -1424,11 +1479,12 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
   // Every planned fact gets a slot: its style (vignette, one-liner, NOT, match, statements, ...), lead-in and difficulty,
   // from the styles the learner picked or, when none, the exam's own mix.
   const subjectGuess = plannedFacts.length && requestedTopic ? await guessSubject(requestedTopic) : undefined;
+  const isPharmacology = /pharmac/i.test(subjectGuess ?? '');
   const slots: Slot[] = plannedFacts.length
     ? planSlots(plannedFacts.map((f) => ({ fact: f.fact, subtopic: f.subtopic, picturable: f.picturable })), exam, stylesFromChips(questionTypes, explicitStyles), leadInsFromChips(stemPatterns, explicitLeadIns), difficultyTier, subjectGuess)
     : [];
   const plannedTopics = plannedFacts.length
-    ? plannedFacts.map((f, i) => ({ subject: requestedTopic ?? '', subtopic: f.subtopic, focus: f.fact, difficultyTier: slots[i].tier, assigned: f, slot: slots[i] }))
+    ? plannedFacts.map((f, i) => ({ subject: subjectOfTopic(f.subtopic) ?? subjectFromPrefix(f.subtopic) ?? requestedTopic ?? '', subtopic: f.subtopic, focus: f.fact, difficultyTier: slots[i].tier, assigned: f, slot: slots[i] }))
     : requestedTopic ? null : await planTopics(count);
 
   // Build the subject/subtopic pool as fallback.
@@ -1465,7 +1521,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
     const factStepOn = !assigned && Boolean(requestedTopic && activeProvider) && (factHits > 0 || factTries < 6);
     if (ctx) ctx.planned = Boolean(assigned);
     const sourced = assigned ?? (factStepOn
-      ? await pickSourcedFact(requestedTopic!, focus, activeProvider!, signal ?? undefined, acceptedKeyFacts)
+      ? await pickSourcedFact(requestedTopic!, focus, activeProvider!, signal ?? undefined, acceptedKeyFacts, booksOnly)
       : null);
     if (factStepOn) { if (sourced) factHits += 1; else factTries += 1; }
 
@@ -1481,6 +1537,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       focus ? `Focus this item on: ${focus}. Use a different drug, regimen or scenario from the usual textbook example.` : '',
       // A typed topic is what the learner wants to learn: the item must ask about that content, not a downstream decision.
       sourced ? `Base the correct option on this fact, which source "${sourced.source}" states: "${sourced.fact}". The question must test that fact, and the stem must not give the answer away. Set keyFact to this fact and sourceCheck to "supported".` : '',
+      (() => { const how = howAskedFor(assigned?.subtopic ?? topic.subtopic); return how ? `How the exam asks this topic (from the PYQ research): ${how} Follow that pattern.` : ''; })(),
       requestedTopic && slot
         ? `The learner asked for exactly: "${requestedTopic}". The item must test that content itself (the named effect, feature, drug or fact) in the style given below. The stem must give real context (a subject, a setting or a finding), never a topic label, and must not name or hint at the answer. Never refer to a picture, list or table that the stem does not contain ("this biopsy", "shown here") unless the style is image-based and the stem says what the picture shows. The options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis.`
         : requestedTopic ? `The learner asked for exactly: "${requestedTopic}". Each item must test that content itself (the named effect, feature, drug or fact). Test mechanism only if the request asks for it, and do not test a workup, diagnosis or management step that follows from it. Keep the stem short and direct; a brief case is fine only when the answer is that fact. The stem must give real context (a patient, a setting or a finding), never a topic label, and must not name or hint at the answer. Stay inside the request: do not write treatment, management or investigation items unless the request names them. Use a patient case in at most one item in three; the other items are one-line questions about the fact. Never use a generic lead-in such as "the most likely diagnosis" or "the most appropriate investigation" without naming the condition or the finding it is about. The four options must be clearly different from each other, with only one defensible answer. Use "confirms" or "diagnostic" only when the finding really settles the diagnosis; otherwise ask for a supporting or most likely finding.` : '',
@@ -1489,6 +1546,7 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       // facts otherwise all become "the most likely diagnosis", with the same answer again and again).
       requestedTopic && acceptedAnswerTexts.length ? `These are already correct answers in this set, so your correct option must be something else; if the fact's condition is among them, ask about the fact's feature, test or finding instead of the diagnosis: ${[...new Set(acceptedAnswerTexts.map((t) => t.slice(0, 50)))].slice(-40).join('; ')}` : '',
       requestedTopic ? 'Put the question only in questionText. The stem ends with the last finding, never with a question.' : '',
+      (isPharmacology || /pharmac/i.test(topic.subject)) ? 'This is a pharmacology item. The correct answer must be a drug, drug class, mechanism of action, pharmacokinetic fact, adverse effect, interaction, dose, resistance mechanism or antidote. Never ask for a disease diagnosis, the causative organism, a laboratory or pathological diagnosis, or a syndrome name; the patient is only the setting for the drug question.' : '',
       requestedTopic && slot && !/treat|manag|therap|drug|dose|regimen|rescue|prevent/i.test(requestedTopic) && !(slot.leadIn && ['next-step', 'drug-of-choice', 'treatment-of-choice', 'advice'].includes(slot.leadIn))
         ? 'The request does not ask about treatment, so the question line must not ask for a treatment, regimen, drug of choice or management step; ask for the diagnosis, finding, organism, stain, test or feature instead.'
         : '',
@@ -1503,7 +1561,9 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
       patientGroup ? `Patient group: ${patientGroup}.` : '',
       presentingProblems?.length ? `Presenting problems: ${presentingProblems.join('; ')}.` : '',
       sourceMaterial ? `Base on these notes: """${sourceMaterial.slice(0, 6000)}""".` : '',
- 'Internet sources on this topic are attached after this request. Base the correct option on them where they apply, state the fact in keyFact, and do not copy their wording. Set "sourceCheck" to "supported" only if one of those sources directly backs the keyed option; otherwise set it to "not supported" and change the item to a fact that they do back. sourceCheck concerns only the keyed option and keyFact: patient details in a vignette and the reasons given for the wrong options may use standard textbook knowledge.',
+      booksOnly
+        ? 'The learner\'s own book passages are attached after this request and are your ONLY source. Base the correct option and keyFact on them, not on outside knowledge, and name the book and chapter in citations. Set "sourceCheck" to "supported" only if a passage directly states the keyed fact; otherwise set it to "not supported". Do not copy their wording.'
+        : 'Internet sources on this topic are attached after this request. Base the correct option on them where they apply, state the fact in keyFact, and do not copy their wording. Set "sourceCheck" to "supported" only if one of those sources directly backs the keyed option; otherwise set it to "not supported" and change the item to a fact that they do back. sourceCheck concerns only the keyed option and keyFact: patient details in a vignette and the reasons given for the wrong options may use standard textbook knowledge.',
       slot && slot.style !== 'image'
         ? 'This item is not image-based: set "figureModality" and "figureQuery" to empty strings, and never refer to a picture.'
         : includeImages
@@ -1536,12 +1596,12 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
           // The thinking pass writes the item and checks its key against the internet sources in one call.
           // Paid providers reason less: the sources are already in the request, so long reasoning mostly adds cost.
           effort: 'low',
-          groundOn: { query: groundQuery, subject: topic.subject },
+          groundOn: { query: groundQuery, subject: topic.subject, books: booksOnly || undefined },
           signal,
         });
         const parsed = extractJson<BatchQuestionSpec>(raw);
         if (!parsed) { if (ctx) ctx.reason = 'the reply was not one valid JSON object in the shape given; return only that object'; dropQ(ctx, 'unparsed'); return null; }
-        if (String(parsed.sourceCheck ?? '').trim().toLowerCase() === 'not supported') { if (ctx) ctx.reason = 'your own source check found the key not supported by the sources; test a fact the sources state plainly'; dropQ(ctx, 'unsupported'); return null; }
+        if (!booksOnly && String(parsed.sourceCheck ?? '').trim().toLowerCase() === 'not supported') { if (ctx) ctx.reason = 'your own source check found the key not supported by the sources; test a fact the sources state plainly'; dropQ(ctx, 'unsupported'); return null; }
 
         const q = buildQuestion(parsed, exam, [{ subject: topic.subject, subtopic: topic.subtopic }], topic.difficultyTier, difficultySubLevel, pattern.opts);
         if (!q) { if (ctx) ctx.reason = `the item had the wrong shape: give exactly ${pattern.opts} non-empty options with ids ${'ABCDE'.slice(0, pattern.opts).split('').join(', ')}, and a correctOption that is one of them`; dropQ(ctx, 'invalid'); return null; }
@@ -1556,6 +1616,10 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
             if (cut.split(/\s+/).length >= 6) q.stem = cut;
           }
         }
+        // A sentence written twice in a row is a writer slip: keep it once.
+        q.stem = (q.stem ?? '').replace(/(^|\s)([^.!?]{25,}[.!?])\s+\2(?=\s|$)/g, '$1$2').trim();
+        // A match item's stem is the two lists only: any scene before "Match List I" is cut.
+        if (slot?.style === 'match') { const at = (q.stem ?? '').search(/Match List I/i); if (at > 0) q.stem = (q.stem ?? '').slice(at); }
         // A non-picture slot whose stem already describes its picture in words keeps the item ("this section" becomes
         // "the section"); a picture slot keeps its pointer until the picture search has run.
         if (!(slot?.style === 'image' && q.figureQuery)) unpointDescribedPicture(q);
@@ -1646,7 +1710,8 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
         const correctText = (q.options.find((o) => o.id === q.correctOption)?.text ?? '').trim();
         const correctKey = answerKey(correctText);
         if (correctKey && requestedTopic && !codedOptions && acceptedAnswers.some((a) => stemSimilarity(a, correctKey) >= 0.5)) { claimed = false; if (ctx) ctx.reason = `the correct answer "${correctText.slice(0, 80)}" is already the answer of another question in the set; pick a fact with a different answer. Answers already used: ${usedList(acceptedAnswerTexts)}`; dropQ(ctx, 'repeat-answer'); return null; }
-        const verdict = await verifyItem(q, { query: groundQuery, subject: topic.subject }, signal);
+        // The learner's books are the source of truth, so a book question is not re-checked against other sources.
+        const verdict = booksOnly ? 'supported' : await verifyItem(q, { query: groundQuery, subject: topic.subject, books: booksOnly || undefined }, signal);
         if (verdict !== 'supported') {
           claimed = false;
           if (verdict === 'error') {
@@ -1665,7 +1730,20 @@ export async function generateExamQuestions(options: GenerateQuestionsOptions): 
 
         // A last look by a second reader: a wrong key, two defensible answers, or a fact that only one study, place or
         // textbook layout makes true. Such a question is dropped and another is written in its place.
-        const examinerProblem = requestedTopic ? await examinerRejects(q, requestedTopic, signal) : null;
+        const wordingText = `${q.stem ?? ''} ${q.questionText ?? ''}`;
+        if (requestedTopic && (NON_EXAM_WORDING.test(wordingText) || VET_OR_FRINGE.test(wordingText))) {
+          if (ctx) ctx.reason = 'the stem uses research, audit or ward-review wording (hypothetical study, research assay, supplied reference, a resident or team proposes) or an animal exposure; rewrite it as a plain patient or exam situation inside the topic';
+          dropQ(ctx, 'wording');
+          return null;
+        }
+        // A pharmacology topic tests the drug. A question whose answer is a diagnosis, a disease or the causative organism is a
+        // medicine or microbiology item, so it is dropped and rewritten as a drug question.
+        if ((isPharmacology || /pharmac/i.test(topic.subject)) && /(what is the (most likely |probable )?diagnosis|which (of the following )?(organism|pathogen|bacterium|microorganism|disease|condition|syndrome)\b|most likely (diagnosis|organism|pathogen|causative)|condition best fits|diagnosis best (fits|explains|accounts))/i.test(q.questionText ?? '')) {
+          if (ctx) ctx.reason = 'this is a pharmacology topic, but the question asks for a diagnosis, disease or organism; ask about the drug itself (its mechanism, adverse effect, interaction, dose, resistance or drug of choice) instead';
+          dropQ(ctx, 'not-pharmacology');
+          return null;
+        }
+        const examinerProblem = requestedTopic ? await examinerRejects(q, requestedTopic, signal, booksOnly) : null;
         if (examinerProblem) {
           // The examiner's own words go to the rewrite and to the drop file, so a rewrite fixes that problem.
           if (ctx) ctx.reason = `the examiner rejected it: ${examinerProblem}`;

@@ -15,7 +15,7 @@ export interface GenerateFromImageOptions {
   modality?: string;
   subject?: string;
   bodyPart?: string;
-  exam?: 'NEET_PG' | 'INI_CET' | 'AMC_CAT';
+  exam?: 'NEET_PG' | 'INI_CET';
   difficultyTier?: 'LOW' | 'MEDIUM' | 'HIGH' | 'ALL';
   optionCount?: number;
   /** OpenAI-compatible chat completions URL of the provider that writes the question. */

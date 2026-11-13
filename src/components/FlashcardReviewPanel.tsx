@@ -76,7 +76,7 @@ export const FlashcardReviewPanel: React.FC<FlashcardReviewPanelProps> = ({ comp
     <button
       key={rating}
       onClick={() => rate(rating)}
-      className={`group flex-1 min-w-[68px] ${compact ? 'min-h-[36px] px-2 py-1.5' : 'min-h-[44px] px-3 py-2'} rounded-[12px] border text-[10px] font-medium transition-all duration-150 hover:-translate-y-0.5 hover:focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 active:translate-y-0 dark:dark:hover:dark:focus-visible: focus-visible:ring-offset-[#FAF3E0] dark:focus-visible:ring-offset-[#1A1A22] ${className}`}
+      className={`group flex-1 min-w-[68px] ${compact ? 'min-h-[36px] px-2 py-1.5' : 'min-h-[44px] px-3 py-2'} rounded-[12px] border text-[10px] font-medium transition-all duration-150 hover:-translate-y-0.5 hover:focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0f8b8d] focus-visible:ring-offset-2 active:translate-y-0 dark:focus-visible:ring-[#8ff3f4] focus-visible:ring-offset-[#FAF3E0] dark:focus-visible:ring-offset-[#1A1A22] ${className}`}
     >
       <span className="block">{label}</span>
       <span className="mt-0.5 block text-[9px] font-mono font-normal opacity-90">
@@ -86,8 +86,9 @@ export const FlashcardReviewPanel: React.FC<FlashcardReviewPanelProps> = ({ comp
   );
 
   return (
-    <div className={`relative overflow-hidden rounded-[20px] border     dark:${compact ? 'p-3' : 'p-5'}`}>
-      <div className="relative mb-3 overflow-hidden rounded-[16px] border   p-3  ">
+    <div className={`relative overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-sm ${compact ? 'p-3' : 'p-5'}`}>
+      <div className="relative mb-3 overflow-hidden rounded-[16px] border border-slate-200 bg-slate-50/60 p-3">
+
         {!compact && (
           <div
             aria-hidden="true"
@@ -101,30 +102,30 @@ export const FlashcardReviewPanel: React.FC<FlashcardReviewPanelProps> = ({ comp
         )}
         <div className="relative flex items-start justify-between gap-2">
           <div>
-            <div className="mb-1 inline-flex items-center gap-1.5 rounded-full border   px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.18em]    ">
-              <Clock3 className="h-3 w-3  " /> Mission
+            <div className="mb-1 inline-flex items-center gap-1.5 rounded-full border border-[#0f8b8d]/40 bg-teal-50 px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.18em] text-[#00696b]">
+              <Clock3 className="h-3 w-3 text-amber-500" /> Mission
             </div>
-            <h3 className="font-['Cormorant_Garamond'] text-lg font-medium leading-tight  ">
+            <h3 className=" text-lg font-medium leading-tight text-slate-900">
               Spaced review
             </h3>
           </div>
-          <div className={`shrink-0 rounded-[14px] border  px-3 py-1.5 text-center  dark:${queue.length > 0 ? ' ' : 'bg-emerald-100 text-emerald-900 dark:bg-emerald-900/60 dark:text-emerald-100'}`}>
-            <span className="block font-[''] text-lg leading-none tracking-wider">{queue.length} DUE NOW</span>
+          <div className={`shrink-0 rounded-[14px] border px-3 py-1.5 text-center ${queue.length > 0 ? 'border-amber-300 bg-amber-100 text-amber-900 dark:bg-amber-900/60 dark:text-amber-100' : 'border-emerald-300 bg-emerald-100 text-emerald-900 dark:bg-emerald-900/60 dark:text-emerald-100'}`}>
+            <span className="block text-lg leading-none tracking-wider">{queue.length} DUE NOW</span>
             <span className="mt-0.5 block text-[8px] font-medium uppercase tracking-widest opacity-80">
               {queue.length > 0 ? 'clear the queue' : 'all clear'}
             </span>
           </div>
         </div>
         <div className="relative mt-3 flex flex-wrap items-center gap-2 text-[10px] font-semibold">
-          <span className="rounded-full border   px-2 py-0.5    ">
+          <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-slate-700">
             {activeCount} active card{activeCount === 1 ? '' : 's'}
           </span>
           {suspended.length > 0 && (
-            <span className="rounded-full border   px-2 py-0.5    ">
+            <span className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-amber-800">
               {suspended.length} paused
             </span>
           )}
-          <span className="rounded-full border   px-2 py-0.5 font-mono    ">
+          <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 font-mono text-slate-700">
             {next ? `next ${formatDueIn(next)}` : queue.length ? 'all due now' : 'no upcoming'}
           </span>
         </div>
@@ -132,24 +133,24 @@ export const FlashcardReviewPanel: React.FC<FlashcardReviewPanelProps> = ({ comp
 
       {rated && (
         <div className="mt-2 flex items-center gap-2">
-          <span className="rounded-[10px] border   px-2.5 py-1 font-[''] text-sm leading-none tracking-wider   dark:">
+          <span className="rounded-[10px] border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-sm leading-none tracking-wider text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-100">
             RATED
           </span>
-          <span className="flex items-center gap-1.5 text-[10px] font-semibold  ">
+          <span className="flex items-center gap-1.5 text-[10px] font-semibold text-emerald-800">
             <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> next due {formatDueIn(rated.next)}
           </span>
         </div>
       )}
 
       {!current && (
-        <div className={`mt-3 rounded-[14px] border     dark:${compact ? 'p-2.5' : 'p-3.5'}`}>
+        <div className={`mt-3 rounded-[14px] border border-slate-200 bg-white ${compact ? 'p-2.5' : 'p-3.5'}`}>
           <div className="mb-1 flex items-center gap-1.5">
             <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-300" />
-            <span className="text-[9px] font-medium uppercase tracking-[0.16em]  ">
+            <span className="text-[9px] font-medium uppercase tracking-[0.16em] text-slate-500">
               {all.length === 0 ? 'No cards yet' : activeCount === 0 ? 'Deck paused' : 'No due cards'}
             </span>
           </div>
-          <p className="text-[11px] leading-relaxed  ">
+          <p className="text-[11px] leading-relaxed text-slate-500">
             {all.length === 0
               ? 'No cards yet. Save a highlight, an AI note, or capture a mistake — it becomes a review card automatically.'
               : activeCount === 0
@@ -162,23 +163,23 @@ export const FlashcardReviewPanel: React.FC<FlashcardReviewPanelProps> = ({ comp
       {current && schedule && (
         <div className={`${compact ? 'mt-2.5 space-y-2' : 'mt-3 space-y-3'}`}>
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="rounded-full border   px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider    ">
+            <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider text-slate-600">
               {sourceLabel(current.card)}
             </span>
-            <span className="rounded-full border   px-2 py-0.5 text-[10px] font-semibold    ">
+            <span className="rounded-full border border-[#0f8b8d]/40 bg-teal-50 px-2 py-0.5 text-[10px] font-semibold text-[#00696b]">
               {current.card.subject}
             </span>
-            <span className="truncate rounded-full border   px-2 py-0.5 text-[10px]    ">
+            <span className="truncate rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] text-slate-500">
               {current.card.topic}
             </span>
           </div>
 
-          <div className={`relative rounded-[14px] border     dark:${compact ? 'p-2.5' : 'p-3.5'}`}>
+          <div className={`relative rounded-[14px] border border-slate-200 bg-slate-50 ${compact ? 'p-2.5' : 'p-3.5'}`}>
             <div className="mb-1 flex items-center justify-between gap-2">
-              <span className="text-[9px] font-medium uppercase tracking-[0.16em]  ">Question</span>
-              {!compact && <span className="h-1.5 w-1.5 rounded-full  " />}
+              <span className="text-[9px] font-medium uppercase tracking-[0.16em] text-slate-500">Question</span>
+              {!compact && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />}
             </div>
-            <div className={`overflow-y-auto whitespace-pre-wrap text-[11px] leading-relaxed   ${compact ? 'max-h-32' : 'max-h-40'}`}>
+            <div className={`overflow-y-auto whitespace-pre-wrap text-[11px] leading-relaxed text-slate-800 ${compact ? 'max-h-32' : 'max-h-40'}`}>
               {current.card.front}
             </div>
           </div>
@@ -186,25 +187,25 @@ export const FlashcardReviewPanel: React.FC<FlashcardReviewPanelProps> = ({ comp
           {!revealed ? (
             <button
               onClick={() => setRevealed(true)}
-              className={`group flex w-full items-center justify-center gap-2 rounded-[16px] font-medium  transition-all duration-150 hover:-translate-y-0.5 hover:scale-[1.01] hover:focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 dark:dark:hover:dark:focus-visible: focus-visible:ring-offset-[#FAF3E0] dark:focus-visible:ring-offset-[#1A1A22] ${compact ? 'min-h-[40px] px-3 py-2 text-[11px]' : 'min-h-[44px] px-4 py-2.5 text-[12px]'}`}
+              className={`group flex w-full items-center justify-center gap-2 rounded-[16px] bg-[#001432] font-medium text-white hover:bg-[#13294b] transition-all duration-150 hover:-translate-y-0.5 hover:scale-[1.01] hover:focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0f8b8d] focus-visible:ring-offset-2 dark:focus-visible:ring-[#8ff3f4] focus-visible:ring-offset-[#FAF3E0] dark:focus-visible:ring-offset-[#1A1A22] ${compact ? 'min-h-[40px] px-3 py-2 text-[11px]' : 'min-h-[44px] px-4 py-2.5 text-[12px]'}`}
             >
-              <Eye className="h-4 w-4 " /> Reveal answer
+              <Eye className="h-4 w-4 text-[#8ff3f4]" /> Reveal answer
             </button>
           ) : (
             <>
-              <div className={`relative rounded-[14px] border     dark:${compact ? 'p-2.5' : 'p-3.5'}`}>
+              <div className={`relative rounded-[14px] border border-[#0f8b8d]/25 bg-teal-50/60 ${compact ? 'p-2.5' : 'p-3.5'}`}>
                 <div className="mb-1 flex items-center justify-between gap-2">
-                  <span className="text-[9px] font-medium uppercase tracking-[0.16em]  ">Answer</span>
-                  <span className="h-1.5 w-1.5 rounded-full  " />
+                  <span className="text-[9px] font-medium uppercase tracking-[0.16em] text-slate-500">Answer</span>
+                  <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
                 </div>
-                <div className={`overflow-y-auto whitespace-pre-wrap text-[11px] leading-relaxed   ${compact ? 'max-h-36' : 'max-h-44'}`}>
+                <div className={`overflow-y-auto whitespace-pre-wrap text-[11px] leading-relaxed text-slate-800 ${compact ? 'max-h-36' : 'max-h-44'}`}>
                   {current.card.back}
                 </div>
               </div>
               {current.card.docId && current.card.page && onOpenPage && (
                 <button
                   onClick={() => onOpenPage(current.card.docId!, current.card.page!)}
-                  className="inline-flex items-center gap-1.5 text-[10px] font-medium  underline decoration-2 underline-offset-4 transition-colors  focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2   dark:focus-visible: focus-visible:ring-offset-[#FAF3E0] dark:focus-visible:ring-offset-[#1A1A22]"
+                  className="inline-flex items-center gap-1.5 text-[10px] font-medium text-[#0f8b8d] underline decoration-2 underline-offset-4 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0f8b8d] focus-visible:ring-offset-2 dark:focus-visible:ring-[#8ff3f4] focus-visible:ring-offset-[#FAF3E0] dark:focus-visible:ring-offset-[#1A1A22]"
                 >
                   Open source page {current.card.page}
                 </button>
@@ -212,19 +213,19 @@ export const FlashcardReviewPanel: React.FC<FlashcardReviewPanelProps> = ({ comp
               <div className="flex flex-wrap gap-1.5">
                 {ratingChip('again', 'Again', 'bg-rose-50 border-rose-300 text-rose-700 hover:bg-rose-100 dark:bg-rose-950/40 dark:border-rose-400/60 dark:text-rose-100 dark:hover:bg-rose-900/60')}
                 {ratingChip('hard', 'Hard', 'bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100 dark:bg-amber-950/40 dark:border-amber-400/60 dark:text-amber-100 dark:hover:bg-amber-900/60')}
-                {ratingChip('good', 'Good', 'bg-teal-50   hover:bg-teal-100 dark:bg-teal-950/40   dark:hover:bg-teal-900/60')}
+                {ratingChip('good', 'Good', 'bg-teal-50 border-[#0f8b8d]/30 text-[#00696b] hover:bg-teal-100 dark:bg-teal-950/40 dark:hover:bg-teal-900/60')}
                 {ratingChip('easy', 'Easy', 'bg-emerald-50 border-emerald-300 text-emerald-800 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:border-emerald-400/60 dark:text-emerald-100 dark:hover:bg-emerald-900/60')}
               </div>
             </>
           )}
 
-          <div className={`grid gap-2 border-t  pt-2  ${compact ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'}`}>
+          <div className={`grid gap-2 border-t border-slate-100 pt-2 ${compact ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'}`}>
             <button
               onClick={() => {
                 reviewLater(current.card.key);
                 refresh();
               }}
-              className="flex min-h-[36px] items-center justify-center gap-1.5 rounded-[12px] border   px-2 py-1.5 text-[10px] font-semibold  transition-colors  focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2     dark:focus-visible: focus-visible:ring-offset-[#FAF3E0] dark:focus-visible:ring-offset-[#1A1A22]"
+              className="flex min-h-[36px] items-center justify-center gap-1.5 rounded-[12px] border border-slate-300 bg-white px-2 py-1.5 text-[10px] font-semibold text-slate-700 transition-colors hover:border-[#0f8b8d]/40 hover:text-[#00696b] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0f8b8d] focus-visible:ring-offset-2 dark:focus-visible:ring-[#8ff3f4] focus-visible:ring-offset-[#FAF3E0] dark:focus-visible:ring-offset-[#1A1A22]"
             >
               <CalendarClock className="h-3.5 w-3.5" /> Postpone to tomorrow
             </button>
@@ -239,7 +240,7 @@ export const FlashcardReviewPanel: React.FC<FlashcardReviewPanelProps> = ({ comp
             </button>
           </div>
 
-          <div className="flex items-center justify-between gap-2 text-[9px] font-mono  ">
+          <div className="flex items-center justify-between gap-2 text-[9px] font-mono text-slate-400">
             <span>reps {schedule.reps} · lapses {schedule.lapses} · ease {schedule.ease.toFixed(2)}</span>
             <span>{formatDueIn(schedule.due)}</span>
           </div>
@@ -247,10 +248,10 @@ export const FlashcardReviewPanel: React.FC<FlashcardReviewPanelProps> = ({ comp
       )}
 
       {suspended.length > 0 && (
-        <div className="mt-3 rounded-[14px] border   p-2  ">
+        <div className="mt-3 rounded-[14px] border border-slate-100 bg-white p-2">
           <button
             onClick={() => setShowSuspended((v) => !v)}
-            className="flex w-full items-center justify-between gap-2 rounded-[10px] px-1 py-1 text-[10px] font-semibold  transition-colors  focus-visible:outline-none focus-visible:ring-2 focus-visible:   dark:focus-visible:"
+            className="flex w-full items-center justify-between gap-2 rounded-[10px] px-1 py-1 text-[10px] font-semibold text-slate-500 transition-colors hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0f8b8d] dark:focus-visible:ring-[#8ff3f4]"
           >
             <span className="flex items-center gap-1.5">
               <Layers className="h-3.5 w-3.5" /> {suspended.length} removed from review
@@ -258,16 +259,16 @@ export const FlashcardReviewPanel: React.FC<FlashcardReviewPanelProps> = ({ comp
             {showSuspended ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
           </button>
           {showSuspended && (
-            <div className="mt-1.5 max-h-32 space-y-1 overflow-y-auto border-t  pt-1.5 ">
+            <div className="mt-1.5 max-h-32 space-y-1 overflow-y-auto border-t border-slate-100 pt-1.5">
               {suspended.map(({ card }) => (
-                <div key={card.key} className="flex items-center justify-between gap-2 rounded-[10px]  px-2 py-1.5 text-[10px]   ">
+                <div key={card.key} className="flex items-center justify-between gap-2 rounded-[10px] px-2 py-1.5 text-[10px] text-slate-600">
                   <span className="truncate">{card.front.slice(0, 60)}</span>
                   <button
                     onClick={() => {
                       restoreToReview(card.key);
                       refresh();
                     }}
-                    className="flex shrink-0 items-center gap-0.5 rounded-full border   px-2 py-0.5 font-medium  transition-colors hover:bg-teal-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:    dark:hover:bg-teal-900/60 dark:focus-visible:"
+                    className="flex shrink-0 items-center gap-0.5 rounded-full border border-[#0f8b8d]/40 bg-white px-2 py-0.5 font-medium text-[#0f8b8d] transition-colors hover:bg-teal-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0f8b8d] dark:hover:bg-teal-900/60 dark:focus-visible:ring-[#8ff3f4]"
                   >
                     <RotateCcw className="h-2.5 w-2.5" /> Restore
                   </button>
@@ -279,7 +280,7 @@ export const FlashcardReviewPanel: React.FC<FlashcardReviewPanelProps> = ({ comp
       )}
 
       {all.length === 0 && (
-        <div className="mt-3 flex items-center gap-1.5 rounded-[10px] border   px-2 py-1.5 text-[10px]    ">
+        <div className="mt-3 flex items-center gap-1.5 rounded-[10px] border border-slate-200 px-2 py-1.5 text-[10px] text-slate-400">
           <Brain className="h-3 w-3 shrink-0" /> Cards come from your real notes — nothing is preloaded.
         </div>
       )}

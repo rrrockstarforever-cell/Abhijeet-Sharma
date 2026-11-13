@@ -1,7 +1,7 @@
 {
   "name": "pulse-med",
   "private": true,
-  "version": "1.0.76",
+  "version": "1.0.92",
   "type": "module",
   "scripts": {
     "predev": "node tools/copy-tesseract-assets.mjs",
@@ -95,8 +95,14 @@
       "icon": "assets/icon.ico"
     },
     "nsis": {
-      "oneClick": true,
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
       "perMachine": false,
+      "runAfterFinish": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "Pulse Med",
@@ -110,7 +116,7 @@
       }
     ]
   },
-  "description": "Pulse Med - AI-assisted NEET-PG / INI-CET / AMC CAT exam preparation desktop app",
+  "description": "Pulse Med - AI-assisted NEET-PG / INI-CET exam preparation desktop app",
   "author": {
     "name": "rrrockstarforever-cell",
     "email": "rrrockstarforever@gmail.com"

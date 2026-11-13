@@ -35,9 +35,9 @@ function scopeInstruction() {
 }
 
 // server.ts
-import path3 from "path";
-import os3 from "os";
-import fs3 from "fs";
+import path4 from "path";
+import os4 from "os";
+import fs4 from "fs";
 import { execFileSync } from "child_process";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
@@ -300,7 +300,7 @@ async function listModels(provider) {
       Authorization: `Bearer ${tok}`,
       ...claims.chatgpt_account_id ? { "ChatGPT-Account-ID": claims.chatgpt_account_id } : {}
     };
-    for (const v of ["0.50.0", "0.63.0", "0.44.0"]) {
+    for (const v of ["1.0.0", "0.200.0", "0.150.0", "0.120.0"]) {
       const r = await fetch(`${CODEX.base}/models?client_version=${v}`, { headers });
       if (!r.ok) continue;
       const b = await r.json().catch(() => ({}));
@@ -319,7 +319,7 @@ async function listModels(provider) {
     return { models: [], error: e.message };
   }
 }
-async function chat({ provider, model, system, messages, json, effort, search, signal }) {
+async function chat({ provider, model, system, messages, json, effort, search, signal, _retried = false }) {
   const tok = await token(provider);
   if (provider === "claude") {
     const claudeSystem = [{ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." }];
@@ -448,7 +448,10 @@ async function chat({ provider, model, system, messages, json, effort, search, s
       instructions: system,
       store: false,
       stream: true,
-      input: messages.map((m) => ({ role: m.role, content: [{ type: m.role === "assistant" ? "output_text" : "input_text", text: m.content }] })),
+      // OpenAI's JSON mode refuses a request unless the word "json" appears in the input messages (the instructions do not count).
+      input: messages.map((m, i) => ({ role: m.role, content: [{ type: m.role === "assistant" ? "output_text" : "input_text", text: json && i === messages.length - 1 && !messages.some((x) => /json/i.test(x.content)) ? `${m.content}
+
+(Reply as JSON.)` : m.content }] })),
       ...json ? { text: { format: { type: "json_object" } } } : {},
       .../^(gpt-5|o\d)/i.test(model || "") ? { reasoning: { effort: { min: "low", low: "low", medium: "medium", high: "high", extra: "high", ultra: "high" }[effort || "medium"] || "medium" } } : {}
     }),
@@ -461,6 +464,14 @@ async function chat({ provider, model, system, messages, json, effort, search, s
       const j = JSON.parse(t);
       msg = j?.error?.message || j?.detail || msg;
     } catch {
+    }
+    if (!_retried && provider === "codex" && /not supported when using Codex with a ChatGPT account|model .*(not available|not found|does not exist)|unknown model/i.test(msg)) {
+      const listed = await listModels("codex").catch(() => ({ models: [] }));
+      const pick = (listed.models || []).find((m) => m.id && m.id !== model);
+      if (pick) {
+        aiLog({ provider: "codex", model, status: r.status, retry_with: pick.id });
+        return chat({ provider, model: pick.id, system, messages, json, effort, search, signal, _retried: true });
+      }
     }
     if (/not supported when using Codex with a ChatGPT account/i.test(msg)) {
       throw new Error(
@@ -495,7 +506,7 @@ async function chat({ provider, model, system, messages, json, effort, search, s
         } else if (j.type === "response.incomplete") {
           finishReason = j.response?.incomplete_details?.reason || "incomplete";
         } else if (j.type === "response.failed" || j.type === "error") {
-          throw new Error(j.response?.error?.message || j.message || "Request failed");
+          throw new Error(j.response?.error?.message || j.error?.message || j.message || "Request failed");
         }
       } catch (e) {
         if (e.message && !(e instanceof SyntaxError)) throw e;
@@ -914,6 +925,98 @@ function pyqWeights(subtopics, exam) {
 }
 function pyqSource() {
   return loadBundle().source || null;
+}
+
+// server/mybooks.mjs
+import fs3 from "node:fs";
+import os3 from "node:os";
+import path3 from "node:path";
+import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+var DATA_DIR2 = process.env.PULSE_DATA_DIR || path3.join(os3.homedir(), ".pulse-med");
+var MYBOOKS_PATH = process.env.PULSE_MYBOOKS_DB || path3.join(DATA_DIR2, "books", "pulse-mybooks.db");
+var db2 = null;
+function open() {
+  if (db2) return db2;
+  if (!fs3.existsSync(MYBOOKS_PATH)) return null;
+  db2 = new DatabaseSync2(MYBOOKS_PATH, { readOnly: true });
+  return db2;
+}
+var SUBJECT_MAP2 = [
+  [/forensic/i, "Forensic Medicine"],
+  [/pharmacolog/i, "Pharmacology"],
+  [/physiolog/i, "Physiology"],
+  [/biochem/i, "Biochemistry"],
+  [/patholog/i, "Pathology"],
+  [/microbiolog/i, "Microbiology"],
+  [/community|preventive|\bpsm\b/i, "Community Medicine"],
+  [/anatom/i, "Anatomy"],
+  [/general medicine|internal medicine/i, "General Medicine"],
+  [/surg/i, "General Surgery"],
+  [/obstet|gynae|gynec/i, "Obstetrics and Gynaecology"],
+  [/pediatric|paediatric/i, "Paediatrics"],
+  [/orthop/i, "Orthopaedics"],
+  [/\bENT\b|oto-?rhino|otolaryng/i, "ENT"],
+  [/ophthalm/i, "Ophthalmology"],
+  [/dermatolog/i, "Dermatology"],
+  [/psychiatr/i, "Psychiatry"],
+  [/radio/i, "Radiodiagnosis"],
+  [/anaesth|anesth/i, "Anaesthesiology"]
+];
+function myBooksSubject(label) {
+  const s = String(label || "");
+  const hit = SUBJECT_MAP2.find(([re]) => re.test(s));
+  return hit ? hit[1] : "";
+}
+var STOP3 = /* @__PURE__ */ new Set(["with", "from", "that", "this", "have", "were", "their", "which", "also", "after", "before", "than", "such", "only", "other", "most", "some", "used", "will", "does", "into", "when", "while", "there", "these", "those", "about", "among", "through", "where", "being", "given", "shows", "patient", "patients", "should", "could", "would", "they", "them", "been", "make", "makes"]);
+var DISPUTE = /\b(books? differ|sources? differ|differs? (?:between|by|from book)|disagree|disputed|controvers|conflicting|varies (?:between|by)|not agreed)\w*/i;
+function myBooksStatus() {
+  const database = open();
+  if (!database) return { available: false, books: [] };
+  const books = database.prepare("SELECT subject, title, words, chapter_count, section_count FROM books ORDER BY subject").all();
+  return { available: true, books };
+}
+function searchMyBooks(query, subject = "", limit = 4, excerptChars = 1800) {
+  const database = open();
+  if (!database) return [];
+  const terms = [...new Set(String(query || "").toLowerCase().match(/[a-z][a-z-]{2,}/g) || [])].filter((t) => !STOP3.has(t)).slice(0, 12);
+  if (!terms.length) return [];
+  const bookSubject = myBooksSubject(subject);
+  const select = (withSubject, op) => `SELECT s.subject AS subject, s.chapter_no AS chapter_no, s.chapter_title AS chapter_title, s.heading AS heading,
+      s.text AS text, bm25(sections_fts, 4.0, 1.0) AS rank
+    FROM sections_fts JOIN sections s ON s.id = sections_fts.rowid
+    WHERE sections_fts MATCH ? AND s.subject ${op} ? ORDER BY rank LIMIT ?`;
+  const attempts = [terms.map((t) => `"${t}"`).join(" AND ")];
+  if (terms.length > 1) attempts.push(terms.map((t) => `"${t}"`).join(" OR "));
+  const run = (op, value) => {
+    for (const match of attempts) {
+      try {
+        const found = database.prepare(select(true, op)).all(match, value, limit);
+        if (found.length) return found;
+      } catch {
+      }
+    }
+    return [];
+  };
+  let rows = [];
+  if (bookSubject) {
+    rows = run("=", bookSubject);
+    if (rows.length < limit) rows = [...rows, ...run("!=", bookSubject).slice(0, limit - rows.length)];
+  } else {
+    rows = run("!=", "");
+  }
+  return rows.map((r) => {
+    const text = String(r.text);
+    const lower = text.toLowerCase();
+    const hits = terms.map((t) => lower.indexOf(t)).filter((i) => i >= 0);
+    const start = Math.max(0, (hits.length ? Math.min(...hits) : 0) - 200);
+    return {
+      subject: r.subject,
+      title: `${r.subject} (my notes), chapter ${r.chapter_no}: ${r.chapter_title}`,
+      heading: r.heading,
+      disputed: DISPUTE.test(text),
+      text: text.slice(start, start + excerptChars)
+    };
+  });
 }
 
 // server/images.mjs
@@ -2495,7 +2598,7 @@ function serverDebugLog(hypothesis, message) {
 
 // src/lib/ai.ts
 var RESEARCH_TTL_MS = 5 * 6e4;
-var PLAN_FACTS_SYSTEM = 'You list distinct, high-yield, exam-testable facts about one subtopic that the sources state. Do not repeat a fact already planned. Each fact must be a definite statement a student can be tested on (a cause, a feature, a number, a test, a drug effect, a warning), never an uncertain or open one ("may", "remains uncertain", "has been evaluated"). Prefer statements from an official drug label or textbook over research papers. ' + scopeInstruction() + ' Every fact must sit inside that boundary. Copy the supporting words exactly from one source. Reply with ONLY JSON: {"facts":[{"fact":"one sentence","quote":"exact words from that source","source":<source number>}]}. Give at most the number of facts asked for; give fewer if the sources do not support that many.';
+var PLAN_FACTS_SYSTEM = 'You list distinct, high-yield, exam-testable facts about one subtopic that the sources state. Do not repeat a fact already planned. Each fact must be a definite statement a student can be tested on (a cause, a feature, a number, a test, a drug effect, a warning), never an uncertain or open one ("may", "remains uncertain", "has been evaluated"). Prefer statements from an official drug label or textbook over research papers. ' + scopeInstruction() + ' Every fact must sit inside that boundary. Copy the supporting words exactly from one source. Reply with ONLY JSON: {"facts":[{"fact":"one sentence","quote":"exact words from that source","source":<source number>}]}. Skip facts an exam would not ask: experimental or investigational products and trial codes (for example a named nanocarrier or formulation under study), drug-delivery carrier science (liposome, transfersome, hydrogel), and labels that textbooks disagree on (such as which "generation" an older drug belongs to). Prefer what NEET-PG and INI-CET papers ask: uses and the drug of choice, mechanism, the key adverse effect, interactions, contraindications, how to tell similar drugs apart. Give at most the number of facts asked for; give fewer if the sources do not support that many.';
 var stageLog = [];
 globalThis.__stageLog = stageLog;
 function extractJson(raw) {
@@ -2517,7 +2620,7 @@ function extractJson(raw) {
 // server.ts
 dotenv.config();
 var __filename = fileURLToPath(import.meta.url);
-var __dirname = path3.dirname(__filename);
+var __dirname = path4.dirname(__filename);
 var app = express();
 app.use((req, res, next) => {
   const host = String(req.headers.host || "").toLowerCase().replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
@@ -2525,8 +2628,8 @@ app.use((req, res, next) => {
   res.status(403).json({ error: "This server only accepts requests from this computer." });
 });
 var PORT = parseInt(process.env.PORT || "3000", 10);
-var DATA_DIR2 = process.env.PULSE_DATA_DIR || path3.join(os3.homedir(), ".pulse-med");
-var ENV_FILE = path3.join(DATA_DIR2, ".env");
+var DATA_DIR3 = process.env.PULSE_DATA_DIR || path4.join(os4.homedir(), ".pulse-med");
+var ENV_FILE = path4.join(DATA_DIR3, ".env");
 try {
   dotenv.config({ path: ENV_FILE });
 } catch {
@@ -2572,22 +2675,22 @@ function getGemini() {
   return geminiClient.client;
 }
 function writeEnvValue(name, value) {
-  fs3.mkdirSync(DATA_DIR2, { recursive: true });
+  fs4.mkdirSync(DATA_DIR3, { recursive: true });
   let lines = [];
-  if (fs3.existsSync(ENV_FILE)) {
-    const existing = fs3.readFileSync(ENV_FILE, "utf8").split(/\r?\n/);
+  if (fs4.existsSync(ENV_FILE)) {
+    const existing = fs4.readFileSync(ENV_FILE, "utf8").split(/\r?\n/);
     const matcher = new RegExp(`^${name}\\s*=`);
     lines = existing.filter((l) => l.trim() !== "" && !matcher.test(l));
   }
   lines.push(`${name}=${value}`, "");
-  fs3.writeFileSync(ENV_FILE, lines.join("\n"), "utf8");
+  fs4.writeFileSync(ENV_FILE, lines.join("\n"), "utf8");
   process.env[name] = value;
 }
 function clearEnvValue(name) {
-  if (fs3.existsSync(ENV_FILE)) {
+  if (fs4.existsSync(ENV_FILE)) {
     const matcher = new RegExp(`^${name}\\s*=`);
-    const lines = fs3.readFileSync(ENV_FILE, "utf8").split(/\r?\n/).filter((l) => l.trim() !== "" && !matcher.test(l));
-    fs3.writeFileSync(ENV_FILE, lines.length ? lines.join("\n") + "\n" : "", "utf8");
+    const lines = fs4.readFileSync(ENV_FILE, "utf8").split(/\r?\n/).filter((l) => l.trim() !== "" && !matcher.test(l));
+    fs4.writeFileSync(ENV_FILE, lines.length ? lines.join("\n") + "\n" : "", "utf8");
   }
   delete process.env[name];
 }
@@ -2600,11 +2703,11 @@ var OPENCODE_SESSION = `pulsemed-${Math.random().toString(36).slice(2)}`;
 var OPENCODE_MODELS_URL = "https://opencode.ai/inference/v1/models";
 var OPENCODE_GO_MODELS_URL = "https://opencode.ai/inference/go/v1/models";
 function opencodeAuthFile() {
-  return process.env.OPENCODE_AUTH_FILE || path3.join(os3.homedir(), ".local", "share", "opencode", "auth.json");
+  return process.env.OPENCODE_AUTH_FILE || path4.join(os4.homedir(), ".local", "share", "opencode", "auth.json");
 }
 function opencodeKeyFromCli() {
   try {
-    const raw = JSON.parse(fs3.readFileSync(opencodeAuthFile(), "utf8"));
+    const raw = JSON.parse(fs4.readFileSync(opencodeAuthFile(), "utf8"));
     const entry = raw?.opencode ?? raw?.["opencode-go"] ?? raw?.["opencode-zen"];
     const key = entry?.key ?? entry?.apiKey ?? entry?.access;
     return typeof key === "string" ? key.trim() : "";
@@ -2615,7 +2718,7 @@ function opencodeKeyFromCli() {
 var signInCache = null;
 function opencodeKeyFromSignIn() {
   if (signInCache && Date.now() - signInCache.at < 5 * 6e4) return signInCache.key;
-  const cli = process.env.OPENCODE_CLI_PATH || path3.join(process.env.LOCALAPPDATA || "", "Programs", "ai.opencode.desktop", "resources", "opencode-cli.exe");
+  const cli = process.env.OPENCODE_CLI_PATH || path4.join(process.env.LOCALAPPDATA || "", "Programs", "ai.opencode.desktop", "resources", "opencode-cli.exe");
   let key = "";
   try {
     const list = JSON.parse(execFileSync(cli, ["auth", "export"], { encoding: "utf8", timeout: 15e3, windowsHide: true }));
@@ -2938,6 +3041,7 @@ ${evidence}` : "No evidence was found, so list the subtopics an exam would test.
     "for drugs, use drug classes with the named drugs; for diseases, use the clinical areas (diagnosis, investigation, treatment, complications); for anatomy or physiology, use the structures or systems. List every distinct subtopic an examiner tests on this topic: a narrow topic may have only two or three, a broad one thirty or more. Do not stop at a fixed number.",
     "Each subtopic must be different from every other: no repeated class, and no drug, disease or structure listed under two subtopics.",
     `Subtopic lock: list only subtopics inside the boundary. ${scopeInstruction()} Do not broaden a narrow topic to its whole chapter.`,
+    "If several medical specialties examine this topic (for example pathology, general medicine, surgery, radiology, pharmacology, community medicine), list subtopics from each of those specialties, each written from that specialty point of view. No single specialty may take more than a third of the list.",
     "Give each subtopic a priority from 1 to 10 for how often it is tested.",
     'Give each subtopic "facts": the number of high-yield, exam-testable facts in it (1 to 6). Count only facts an examiner would ask, not background detail.',
     // JSON mode returns one object, so the list sits inside it under "subtopics".
@@ -2995,14 +3099,14 @@ ${evidence}` : "No evidence was found, so list the subtopics an exam would test.
 app.get("/api/ai/source-registry", (_req, res) => {
   return res.json({ sources: SOURCE_REGISTRY });
 });
-var BANK_FIGURES_DIR = process.env.BANK_FIGURES_DIR || path3.join(os3.homedir(), ".pulse-med", "bank-figures");
+var BANK_FIGURES_DIR = process.env.BANK_FIGURES_DIR || path4.join(os4.homedir(), ".pulse-med", "bank-figures");
 app.get(/^\/api\/bank-figures\/(.+)$/, (req, res) => {
   const rel = String(req.params[0] ?? "");
   if (!/^[A-Za-z0-9_\-/]+\.(png|jpe?g|webp|gif)$/i.test(rel) || rel.split("/").includes("..")) {
     return res.status(400).end();
   }
-  const full = path3.join(BANK_FIGURES_DIR, rel);
-  if (!fs3.existsSync(full)) return res.status(404).end();
+  const full = path4.join(BANK_FIGURES_DIR, rel);
+  if (!fs4.existsSync(full)) return res.status(404).end();
   res.sendFile(full);
 });
 var rankCache = /* @__PURE__ */ new Map();
@@ -3102,7 +3206,20 @@ app.post("/api/ai/plan-topics", async (req, res) => {
       const prior = bestByTopic.get(key);
       if (!prior || (entry.priority || 0) > (prior.priority || 0)) bestByTopic.set(key, entry);
     }
-    const sorted = [...bestByTopic.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0));
+    for (const p of pool) {
+      const key = `${p.subject}|${p.subtopic}`;
+      if (!bestByTopic.has(key)) bestByTopic.set(key, { subject: p.subject, subtopic: p.subtopic, priority: 1 });
+    }
+    const byPriority = [...bestByTopic.values()].sort((a, b) => (b.priority || 0) - (a.priority || 0));
+    const perSubject = /* @__PURE__ */ new Map();
+    for (const entry of byPriority) {
+      if (!perSubject.has(entry.subject)) perSubject.set(entry.subject, []);
+      perSubject.get(entry.subject).push(entry);
+    }
+    const sorted = [];
+    for (let i = 0; sorted.length < byPriority.length; i++) {
+      for (const list of perSubject.values()) if (list[i]) sorted.push(list[i]);
+    }
     const weighted = [];
     for (let round = 0; sorted.length > 0 && weighted.length < countN && round < 20; round++) {
       for (const entry of sorted) {
@@ -3291,11 +3408,11 @@ app.post("/api/settings/deeprelay-key", (req, res) => {
     return res.status(500).json({ error: err?.message || "Could not save the Deep Relay API key." });
   }
 });
-var CUSTOM_ENDPOINTS_FILE = path3.join(DATA_DIR2, "custom-endpoints.json");
+var CUSTOM_ENDPOINTS_FILE = path4.join(DATA_DIR3, "custom-endpoints.json");
 function readCustomEndpoints() {
   try {
-    if (!fs3.existsSync(CUSTOM_ENDPOINTS_FILE)) return [];
-    const raw = fs3.readFileSync(CUSTOM_ENDPOINTS_FILE, "utf8");
+    if (!fs4.existsSync(CUSTOM_ENDPOINTS_FILE)) return [];
+    const raw = fs4.readFileSync(CUSTOM_ENDPOINTS_FILE, "utf8");
     const data = JSON.parse(raw);
     return Array.isArray(data) ? data : [];
   } catch {
@@ -3303,27 +3420,27 @@ function readCustomEndpoints() {
   }
 }
 function writeCustomEndpoints(endpoints) {
-  fs3.mkdirSync(DATA_DIR2, { recursive: true });
-  fs3.writeFileSync(CUSTOM_ENDPOINTS_FILE, JSON.stringify(endpoints, null, 2), "utf8");
+  fs4.mkdirSync(DATA_DIR3, { recursive: true });
+  fs4.writeFileSync(CUSTOM_ENDPOINTS_FILE, JSON.stringify(endpoints, null, 2), "utf8");
 }
 function findCustomEndpoint(id) {
   return readCustomEndpoints().find((e) => e.id === id);
 }
 var PULSE_SYNC_FILE_NAME = "pulse-med-sync.json";
 async function pulseSyncConfigPaths() {
-  const os4 = await import("node:os");
-  const path4 = await import("node:path");
-  const configDir = path4.join(os4.homedir(), ".pulse-med");
+  const os5 = await import("node:os");
+  const path5 = await import("node:path");
+  const configDir = path5.join(os5.homedir(), ".pulse-med");
   return {
     configDir,
-    configFile: path4.join(configDir, "sync-config.json")
+    configFile: path5.join(configDir, "sync-config.json")
   };
 }
 async function readPulseSyncStoredConfig() {
-  const fs4 = await import("node:fs/promises");
+  const fs5 = await import("node:fs/promises");
   const { configFile } = await pulseSyncConfigPaths();
   try {
-    const raw = await fs4.readFile(configFile, "utf8");
+    const raw = await fs5.readFile(configFile, "utf8");
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object" && "folder" in parsed) {
       const folder = parsed.folder;
@@ -3336,20 +3453,20 @@ async function readPulseSyncStoredConfig() {
   return { folder: null };
 }
 async function writePulseSyncStoredConfig(folder) {
-  const fs4 = await import("node:fs/promises");
+  const fs5 = await import("node:fs/promises");
   const { configDir, configFile } = await pulseSyncConfigPaths();
-  await fs4.mkdir(configDir, { recursive: true });
-  await fs4.writeFile(configFile, JSON.stringify({ folder }, null, 2), "utf8");
+  await fs5.mkdir(configDir, { recursive: true });
+  await fs5.writeFile(configFile, JSON.stringify({ folder }, null, 2), "utf8");
 }
 async function getPulseSyncConfigResponse(folder) {
   if (!folder) {
     return { folder: null, file: null, exists: false, modifiedAt: null };
   }
-  const fs4 = await import("node:fs/promises");
-  const path4 = await import("node:path");
-  const file = path4.join(folder, PULSE_SYNC_FILE_NAME);
+  const fs5 = await import("node:fs/promises");
+  const path5 = await import("node:path");
+  const file = path5.join(folder, PULSE_SYNC_FILE_NAME);
   try {
-    const stat = await fs4.stat(file);
+    const stat = await fs5.stat(file);
     if (!stat.isFile()) {
       return { folder, file, exists: false, modifiedAt: null };
     }
@@ -3384,12 +3501,12 @@ app.post("/api/sync/config", async (req, res) => {
       res.status(400).json({ error: "A non-empty folder path is required." });
       return;
     }
-    const fs4 = await import("node:fs/promises");
-    const path4 = await import("node:path");
-    const folder = path4.resolve(rawFolder.trim());
+    const fs5 = await import("node:fs/promises");
+    const path5 = await import("node:path");
+    const folder = path5.resolve(rawFolder.trim());
     let stat;
     try {
-      stat = await fs4.stat(folder);
+      stat = await fs5.stat(folder);
     } catch (error) {
       const code = error.code;
       if (code === "ENOENT") {
@@ -3424,28 +3541,28 @@ app.post("/api/sync/push", async (req, res) => {
       res.status(400).json({ error: "No sync folder is configured." });
       return;
     }
-    const fs4 = await import("node:fs/promises");
-    const path4 = await import("node:path");
-    const target = path4.join(stored.folder, PULSE_SYNC_FILE_NAME);
-    const temp = path4.join(
+    const fs5 = await import("node:fs/promises");
+    const path5 = await import("node:path");
+    const target = path5.join(stored.folder, PULSE_SYNC_FILE_NAME);
+    const temp = path5.join(
       stored.folder,
       `.${PULSE_SYNC_FILE_NAME}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
     );
     let tempWritten = false;
     try {
-      await fs4.writeFile(temp, payload, "utf8");
+      await fs5.writeFile(temp, payload, "utf8");
       tempWritten = true;
-      await fs4.rename(temp, target);
+      await fs5.rename(temp, target);
       tempWritten = false;
     } finally {
       if (tempWritten) {
         try {
-          await fs4.unlink(temp);
+          await fs5.unlink(temp);
         } catch {
         }
       }
     }
-    const stat = await fs4.stat(target);
+    const stat = await fs5.stat(target);
     res.json({
       ok: true,
       bytes: Buffer.byteLength(payload, "utf8"),
@@ -3462,13 +3579,13 @@ app.get("/api/sync/pull", async (_req, res) => {
       res.status(404).json({ error: "No sync file is available yet." });
       return;
     }
-    const fs4 = await import("node:fs/promises");
-    const path4 = await import("node:path");
-    const file = path4.join(stored.folder, PULSE_SYNC_FILE_NAME);
+    const fs5 = await import("node:fs/promises");
+    const path5 = await import("node:path");
+    const file = path5.join(stored.folder, PULSE_SYNC_FILE_NAME);
     try {
       const [payload, stat] = await Promise.all([
-        fs4.readFile(file, "utf8"),
-        fs4.stat(file)
+        fs5.readFile(file, "utf8"),
+        fs5.stat(file)
       ]);
       res.json({
         ok: true,
@@ -3882,6 +3999,7 @@ async function withInternetSources(messages, groundOn) {
   const query = String(groundOn.query || "").trim().slice(0, 200);
   if (!query) return messages;
   const subject = String(groundOn.subject || "");
+  if (groundOn.books) return withBookSources(messages, query, subject);
   const [web, found] = await Promise.all([
     research(query, 1200).then((r) => r.sources).catch(() => []),
     literatureSources(query, subject).catch(() => [])
@@ -3904,6 +4022,39 @@ ${String(s.text).slice(0, 1200)}`).join("\n\n");
 Internet sources found for this topic. Read them, then check the keyed option against them before you answer: """${block}"""` }
   ];
 }
+async function withBookSources(messages, query, subject) {
+  const passages = searchMyBooks(query, subject, 4, 1800);
+  const last = messages[messages.length - 1];
+  const withText = (extra2) => [...messages.slice(0, -1), { ...last, content: `${last.content}
+
+${extra2}` }];
+  if (!passages.length) {
+    return withText(`MY BOOKS: no passage in the learner's books matches this topic. Write nothing from memory: set "sourceCheck" to "not supported".`);
+  }
+  const bookBlock = passages.map((p, i) => `[B${i + 1}] ${p.title}
+Section: ${p.heading}
+${p.text}`).join("\n\n");
+  let extra = `MY BOOKS (the learner's own books, the only source for this item). Base the correct option and keyFact ONLY on these passages, never on outside knowledge. In "citations" give the book and chapter you used. If these passages do not state a fact you can test, set "sourceCheck" to "not supported". Passages: """${bookBlock}"""`;
+  if (passages.some((p) => p.disputed)) {
+    const web = await research(query, 1200).then((r) => r.sources).catch(() => []);
+    const sources = web.filter((w) => w?.text).slice(0, 3);
+    if (sources.length) {
+      extra += `
+
+The books say their sources differ on a point here. Use these internet sources ONLY to settle that disputed point, and prefer a different fact if it stays unsettled: """${sources.map((w, i) => `[W${i + 1}] ${w.title}
+${w.url}
+${String(w.text).slice(0, 1200)}`).join("\n\n")}"""`;
+    }
+  }
+  return withText(extra);
+}
+app.get("/api/mybooks/status", (_req, res) => {
+  try {
+    return res.json(myBooksStatus());
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Could not read the books." });
+  }
+});
 app.post("/api/ai/verify-item", async (req, res) => {
   const { provider, model, question, groundOn } = req.body || {};
   if (!provider || !question || typeof question !== "object") {
@@ -3953,13 +4104,33 @@ Answer with one JSON object: {"keyCorrect": true or false, "premiseSupported": t
   }
 });
 app.post("/api/export/questions", (req, res) => {
-  const dir = path3.join(process.cwd(), "exports");
-  fs3.mkdirSync(dir, { recursive: true });
+  const dir = path4.join(process.cwd(), "exports");
+  fs4.mkdirSync(dir, { recursive: true });
   const name = `questions-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`;
-  fs3.writeFileSync(path3.join(dir, name), JSON.stringify(req.body, null, 2), "utf8");
-  res.json({ ok: true, file: path3.join("exports", name) });
+  fs4.writeFileSync(path4.join(dir, name), JSON.stringify(req.body, null, 2), "utf8");
+  res.json({ ok: true, file: path4.join("exports", name) });
 });
 var lastEngine = null;
+var completeActive = 0;
+var completeWaiters = [];
+async function gatedCompletion(args) {
+  while (completeActive >= 30) await new Promise((r) => completeWaiters.push(r));
+  completeActive++;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await runCompletion(args);
+      } catch (err) {
+        const limited = err instanceof ApiError && err.status === 429 || /rate limit|429/i.test(String(err?.message || ""));
+        if (!limited || attempt >= 5 || args.signal?.aborted) throw err;
+        await new Promise((r) => setTimeout(r, 3e3 * (attempt + 1) + Math.random() * 2e3));
+      }
+    }
+  } finally {
+    completeActive--;
+    completeWaiters.shift()?.();
+  }
+}
 app.post("/api/ai/complete", async (req, res) => {
   const { provider, model, system, messages, json, effort, groundOn } = req.body || {};
   if (!provider) {
@@ -3974,7 +4145,7 @@ app.post("/api/ai/complete", async (req, res) => {
   });
   try {
     const grounded = groundOn && typeof groundOn === "object" ? await withInternetSources(messages, groundOn) : messages;
-    const text = await runCompletion({ provider, model, system, messages: grounded, json, effort, purpose: "write", signal: controller.signal, session: req.header("x-opencode-session") || void 0 });
+    const text = await gatedCompletion({ provider, model, system, messages: grounded, json, effort, purpose: "write", signal: controller.signal, session: req.header("x-opencode-session") || void 0 });
     if (controller.signal.aborted) return;
     if (!text || !text.trim()) {
       return res.status(502).json({ error: "The AI provider returned an empty response. Try again." });
@@ -4041,7 +4212,7 @@ app.delete("/api/ai/jobs/:id", (req, res) => {
   res.json({ ok: true });
 });
 var PERSONA_PROMPTS = {
-  BOARD_MASTER: "You are the PULSE MED Board Exam Master for NEET-PG / INI-CET / AMC CAT: razor-sharp high-yield clinical breakdowns, distractor (trap) dissection, and exam-board pearls.",
+  BOARD_MASTER: "You are the PULSE MED Board Exam Master for NEET-PG / INI-CET: razor-sharp high-yield clinical breakdowns, distractor (trap) dissection, and exam-board pearls.",
   ATTENDING: "You are the PULSE MED Socratic Attending Physician on teaching rounds: reason step by step with the resident, ask and answer like a senior clinician.",
   PHARMACOLOGIST: "You are the PULSE MED Mechanism & Kinetics Specialist: pharmacodynamics, pharmacokinetics, receptor and antimicrobial-resistance mechanisms explained precisely."
 };
@@ -4077,8 +4248,8 @@ app.post("/api/ai/tutor-chat", async (req, res) => {
     return res.status(401).json({ error: "No AI provider is connected yet. Connect an AI provider in Settings \u2192 AI Subscription Hub." });
   }
   const system = [
-    "You are the PULSE MED clinical AI tutor for postgraduate medical exams (NEET-PG, INI-CET, AMC CAT).",
-    typeof body.exam === "string" && body.exam ? `The learner's active exam is ${String(body.exam).replace("_", "-")}. Tailor depth, terminology and guidelines to that exam (AMC CAT: Australian eTG/TGA and RACGP guidance; NEET-PG/INI-CET: Indian and international standard references).` : "",
+    "You are the PULSE MED clinical AI tutor for postgraduate medical exams (NEET-PG, INI-CET).",
+    typeof body.exam === "string" && body.exam ? `The learner's active exam is ${String(body.exam).replace("_", "-")}. Tailor depth, terminology and guidelines to that exam (NEET-PG/INI-CET: Indian and international standard references).` : "",
     PERSONA_PROMPTS[persona] || PERSONA_PROMPTS.BOARD_MASTER,
     "Rules:",
     "- High-yield, clinically grounded answers. Cite standard textbooks/guidelines when relevant (e.g., Harrison's Principles 21st Ed, Robbins Pathology 10th Ed, Australian Therapeutic Guidelines eTG).",
@@ -4296,9 +4467,9 @@ app.post("/api/images/bank/build", async (req, res) => {
 });
 app.get("/api/images/qa-results", (_req, res) => {
   try {
-    const file = path3.join(DATA_DIR2, "image-first-results.json");
-    if (!fs3.existsSync(file)) return res.json({ success: true, available: false, run: null });
-    const run = JSON.parse(fs3.readFileSync(file, "utf8"));
+    const file = path4.join(DATA_DIR3, "image-first-results.json");
+    if (!fs4.existsSync(file)) return res.json({ success: true, available: false, run: null });
+    const run = JSON.parse(fs4.readFileSync(file, "utf8"));
     return res.json({ success: true, available: true, run });
   } catch (err) {
     return res.status(500).json({ error: err?.message || "Could not read the last image-first run." });
@@ -4520,6 +4691,10 @@ app.post("/api/web/research", async (req, res) => {
   const query = typeof req.body?.query === "string" ? req.body.query : "";
   try {
     const pageChars = Math.min(3e4, Math.max(2500, Number(req.body?.pageChars) || 2500));
+    if (req.body?.books) {
+      const found = searchMyBooks(query, typeof req.body?.subject === "string" ? req.body.subject : "", 6, Math.min(pageChars, 2500));
+      return res.json({ success: true, sources: found.map((f) => ({ title: `${f.title} \u2014 ${f.heading}`, url: `mybooks:${f.title}`, text: f.text, kind: "book" })), retrievedAt: (/* @__PURE__ */ new Date()).toISOString() });
+    }
     const out = await research(query, pageChars);
     return res.json({ success: true, sources: out.sources, retrievedAt: out.retrievedAt });
   } catch (err) {
@@ -4536,18 +4711,13 @@ var OFFICIAL_EXAM_SOURCES = {
     label: "AIIMS (aiimsexams.ac.in)",
     hosts: ["aiimsexams.ac.in", "aiims.edu"],
     queries: ["AIIMS INI-CET exam date notification", "aiimsexams INI-CET 2027 schedule prospectus"]
-  },
-  AMC_CAT: {
-    label: "Australian Medical Council (amc.org.au)",
-    hosts: ["amc.org.au"],
-    queries: ["AMC MCQ examination dates", "AMC CAT MCQ exam dates 2027 schedule"]
   }
 };
 app.post("/api/exams/dates", async (req, res) => {
   const exam = String(req.body?.exam || "").trim().toUpperCase();
   const spec = OFFICIAL_EXAM_SOURCES[exam];
   if (!spec) {
-    return res.status(400).json({ error: "Unknown exam. Use NEET_PG, INI_CET or AMC_CAT." });
+    return res.status(400).json({ error: "Unknown exam. Use NEET_PG or INI_CET." });
   }
   try {
     const batches = await Promise.allSettled(spec.queries.map((q) => research(q)));
@@ -4659,9 +4829,9 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path3.resolve(__dirname, "dist")));
+    app.use(express.static(path4.resolve(__dirname, "dist")));
     app.get("*", (req, res) => {
-      res.sendFile(path3.resolve(__dirname, "dist", "index.html"));
+      res.sendFile(path4.resolve(__dirname, "dist", "index.html"));
     });
   }
   const hosts = process.env.HOST ? [process.env.HOST] : ["127.0.0.1", "::1"];

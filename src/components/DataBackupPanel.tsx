@@ -112,7 +112,7 @@ export const DataBackupPanel: React.FC = () => {
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-base font-medium text-slate-900 flex items-center gap-2">
-            <Database className="w-4 h-4 " /> Data, backup & review schedule
+            <Database className="w-4 h-4 text-[#0f8b8d]" /> Data, backup & review schedule
           </h3>
           <p className="text-xs text-slate-500 mt-0.5">
             Versioned JSON backup (v{BACKUP_VERSION}) — never includes OAuth tokens or API keys.
@@ -153,7 +153,7 @@ export const DataBackupPanel: React.FC = () => {
           onClick={exportNow}
           className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg   text-white text-xs font-medium"
         >
-          <Download className="w-3.5 h-3.5 " /> Export backup (JSON)
+          <Download className="w-3.5 h-3.5 text-[#8ff3f4]" /> Export backup (JSON)
         </button>
         <button
           onClick={() => fileRef.current?.click()}

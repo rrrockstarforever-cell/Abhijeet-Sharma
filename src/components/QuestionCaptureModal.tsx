@@ -261,7 +261,7 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
     ? `${getActiveProvider()} · ${getEffectiveModel(getActiveProvider()!)}`
     : 'no active provider';
 
-  const field = 'w-full text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:';
+  const field = 'w-full text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]';
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-start justify-center p-4 overflow-y-auto">
@@ -269,7 +269,7 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
         <div className="flex items-start justify-between border-b border-slate-100 pb-3">
           <div>
             <h3 className="text-base font-medium text-slate-900 flex items-center gap-2">
-              <ClipboardPaste className="w-4 h-4 " /> Capture a question
+              <ClipboardPaste className="w-4 h-4 text-[#0f8b8d]" /> Capture a question
             </h3>
             <p className="text-[11px] text-slate-500 mt-0.5">
               Paste a screenshot with <strong>Ctrl+V</strong> (or choose an image), OCR it, then structure it with your active AI.
@@ -328,7 +328,7 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
                 disabled={!image || ocrBusy}
                 className="flex-1 py-1.5 rounded-lg  text-white text-[10px] font-medium disabled:opacity-40 flex items-center justify-center gap-1"
               >
-                {ocrBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <ScanText className="w-3 h-3 " />}
+                {ocrBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <ScanText className="w-3 h-3 text-[#8ff3f4]" />}
                 {ocrBusy ? 'Recognising…' : 'Run OCR'}
               </button>
               <button
@@ -399,7 +399,7 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
               {draft.options.length < 5 && (
                 <button
                   onClick={() => setDraft((d) => ({ ...d, options: [...d.options, { id: 'E', text: '' }] }))}
-                  className="text-[10px] font-semibold  underline"
+                  className="text-[10px] font-semibold text-[#0f8b8d] underline"
                 >
                   + Add option E
                 </button>
@@ -438,7 +438,7 @@ export const QuestionCaptureModal: React.FC<QuestionCaptureModalProps> = ({ exam
               disabled={!!savedId}
               className="px-3 py-1.5 text-[11px] font-medium   text-white rounded-lg flex items-center gap-1.5 disabled:opacity-40"
             >
-              <Save className="w-3.5 h-3.5 " /> Save to notebook
+              <Save className="w-3.5 h-3.5 text-[#8ff3f4]" /> Save to notebook
             </button>
           </div>
         </div>

@@ -395,33 +395,33 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
-      <section className="relative overflow-hidden rounded-[20px] border ">
-        <div className=" pointer-events-none absolute inset-0 opacity-[0.10] dark:opacity-[0.12]" aria-hidden="true" />
-        <div className=" pointer-events-none absolute inset-0 opacity-5 [mask-image:radial-gradient(ellipse_at_center,transparent_35%,black_75%)]" aria-hidden="true" />
+      <section className="relative overflow-hidden rounded-[20px] border border-[#13294b] bg-[#001432] text-white shadow-md">
+        <div className=" pointer-events-none absolute inset-0 bg-[#0f8b8d] opacity-[0.10] dark:opacity-[0.12]" aria-hidden="true" />
+        <div className=" pointer-events-none absolute inset-0 bg-[#8ff3f4] opacity-5 [mask-image:radial-gradient(ellipse_at_center,transparent_35%,black_75%)]" aria-hidden="true" />
         <div className="relative z-10 space-y-5 p-5 md:p-6">
           <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
             <div className="space-y-2">
-              <div className="inline-flex items-center gap-2 rounded-xl border px-3 py-1 text-[11px] font-medium uppercase tracking-wider ">
+              <div className="inline-flex items-center gap-2 rounded-xl border border-[#0f8b8d]/30 bg-[#0f8b8d]/20 px-3 py-1 text-[11px] font-medium uppercase tracking-wider text-[#8ff3f4]">
                 <Bookmark className="h-3.5 w-3.5" /> Review Arena
               </div>
-              <h1 className="font-['Cormorant'] text-3xl font-medium tracking-tight md:text-4xl">
+              <h1 className=" text-3xl font-medium tracking-tight md:text-4xl">
                 Saved Highlights & Memory Anchors
               </h1>
-              <p className="max-w-2xl text-sm ">
+              <p className="max-w-2xl text-sm text-slate-300">
                 Train recall from your clinical captures. Due now, active reviews, and new anchors are counted from the same SRS deck.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={handleExportTsv}
-                className="inline-flex min-h-[44px] items-center gap-2 rounded-[16px] border   px-3.5 py-2.5 text-xs font-medium  transition-colors hover:opacity-90"
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-[16px] border border-slate-700 bg-slate-800/80 px-3.5 py-2.5 text-xs font-medium text-white transition-colors hover:bg-slate-700"
               >
                 <Download className="h-4 w-4" />
                 Export Anki TSV
               </button>
               <button
                 onClick={() => setShowAddModal(true)}
-                className="inline-flex min-h-[44px] items-center gap-2 rounded-[16px] border px-4 py-2.5 text-xs font-medium   transition-all active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible: dark:focus-visible:"
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-[16px] border border-[#0f8b8d] bg-[#0f8b8d] px-4 py-2.5 text-xs font-medium text-white transition-all hover:bg-[#00696b] active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible: dark:focus-visible:"
               >
                 <Plus className="h-4 w-4" />
                 Add Clinical Pearl
@@ -430,22 +430,22 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
           </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div className="rounded-[16px] border p-3 ">
-              <div className="font-[''] text-2xl tracking-wide">{dueNowCount}</div>
-              <div className="text-[11px] font-medium uppercase tracking-wider ">Due now</div>
+            <div className="rounded-[16px] border border-white/10 bg-white/5 p-3 ">
+              <div className=" text-2xl tracking-wide">{dueNowCount}</div>
+              <div className="text-[11px] font-medium uppercase tracking-wider text-slate-300">Due now</div>
             </div>
-            <div className="rounded-[16px] border p-3 ">
-              <div className="font-[''] text-2xl tracking-wide">{inReviewCount}</div>
-              <div className="text-[11px] font-medium uppercase tracking-wider ">In review</div>
+            <div className="rounded-[16px] border border-white/10 bg-white/5 p-3 ">
+              <div className=" text-2xl tracking-wide">{inReviewCount}</div>
+              <div className="text-[11px] font-medium uppercase tracking-wider text-slate-300">In review</div>
             </div>
-            <div className="rounded-[16px] border p-3 ">
-              <div className="font-[''] text-2xl tracking-wide">{newThisWeekCount}</div>
-              <div className="text-[11px] font-medium uppercase tracking-wider ">New this week</div>
+            <div className="rounded-[16px] border border-white/10 bg-white/5 p-3 ">
+              <div className=" text-2xl tracking-wide">{newThisWeekCount}</div>
+              <div className="text-[11px] font-medium uppercase tracking-wider text-slate-300">New this week</div>
             </div>
           </div>
 
-          <div className="flex flex-col justify-between gap-3 rounded-[16px] border   p-3 sm:flex-row sm:items-center">
-            <div className="text-xs font-semibold ">
+          <div className="flex flex-col justify-between gap-3 rounded-[16px] border border-white/10 bg-slate-900/40 p-3 sm:flex-row sm:items-center">
+            <div className="text-xs font-semibold text-slate-200">
               {nextDue ? <>Next due {dueLabel(nextDue.due)} · {dueDateText(nextDue.due)}</> : dueNowCount > 0 ? 'Review deck ready.' : 'Save a highlight to start a review deck.'}
             </div>
             <button
@@ -454,7 +454,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                 el?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
                 (el as HTMLElement | null)?.focus();
               }}
-              className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-[16px] border px-5 py-2.5 text-xs font-medium   focus-visible:outline-none focus-visible:ring-2 focus-visible: dark:focus-visible:"
+              className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-[16px] border border-[#0f8b8d] bg-[#0f8b8d] px-5 py-2.5 text-xs font-medium text-white hover:bg-[#00696b] focus-visible:outline-none focus-visible:ring-2 focus-visible: dark:focus-visible:"
             >
               <Brain className="h-4 w-4" /> Start Review
             </button>
@@ -469,8 +469,8 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                   onClick={() => setSelectedTag(tab.id)}
                   className={`min-h-[36px] whitespace-nowrap rounded-xl border px-3 py-1.5 text-xs font-medium transition-colors ${
                     selectedTag === tab.id
-                      ? 'border '
-                      : '   '
+                      ? 'border-[#0f8b8d] bg-[#0f8b8d] text-white'
+                    : 'bg-slate-800/60 text-slate-300 hover:bg-slate-800'
                   }`}
                 >
                   {tab.label}
@@ -479,13 +479,13 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
             </div>
 
             <div className="relative w-full sm:w-64">
-              <Search className="absolute left-3 top-2.5 h-4 w-4 " />
+              <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
               <input
                 type="text"
                 placeholder="Search your saved highlights..."
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
-                className="min-h-[40px] w-full rounded-xl border   py-1.5 pl-9 pr-3 text-xs   focus:outline-none focus:ring-2 focus: dark:focus:"
+                className="min-h-[40px] w-full rounded-xl border border-slate-700 bg-slate-900/80 py-1.5 pl-9 pr-3 text-xs text-white placeholder-slate-400 focus:border-[#0f8b8d] focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]/40 dark:focus:"
               />
             </div>
           </div>
@@ -496,8 +496,8 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left Column: Highlights Cards */}
         <div className="lg:col-span-8 space-y-6">
-          <div className="flex flex-col justify-between gap-2 rounded-[16px] border   p-3 text-xs  sm:flex-row sm:items-center">
-            <div className="font-semibold ">
+          <div className="flex flex-col justify-between gap-2 rounded-[16px] border border-slate-200 bg-white p-3 text-xs text-slate-600 shadow-sm sm:flex-row sm:items-center">
+            <div className="font-semibold text-slate-800">
               <span className="">{filteredHighlights.length}</span> saved highlight{filteredHighlights.length === 1 ? '' : 's'} shown
               {(selectedTag !== 'ALL' || searchQuery.trim() !== '') && (
                 <span> · {selectedTag !== 'ALL' ? `tag: ${selectedTag}` : 'all tags'}{searchQuery.trim() ? ` · search: “${searchQuery.trim()}”` : ''}</span>
@@ -506,7 +506,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
             {(selectedTag !== 'ALL' || searchQuery.trim() !== '') && (
               <button
                 onClick={() => { setSelectedTag('ALL'); setSearchQuery(''); }}
-                className="inline-flex min-h-[36px] items-center justify-center rounded-xl border   px-3 py-1.5 font-medium  hover:opacity-90"
+                className="inline-flex min-h-[36px] items-center justify-center rounded-xl border border-slate-200 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
               >
                 Clear filters
               </button>
@@ -514,8 +514,8 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
           </div>
           {highlights.length === 0 ? (
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-10 text-center">
-              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full  mb-3">
-                <Bookmark className="w-6 h-6 " />
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-[#0f8b8d]/10 mb-3">
+                <Bookmark className="w-6 h-6 text-[#0f8b8d]" />
               </div>
               <h3 className="text-base font-medium text-slate-900">Nothing saved yet</h3>
               <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto leading-relaxed">
@@ -523,23 +523,23 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
               </p>
               <button
                 onClick={() => setShowAddModal(true)}
-                className="mt-4 inline-flex items-center gap-2 px-4 py-2   text-white text-xs font-semibold rounded-xl transition-colors"
+                className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-semibold rounded-xl transition-colors"
               >
                 <Plus className="w-4 h-4" /> Add your first highlight
               </button>
             </div>
           ) : filteredHighlights.length === 0 ? (
-            <div className="rounded-[20px] border p-8 text-center text-xs  ">
-              <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full border ">
-                <Search className="h-5 w-5 " />
+            <div className="rounded-[20px] border border-slate-200 bg-white p-8 text-center text-xs text-slate-500 shadow-sm ">
+              <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-400">
+                <Search className="h-5 w-5 text-slate-400" />
               </div>
-              <div className="font-[''] text-xl tracking-wide ">NO MATCHES</div>
+              <div className=" text-xl tracking-wide text-slate-800">NO MATCHES</div>
               <p className="mx-auto mt-1 max-w-sm leading-relaxed">
                 No saved highlights match this search or filter. Clear it to see your full deck again.
               </p>
               <button
                 onClick={() => { setSelectedTag('ALL'); setSearchQuery(''); }}
-                className="mt-4 inline-flex min-h-[44px] items-center justify-center rounded-[16px] border px-4 py-2 text-xs font-medium  "
+                className="mt-4 inline-flex min-h-[44px] items-center justify-center rounded-[16px] border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
               >
                 Clear filters
               </button>
@@ -550,7 +550,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
               const isDue = !!rec && !rec.suspended && new Date(rec.due).getTime() <= Date.now();
               const statusLabel = !rec ? 'New' : rec.suspended ? 'Suspended' : isDue ? 'Due now' : 'Later';
               const statusTone = !rec
-                ? '  '
+                ? 'border-slate-300 bg-slate-100 text-slate-700 dark:text-slate-200'
                 : rec.suspended
                   ? 'border-rose-400/60 bg-rose-500/10 text-rose-700 dark:text-rose-200'
                   : isDue
@@ -567,13 +567,13 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                   initial={reduceMotion ? false : { opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.22, ease: "easeOut", delay: reduceMotion ? 0 : Math.min(index * 0.03, 0.2) }}
-                  className="overflow-hidden rounded-[20px] border     transition-all "
+                  className="overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-sm transition-all "
                 >
                   {/* Card Header */}
                   <div className="p-6 pb-4">
                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                       <div className="flex items-center gap-2">
-                        <span className="text-[11px] font-medium px-2 py-0.5 rounded   uppercase tracking-wide">
+                        <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-[#0f8b8d]/10 text-[#0f8b8d] uppercase tracking-wide">
                           {highlight.subject}
                         </span>
                         <span className="text-xs font-semibold text-slate-700">
@@ -596,7 +596,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                     </div>
 
                     {/* Quote Box */}
-                    <div className="p-4 rounded-xl bg-slate-50 border-l-4  text-slate-800 text-xs leading-relaxed font-sans italic">
+                    <div className="p-4 rounded-xl bg-slate-50 border-l-4 border-[#0f8b8d] text-slate-800 text-xs leading-relaxed font-sans italic">
  "{highlight.quote}"
                     </div>
 
@@ -639,7 +639,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                       {rec?.suspended && (
                         <button
                           onClick={() => { resumeReview(highlight.id); bumpSrs(); }}
-                          className="inline-flex min-h-[36px] items-center gap-1 rounded-xl border   px-2.5 py-1 font-medium  hover:opacity-90"
+                          className="inline-flex min-h-[36px] items-center gap-1 rounded-xl border border-slate-200 bg-white px-2.5 py-1 font-medium text-slate-700 hover:bg-slate-50"
                         >
                           <RotateCcw className="h-3 w-3" /> Restore
                         </button>
@@ -673,37 +673,37 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
           <div
             id="pm-review-card"
             tabIndex={-1}
-            className="relative scroll-mt-24 overflow-hidden rounded-[20px] border p-5   outline-none"
+            className="relative scroll-mt-24 overflow-hidden rounded-[20px] border border-[#13294b] bg-gradient-to-br from-[#001432] to-[#13294b] p-5 text-white shadow-md outline-none"
           >
-            <div className=" pointer-events-none absolute inset-0 opacity-[0.08] dark:opacity-[0.12]" aria-hidden="true" />
+            <div className=" pointer-events-none absolute inset-0 bg-[#0f8b8d] opacity-[0.08] dark:opacity-[0.12]" aria-hidden="true" />
             <div className="relative z-10">
               <div className="flex items-center justify-between gap-2">
-                <span className="inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[11px] font-medium uppercase tracking-wider ">
+                <span className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium uppercase tracking-wider text-[#8ff3f4]">
                   <Clock className="h-3.5 w-3.5" /> Review Deck
                 </span>
-                <span className="rounded-full border   px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider ">
+                <span className="rounded-full border border-white/10 bg-slate-800 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider text-slate-300">
                   {dueNowCount > 0 ? `Due ${dueNowCount}` : 'Deck clear'}
                 </span>
               </div>
 
               {highlights.length === 0 ? (
-                <div className="mt-4 rounded-[16px] border   p-4 text-center text-xs ">
+                <div className="mt-4 rounded-[16px] border border-white/10 bg-slate-900/80 p-4 text-center text-xs text-slate-300">
                   You have not saved any highlights yet. Add one to build your review deck.
                 </div>
               ) : currentCard ? (
                 <>
-                  <div className="mt-4 rounded-[16px] border p-4 text-xs ">
+                  <div className="mt-4 rounded-[16px] border border-white/10 bg-slate-900/80 p-4 text-xs text-slate-200">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="rounded-lg border   px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider">
+                        <span className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-[#8ff3f4]">
                           {currentCard.subject}
                         </span>
-                        <span className="text-xs font-medium ">{currentCard.subtopic}</span>
-                        <span className="rounded-full border   px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider ">
+                        <span className="text-xs font-medium text-slate-300">{currentCard.subtopic}</span>
+                        <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider text-slate-300">
                           {KIND_LABEL[currentCard.kind] || 'Saved'}
                         </span>
                       </div>
-                      <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider  ${isNewCard ? '  ' : 'border-amber-400/70 bg-amber-400/15 text-amber-800 dark:text-amber-200'}`}>
+                      <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider  ${isNewCard ? 'border-slate-300 bg-slate-100 text-slate-700 dark:text-slate-200' : 'border-amber-400/70 bg-amber-400/15 text-amber-800 dark:text-amber-200'}`}>
                         <Sparkles className="h-3 w-3" /> {isNewCard ? 'NEW' : 'DUE NOW'}
                       </span>
                     </div>
@@ -711,32 +711,32 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                     {currentCard.tags.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1">
                         {currentCard.tags.map(tag => (
-                          <span key={tag} className="rounded-full border   px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider ">
+                          <span key={tag} className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-slate-300">
                             #{tag}
                           </span>
                         ))}
                       </div>
                     )}
 
-                    <p className="mt-3 text-sm font-medium leading-relaxed ">“{currentCard.quote}”</p>
+                    <p className="mt-3 text-sm font-medium leading-relaxed text-white">“{currentCard.quote}”</p>
 
                     {isNewCard && (
-                      <div className="mt-2 text-[10px] italic ">
+                    <div className="mt-2 text-[10px] text-slate-400 italic">
                         New card · no rating has confirmed recall yet.
                       </div>
                     )}
 
                     {revealed ? (
-                      <div className="mt-3 border-t  pt-3">
-                        <div className="mb-1 font-[''] text-lg tracking-wide ">EXPLANATION</div>
-                        <p className="leading-relaxed ">
+                    <div className="mt-3 pt-3 border-t border-slate-700">
+                        <div className="mb-1 text-lg tracking-wide text-[#8ff3f4]">EXPLANATION</div>
+                      <p className="text-slate-200 leading-relaxed">
                           {currentCard.memoryAnchor || currentCard.note || 'No memory anchor or note saved with this highlight yet.'}
                         </p>
                       </div>
                     ) : (
                       <button
                         onClick={() => setRevealed(true)}
-                        className="mt-3 inline-flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-[16px] border px-3 py-2 text-xs font-medium   hover:opacity-90"
+                        className="mt-3 inline-flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-[16px] border border-white/10 bg-slate-800 px-3 py-2 text-xs font-medium text-white hover:bg-slate-700"
                       >
                         <Eye className="h-3.5 w-3.5" /> Reveal answer
                       </button>
@@ -744,7 +744,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                   </div>
 
                   <div className="mt-4">
-                    <div className="mb-2 text-[11px] font-semibold ">
+                    <div className="mb-2 text-[11px] font-semibold text-slate-300">
                       {revealed ? 'Rate recall to set the next due date:' : 'Reveal the answer before rating.'}
                     </div>
                     <div className="grid grid-cols-2 gap-2 text-xs">
@@ -779,7 +779,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                   <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-[11px]">
                     <button
                       onClick={handleReviewLater}
-                      className="inline-flex min-h-[36px] items-center gap-1 rounded-xl border   px-2.5 py-1 font-medium  hover:opacity-90"
+                      className="inline-flex min-h-[36px] items-center gap-1 rounded-xl border border-white/10 bg-slate-800 px-2.5 py-1 font-medium text-slate-200 hover:bg-slate-700"
                     >
                       <Clock className="h-3.5 w-3.5" /> Review later
                     </button>
@@ -792,11 +792,11 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                   </div>
                 </>
               ) : (
-                <div className="mt-4 rounded-[16px] border   p-4 text-xs">
-                  <div className="font-[''] text-2xl tracking-wide ">DECK CLEAR</div>
-                  <div className="mt-1 font-semibold ">Nothing due right now.</div>
+                <div className="mt-4 rounded-[16px] border border-white/10 bg-slate-900/80 p-4 text-xs text-slate-300">
+                  <div className=" text-2xl tracking-wide text-white">DECK CLEAR</div>
+                  <div className="mt-1 font-semibold text-slate-200">Nothing due right now.</div>
                   {nextDue && (
-                    <div className="mt-1 ">
+                    <div className="mt-1 text-slate-400">
                       Next review {dueLabel(nextDue.due)} — {dueDateText(nextDue.due)}.
                     </div>
                   )}
@@ -804,8 +804,8 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
               )}
 
               {ratedNote && (
-                <div className="mt-4 rounded-[16px] border p-3 text-center text-[11px] font-medium  ">
-                  <span className="mr-1 font-[''] text-base tracking-wide">
+                <div className="mt-4 rounded-[16px] border border-[#0f8b8d]/40 bg-[#0f8b8d]/10 p-3 text-center text-[11px] font-medium text-[#8ff3f4]  ">
+                  <span className="mr-1 text-base tracking-wide">
                     {ratedNote.toLowerCase().includes('suspend') ? 'SUSPENDED' : ratedNote.toLowerCase().includes('defer') ? 'LATER' : 'DUE NOW'}
                   </span>
                   {ratedNote}
@@ -817,7 +817,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
           {/* Quick Capture Form */}
           <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
             <h3 className="text-sm font-medium text-slate-900 flex items-center gap-2">
-              <Plus className="w-4 h-4 " /> Quick Pearl Capture
+              <Plus className="w-4 h-4 text-[#0f8b8d]" /> Quick Pearl Capture
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
               Paste or type high-yield board facts from bedside rounds or mock tests
@@ -829,7 +829,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                 onChange={e => setCustomPearlText(e.target.value)}
                 placeholder="e.g. Linezolid causes bone marrow suppression & weak reversible MAO inhibition (risk of serotonin syndrome with SSRIs)..."
                 rows={3}
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]"
               />
 
               <div className="flex items-center justify-between">
@@ -845,7 +845,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                     });
                     setCustomPearlText('');
                   }}
-                  className="px-3.5 py-1.5   text-white text-xs font-semibold rounded-lg transition-colors"
+                  className="px-3.5 py-1.5 bg-[#001432] hover:bg-[#13294b] text-white text-xs font-semibold rounded-lg transition-colors"
                 >
                   Save Pearl
                 </button>
@@ -854,29 +854,29 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
           </div>
 
           {/* Suspended Review Management */}
-          <div className="rounded-[20px] border p-5  ">
-            <h3 className="flex items-center gap-2 text-sm font-medium">
+          <div className="rounded-[20px] border border-slate-200 bg-white p-5 text-slate-900 shadow-sm">
+            <h3 className="flex items-center gap-2 text-sm font-medium text-slate-900">
               <RotateCcw className="h-4 w-4" /> Suspended Reviews
             </h3>
-            <p className="mt-0.5 text-xs ">
+            <p className="mt-0.5 text-xs text-slate-500">
               Restored cards become due now. Saved highlights stay intact.
             </p>
 
             {suspendedHighlights.length === 0 ? (
-              <div className="mt-4 rounded-[16px] border   p-3 text-center text-xs ">
+              <div className="mt-4 rounded-[16px] border border-slate-200 bg-slate-50 p-3 text-center text-xs text-slate-500">
                 No suspended reviews.
               </div>
             ) : (
               <div className="mt-4 space-y-2">
                 {suspendedHighlights.map(h => (
-                  <div key={h.id} className="flex items-center justify-between gap-2 rounded-[16px] border   p-3 text-xs">
+                  <div key={h.id} className="flex items-center justify-between gap-2 rounded-[16px] border border-slate-200 bg-white p-3 text-xs text-slate-700">
                     <div className="min-w-0">
-                      <div className="truncate font-medium ">{h.subtopic || h.subject}</div>
-                      <div className="truncate ">{h.subject} · {KIND_LABEL[h.kind] || 'Saved'}</div>
+                      <div className="truncate font-medium text-slate-800">{h.subtopic || h.subject}</div>
+                      <div className="truncate text-slate-500">{h.subject} · {KIND_LABEL[h.kind] || 'Saved'}</div>
                     </div>
                     <button
                       onClick={() => { resumeReview(h.id); bumpSrs(); }}
-                      className="inline-flex min-h-[36px] shrink-0 items-center gap-1 rounded-xl border px-2.5 py-1 font-medium  "
+                      className="inline-flex min-h-[36px] shrink-0 items-center gap-1 rounded-xl border border-slate-200 bg-white px-2.5 py-1 font-medium text-slate-700 hover:bg-slate-50"
                     >
                       <RotateCcw className="h-3 w-3" /> Restore
                     </button>
@@ -891,17 +891,17 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
       {/* Add Modal */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-          <div className="relative w-full max-w-lg overflow-hidden rounded-[20px] border p-6  ">
-            <div className=" pointer-events-none absolute inset-0 opacity-[0.08] dark:opacity-[0.12]" aria-hidden="true" />
+          <div className="relative w-full max-w-lg overflow-hidden rounded-[20px] border border-slate-200 bg-white p-6 text-slate-900 shadow-2xl  ">
+            <div className=" pointer-events-none absolute inset-0 bg-[#0f8b8d] opacity-[0.08] dark:opacity-[0.12]" aria-hidden="true" />
             <div className="relative z-10">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="font-[''] text-2xl tracking-wide">NEW HIGHLIGHT</div>
-                  <p className="mt-1 text-xs ">Saved to your highlights and added to the review deck.</p>
+                  <div className=" text-2xl tracking-wide text-slate-900">NEW HIGHLIGHT</div>
+                  <p className="mt-1 text-xs text-slate-500">Saved to your highlights and added to the review deck.</p>
                 </div>
                 <button
                   onClick={() => setShowAddModal(false)}
-                  className="inline-flex min-h-[36px] items-center justify-center rounded-xl border   px-2.5 text-xs font-medium"
+                  className="inline-flex min-h-[36px] items-center justify-center rounded-xl border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-600 hover:bg-slate-100"
                   aria-label="Close add highlight modal"
                 >
                   ✕
@@ -910,35 +910,35 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
 
               <div className="mt-4 space-y-3">
                 <div>
-                  <label className="mb-1 block text-xs font-semibold">Subject</label>
+                  <label className="mb-1 block text-xs font-semibold text-slate-700">Subject</label>
                   <input
                     type="text"
                     value={modalSubject}
                     onChange={e => setModalSubject(e.target.value)}
                     placeholder="e.g. PHARMACOLOGY"
-                    className="w-full rounded-xl border   p-2.5 text-xs   focus:outline-none focus:ring-2 focus: dark:focus:"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] dark:focus:"
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-semibold">Concept / Title</label>
+                  <label className="mb-1 block text-xs font-semibold text-slate-700">Concept / Title</label>
                   <input
                     type="text"
                     value={modalConcept}
                     onChange={e => setModalConcept(e.target.value)}
                     placeholder="e.g. Daptomycin Surfactant Inactivation"
                     aria-invalid={!modalConcept.trim() && !modalNote.trim()}
-                    className={`w-full rounded-xl border  p-2.5 text-xs   focus:outline-none focus:ring-2 focus: dark:focus: ${!modalConcept.trim() && !modalNote.trim() ? 'border-rose-400' : ''}`}
+                    className={`w-full rounded-xl border p-2.5 text-xs text-slate-800 placeholder-slate-400 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] dark:focus: ${!modalConcept.trim() && !modalNote.trim() ? 'border-rose-400' : 'border-slate-200'}`}
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-semibold">Memory Anchor / Board Trap Note</label>
+                  <label className="mb-1 block text-xs font-semibold text-slate-700">Memory Anchor / Board Trap Note</label>
                   <textarea
                     rows={3}
                     value={modalNote}
                     onChange={e => setModalNote(e.target.value)}
                     placeholder="Key high yield point..."
                     aria-invalid={!modalConcept.trim() && !modalNote.trim()}
-                    className={`w-full rounded-xl border  p-2.5 text-xs   focus:outline-none focus:ring-2 focus: dark:focus: ${!modalConcept.trim() && !modalNote.trim() ? 'border-rose-400' : ''}`}
+                    className={`w-full rounded-xl border p-2.5 text-xs text-slate-800 placeholder-slate-400 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d] dark:focus: ${!modalConcept.trim() && !modalNote.trim() ? 'border-rose-400' : 'border-slate-200'}`}
                   />
                   {!modalConcept.trim() && !modalNote.trim() && (
                     <p className="mt-1 text-[11px] font-semibold text-rose-600 dark:text-rose-300">
@@ -951,7 +951,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
               <div className="mt-6 flex justify-end gap-3">
                 <button
                   onClick={() => setShowAddModal(false)}
-                  className="min-h-[44px] rounded-[16px] border   px-4 py-2 text-xs font-medium  hover:opacity-90"
+                  className="min-h-[44px] rounded-[16px] border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
                 >
                   Cancel
                 </button>
@@ -972,7 +972,7 @@ export const HighlightsSavedView: React.FC<HighlightsSavedViewProps> = ({ onNavi
                     setShowAddModal(false);
                   }}
                   disabled={!modalConcept.trim() && !modalNote.trim()}
-                  className="min-h-[44px] rounded-[16px] border px-4 py-2 text-xs font-medium   disabled:cursor-not-allowed disabled:opacity-50"
+                  className="min-h-[44px] rounded-[16px] border border-[#0f8b8d] bg-[#0f8b8d] px-4 py-2 text-xs font-medium text-white hover:bg-[#00696b] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Save & Index
                 </button>

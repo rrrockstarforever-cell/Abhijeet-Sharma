@@ -37,7 +37,7 @@ import {
   resetSeenQuestions
 } from '../utils/questionBankDB.ts';
 
-export const BANK_CONFIGS: Omit<Record<BankId, { name: string; key: string; desc: string; defaultExam: ExamType }>, 'success' | 'amc'> = {
+export const BANK_CONFIGS: Omit<Record<BankId, { name: string; key: string; desc: string; defaultExam: ExamType }>, 'success'> = {
   emedici: {
     name: 'eMedici',
     key: 'bank:emedici',
@@ -281,13 +281,13 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
   const [activeTab, setActiveTab] = useState<ActiveBankTab>('emedici');
   
   // Bank cache and metadata
-  const [bankMetas, setBankMetas] = useState<Omit<Record<BankId, BankMetadata | null>, 'success' | 'amc'>>({
+  const [bankMetas, setBankMetas] = useState<Omit<Record<BankId, BankMetadata | null>, 'success'>>({
     emedici: null,
   });
-  const [bankQuestions, setBankQuestions] = useState<Omit<Record<BankId, BankQuestion[]>, 'success' | 'amc'>>({
+  const [bankQuestions, setBankQuestions] = useState<Omit<Record<BankId, BankQuestion[]>, 'success'>>({
     emedici: [],
   });
-  const [seenCounts, setSeenCounts] = useState<Omit<Record<BankId, number>, 'success' | 'amc'>>({
+  const [seenCounts, setSeenCounts] = useState<Omit<Record<BankId, number>, 'success'>>({
     emedici: 0,
   });
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -774,20 +774,20 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
       <GeneratedBanksPanel />
 
       {isLoading && (
-        <div className="rounded-2xl border   p-5  ">
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-2xs ">
           <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-xl border  " />
+            <div className="h-10 w-10 rounded-xl border border-slate-200 bg-slate-100" />
             <div className="space-y-2">
-              <div className="h-3 w-40 rounded " />
-              <div className="h-2.5 w-64 rounded " />
+              <div className="h-3 w-40 rounded bg-slate-200" />
+              <div className="h-2.5 w-64 rounded bg-slate-200" />
             </div>
           </div>
           <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
             {[0, 1, 2].map(i => (
-              <div key={i} className="h-24 rounded-xl border border-dashed   p-3  ">
-                <div className="h-3 w-24 rounded " />
-                <div className="mt-3 h-2 w-full rounded " />
-                <div className="mt-2 h-2 w-3/4 rounded " />
+              <div key={i} className="h-24 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3  ">
+                <div className="h-3 w-24 rounded bg-slate-200" />
+                <div className="mt-3 h-2 w-full rounded bg-slate-200" />
+                <div className="mt-2 h-2 w-3/4 rounded bg-slate-200" />
               </div>
             ))}
           </div>
@@ -795,28 +795,28 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
       )}
 
       {/* Bank HQ Hero */}
-      <div className="relative overflow-hidden rounded-3xl border   p-5     dark:">
-        <div className="pointer-events-none absolute inset-0 opacity-[0.08] [mask-image:linear-gradient(90deg,transparent,black_35%,black_65%,transparent)] dark:dark:opacity-[0.09]" />
+      <div className="relative overflow-hidden rounded-3xl border border-slate-200 bg-gradient-to-br from-white via-white to-teal-50 p-5 shadow-xs">
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-[#0f8b8d] to-transparent opacity-[0.08] [mask-image:linear-gradient(90deg,transparent,black_35%,black_65%,transparent)] dark:dark:opacity-[0.09]" />
         <div className="relative z-10 flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
           <div className="max-w-3xl">
-            <div className="mb-2 inline-flex items-center gap-2 rounded-full border   px-3 py-1 text-[11px] font-medium uppercase tracking-wider  ">
+            <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-teal-200 bg-white text-teal-700 px-3 py-1 text-[11px] font-medium uppercase tracking-wider">
               <Database className="h-3.5 w-3.5" />
               Bank HQ
             </div>
-            <h1 className="font-[''] text-3xl leading-none tracking-wide sm:text-4xl">
-              {BANK_CONFIGS.emedici.name} <span className="">Question Bank</span>
+            <h1 className=" text-3xl leading-none tracking-wide text-slate-900 sm:text-4xl">
+              {BANK_CONFIGS.emedici.name} <span className="text-[#0f8b8d]">Question Bank</span>
             </h1>
-            <p className="mt-2 max-w-2xl text-sm leading-relaxed  ">
+            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-600">
               {BANK_CONFIGS.emedici.desc}. Source: IndexedDB (<code className="font-mono text-xs">bank:emedici</code>). Imported questions stay isolated from AI-generated modules.
             </p>
             <div className="mt-4 flex flex-wrap gap-2 text-xs font-medium">
-              <span className="rounded-xl border   px-3 py-1.5  ">
+              <span className="rounded-xl border border-slate-200 bg-white text-slate-700 px-3 py-1.5">
                 <Layers className="mr-1 inline h-3.5 w-3.5" /> Total: {totalImportedCount} Qs
               </span>
-              <span className="rounded-xl border   px-3 py-1.5  ">
+              <span className="rounded-xl border border-slate-200 bg-white text-slate-700 px-3 py-1.5">
                 <CheckCircle2 className="mr-1 inline h-3.5 w-3.5" /> Seen: {seenCounts.emedici || 0}
               </span>
-              <span className="rounded-xl border   px-3 py-1.5  ">
+              <span className="rounded-xl border border-slate-200 bg-white text-slate-700 px-3 py-1.5">
                 <AlertTriangle className="mr-1 inline h-3.5 w-3.5" /> Skipped: {bankMetas.emedici?.skippedCount || 0}
               </span>
             </div>
@@ -825,18 +825,18 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
             <button
               type="button"
               onClick={() => triggerImport('emedici')}
-              className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border  px-5 py-3 text-sm font-medium  transition-transform active:scale-[0.98]  dark:"
+              className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-[#0f8b8d] bg-[#0f8b8d] text-white shadow-xs hover:bg-[#00696b] px-5 py-3 text-sm font-medium transition-transform active:scale-[0.98]"
             >
               <Upload className="h-4 w-4" /> Import JSON
             </button>
             <button
               type="button"
               onClick={() => pasteTextareaRef.current?.focus()}
-              className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border   px-5 py-3 text-sm font-medium  transition-transform hover:-translate-y-0.5 active:scale-[0.98]    dark:"
+              className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 shadow-2xs hover:bg-slate-50 px-5 py-3 text-sm font-medium transition-transform hover:-translate-y-0.5 active:scale-[0.98]"
             >
               <FileQuestion className="h-4 w-4" /> Paste Recall
             </button>
-            <div className="rounded-xl border border-dashed  px-3 py-2 text-[11px] font-semibold   ">
+            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-[11px] font-semibold text-slate-600">
               Import status: {importMessage ? importMessage.type === 'success' ? 'last action saved' : 'needs attention' : 'ready'}
             </div>
           </div>
@@ -845,16 +845,16 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
 
       {/* Import / Validation Callout */}
       {importMessage && (
-        <div className={`flex items-start justify-between gap-3 rounded-2xl border p-4 text-sm dark:${
+        <div className={`flex items-start justify-between gap-3 rounded-2xl border p-4 text-sm ${
           importMessage.type === 'success'
-            ? '     '
-            : '     '
+            ? 'border-teal-200 bg-teal-50 text-teal-900'
+            : 'border-rose-200 bg-rose-50 text-rose-900'
         }`}>
           <div className="flex items-start gap-3">
             <span className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider ${
               importMessage.type === 'success'
-                ? ' bg-white    '
-                : ' bg-white   '
+                ? 'border-teal-200 bg-teal-100 text-teal-800'
+                : 'border-rose-200 bg-rose-100 text-rose-800'
             }`}>
               {importMessage.type === 'success' ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
               {importMessage.type === 'success' ? 'Import OK' : 'Needs Fix'}
@@ -863,7 +863,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
           </div>
           <button
             onClick={() => setImportMessage(null)}
-            className="min-h-[44px] min-w-[44px] rounded-lg border  bg-white px-2 text-xs font-medium     "
+            className="min-h-[44px] min-w-[44px] rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-600 shadow-2xs hover:bg-slate-50 "
             aria-label="Dismiss import message"
           >
             ✕
@@ -872,28 +872,28 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
       )}
 
       {/* Bank HQ Storage & Import Panel */}
-      <div className="space-y-4 rounded-2xl border   p-5   dark:">
+      <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-2xs">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <h3 className="flex items-center gap-2 text-base font-medium  ">
+            <h3 className="flex items-center gap-2 text-base font-medium text-slate-900">
               <Database className="h-4 w-4" /> Import JSON / Validate Bank
             </h3>
-            <p className="mt-1 max-w-2xl text-xs leading-relaxed  ">
+            <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-600">
               Secure client-side IndexedDB persistence (<code className="font-mono">bank:&lt;name&gt;</code>) with duplicate pruning and answer-index validation. File import runs through the existing validator before saving.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-[11px] font-medium">
-            <span className="rounded-lg border   px-2.5 py-1  ">
+            <span className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-700">
               Accepts: JSON array or {'{ questions: [] }'}
             </span>
-            <span className="rounded-lg border   px-2.5 py-1  ">
+            <span className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-700">
               Invalid items are reported after parsing
             </span>
           </div>
         </div>
-        <details className="rounded-xl border border-dashed   p-3 text-xs  ">
-          <summary className="cursor-pointer font-medium  ">Format hint & validation notes</summary>
-          <p className="mt-2 leading-relaxed  ">
+        <details className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3 text-xs text-slate-600">
+          <summary className="cursor-pointer font-medium text-slate-700">Format hint & validation notes</summary>
+          <p className="mt-2 leading-relaxed text-slate-600">
             Each question needs a stem, at least two options, and an answerIndex matching an option. Extra paper, updatedAt and redFlag/redFlags fields are preserved when present. The preview below mirrors the existing parse path and never writes until you save.
           </p>
         </details>
@@ -915,8 +915,8 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                 transition={{ duration: 0.22, ease: "easeOut", delay: reduceMotion ? 0 : Math.min(index * 0.03, 0.2) }}
                 className={`flex flex-col justify-between space-y-3.5 rounded-xl border p-4 transition-all hover:-translate-y-0.5 ${
                   isImported
-                    ? '    dark:'
-                    : 'border-dashed    '
+                    ? 'border-slate-200 bg-white shadow-2xs'
+                    : 'border-dashed border-slate-300 bg-slate-50'
                 }`}
               >
                 <div>
@@ -946,7 +946,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                       </div>
                       <div className="flex justify-between">
                         <span>Seen questions:</span>
-                        <span className="font-medium ">{seen} / {count}</span>
+                        <span className="font-medium text-slate-800">{seen} / {count}</span>
                       </div>
                     </div>
                   )}
@@ -957,7 +957,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                     <button
                       type="button"
                       onClick={() => triggerImport(bankId)}
-                      className="w-full py-2 px-3 rounded-lg   text-white text-xs font-medium transition-all flex items-center justify-center gap-1.5 shadow-xs"
+                      className="w-full py-2 px-3 rounded-lg border border-[#0f8b8d] bg-[#0f8b8d] hover:bg-[#00696b] text-white text-xs font-medium transition-all flex items-center justify-center gap-1.5 shadow-xs"
                     >
                       <Upload className="w-3.5 h-3.5" />
                       Import bank (.json)
@@ -970,7 +970,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                         className="flex-1 py-1.5 px-2 rounded-lg bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-semibold transition-all flex items-center justify-center gap-1 shadow-2xs"
                         title="Replace bank with a new JSON file"
                       >
-                        <Upload className="w-3 h-3 " />
+                        <Upload className="w-3 h-3 text-[#0f8b8d]" />
                         Replace
                       </button>
                       <button
@@ -1008,20 +1008,20 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
         </div>
 
         {/* Paste Recall Inline Validation Panel */}
-        <details open className="rounded-2xl border   p-4  ">
-          <summary className="flex cursor-pointer flex-col gap-2 text-sm font-medium   sm:flex-row sm:items-center sm:justify-between">
+        <details open className="rounded-2xl border border-slate-200 bg-white p-4 shadow-2xs">
+          <summary className="flex cursor-pointer flex-col gap-2 text-sm font-medium text-slate-900 sm:flex-row sm:items-center sm:justify-between">
             <span className="flex items-center gap-2"><Upload className="h-4 w-4" /> Paste Recall / JSON Preview</span>
             <span className="flex flex-wrap gap-2 text-[10px] font-medium">
-              <span className="rounded-full border  bg-white px-2 py-0.5  ">
+              <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-slate-700">
                 Parsed: {pastePreviewCount}
               </span>
-              <span className={`rounded-full border px-2 py-0.5 ${pasteRecallPreview.invalidBlocks > 0 ? '    ' : ' bg-white    '}`}>
+              <span className={`rounded-full border px-2 py-0.5 ${pasteRecallPreview.invalidBlocks > 0 ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-white text-slate-700'}`}>
                 Invalid blocks: {pasteRecallPreview.invalidBlocks}
               </span>
             </span>
           </summary>
           <div className="mt-3 space-y-3">
-            <p className="max-w-3xl text-xs leading-relaxed  ">
+            <p className="max-w-3xl text-xs leading-relaxed text-slate-600">
               Paste bank JSON (same schema as file import) or plain recall blocks: stem, then <code className="font-mono">A.</code>/<code className="font-mono">B.</code> options and <code className="font-mono">Answer: B</code>, with optional <code className="font-mono">Paper:</code>, <code className="font-mono">Updated:</code> and <code className="font-mono">Red flag:</code> lines. Invalid blocks are counted before saving; no silent data loss.
             </p>
             <div className="flex flex-wrap items-center gap-2">
@@ -1035,8 +1035,8 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                   }}
                   className={`min-h-[44px] rounded-lg border px-3 text-[11px] font-medium transition-all ${
                     pasteBank === bankId
-                      ? '     '
-                      : ' bg-white     '
+                      ? 'bg-[#0f8b8d] border-[#0f8b8d] text-white shadow-xs'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                   }`}
                   title={`Add pasted text to ${BANK_CONFIGS[bankId].name}`}
                 >
@@ -1050,26 +1050,26 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
               onChange={(e) => setPasteText(e.target.value)}
               rows={6}
               placeholder={`Paste JSON: [{"question":"...","options":["...","..."],"answerIndex":0,"paper":"2024 March","updatedAt":"2026-10-20","redFlag":true}]\n\nOr paste recall blocks separated by a blank line:\nA 62-year-old man presents with crushing central chest pain.\nA. Aortic dissection\nB. Acute myocardial infarction\nC. Pericarditis\nAnswer: B\nPaper: 2024 March`}
-              className="w-full resize-y rounded-xl border  bg-white px-3 py-2 font-mono text-xs  placeholder-[#5B5550]/70 focus:outline-none focus:ring-2 focus:    dark:placeholder-[#B8B2AA]/60 dark:focus:"
+              className="w-full resize-y rounded-xl border border-slate-200 bg-white text-slate-800 px-3 py-2 font-mono text-xs  placeholder-[#5B5550]/70 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]/30 focus:border-[#0f8b8d] dark:placeholder-[#B8B2AA]/60"
             />
             {pastePreviewCount > 0 && (
-              <div className="rounded-xl border border-dashed  bg-white p-3 text-xs  ">
-                <p className="font-medium  ">Sample preview</p>
-                <p className="mt-1 line-clamp-2  ">
+              <div className="rounded-xl border border-dashed border-slate-300 bg-white p-3 text-xs text-slate-700">
+                <p className="font-medium text-slate-800">Sample preview</p>
+                <p className="mt-1 line-clamp-2 text-slate-600">
                   {String((pasteJsonItems[0] as any)?.question || (pasteRecallPreview.items[0] as any)?.question || 'No readable question stem in the first block.')}
                 </p>
               </div>
             )}
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <span className="text-[11px]  ">
-                Adds to <strong className=" ">{BANK_CONFIGS[pasteBank].name}</strong>. Existing questions are kept; duplicates are skipped.
+            <span className="text-[11px] text-slate-500">
+                Adds to <strong className="font-semibold text-slate-700">{BANK_CONFIGS[pasteBank].name}</strong>. Existing questions are kept; duplicates are skipped.
               </span>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setPasteText('')}
                   disabled={!pasteText}
-                  className="min-h-[44px] rounded-lg border  bg-white px-3 text-xs font-semibold  transition-all  disabled:cursor-not-allowed disabled:opacity-50   "
+                  className="min-h-[44px] rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 px-3 text-xs font-semibold transition-all  disabled:cursor-not-allowed disabled:opacity-50   "
                 >
                   Clear
                 </button>
@@ -1077,7 +1077,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                   type="button"
                   onClick={handlePasteImport}
                   disabled={!pasteText.trim()}
-                  className="flex min-h-[44px] items-center gap-1.5 rounded-lg border  px-4 text-xs font-medium  transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50  dark:"
+                  className="flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#0f8b8d] bg-[#0f8b8d] text-white hover:bg-[#00696b] shadow-xs px-4 text-xs font-medium transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Upload className="w-3.5 h-3.5" />
                   Import pasted text
@@ -1089,23 +1089,23 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
       </div>
 
       {/* Active Bank Practice Set */}
-      <div className="space-y-6 rounded-2xl border   p-5   dark:">
+      <div className="space-y-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-2xs">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <h3 className="flex items-center gap-2 text-base font-medium  ">
+            <h3 className="flex items-center gap-2 text-base font-medium text-slate-900">
               <Filter className="h-4 w-4" /> Active Bank Practice Set
             </h3>
-            <p className="mt-1 text-xs leading-relaxed  ">
+            <p className="mt-1 text-xs leading-relaxed text-slate-600">
               Select bank source, refine by extracted fields, and launch timed exams or tutor sessions.
             </p>
           </div>
-          <span className="rounded-xl border   px-3 py-1.5 text-xs font-medium  ">
+          <span className="rounded-xl border border-slate-200 bg-white text-slate-700 px-3 py-1.5 text-xs font-medium">
             Filtered: {filteredQuestions.length} Qs
           </span>
         </div>
 
         {/* Bank Tabs with Real Question Counts */}
-        <div className="flex flex-wrap gap-2 border-b-2  pb-3 ">
+        <div className="flex flex-wrap gap-2 border-b border-slate-200 pb-3">
           {[
             { id: 'emedici', label: 'eMedici', count: bankMetas.emedici?.count || 0 },
             { id: 'all', label: 'All Imported Banks', count: totalImportedCount },
@@ -1117,15 +1117,15 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                 onClick={() => setActiveTab(tab.id as ActiveBankTab)}
                 className={`flex min-h-[44px] items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-medium transition-all ${
                   isTabActive
-                    ? '      dark:'
-                    : ' bg-white      '
+                    ? 'bg-teal-50 border-teal-300 text-teal-900 font-semibold'
+                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                 }`}
               >
                 <span>{tab.label}</span>
                 <span className={`rounded-full border px-2 py-0.5 text-[10px] font-mono ${
                   isTabActive
-                    ? '     '
-                    : tab.count > 0 ? '     ' : '    '
+                    ? 'bg-white text-teal-900 border-teal-300'
+                    : tab.count > 0 ? 'bg-slate-200 text-slate-700' : 'bg-amber-100 text-amber-800'
                 }`}>
                   {tab.count} Qs
                 </span>
@@ -1136,22 +1136,22 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
 
         {/* Empty Active Bank Guard */}
         {currentPool.length === 0 ? (
-          <div className="relative overflow-hidden rounded-2xl border   p-8 text-center   dark:">
-            <div className="pointer-events-none absolute inset-0 opacity-[0.08] [mask-image:linear-gradient(180deg,transparent,black_35%,black_65%,transparent)] dark:" />
-            <div className="relative z-10 mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border    ">
+          <div className="relative overflow-hidden rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-2xs">
+            <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-[#0f8b8d] to-transparent opacity-[0.08] [mask-image:linear-gradient(180deg,transparent,black_35%,black_65%,transparent)]" />
+            <div className="relative z-10 mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-teal-200 bg-teal-50 text-teal-700 ">
               <Database className="h-7 w-7" />
             </div>
-            <h4 className="relative z-10 mt-4 font-[''] text-2xl tracking-wide  ">
+            <h4 className="relative z-10 mt-4 text-2xl tracking-wide text-slate-900">
               {activeTab === 'all' ? 'No Questions Imported Yet' : `${BANK_CONFIGS[activeTab].name} has no questions yet`}
             </h4>
-            <p className="relative z-10 mx-auto mt-2 max-w-md text-sm leading-relaxed  ">
+            <p className="relative z-10 mx-auto mt-2 max-w-md text-sm leading-relaxed text-slate-600">
               You have not added any questions to this bank yet. Import a .json file or paste recall text to start.
             </p>
             {activeTab !== 'all' ? (
               <button
                 type="button"
                 onClick={() => triggerImport(activeTab)}
-                className="relative z-10 mt-5 inline-flex min-h-[44px] items-center gap-2 rounded-xl border  px-5 py-2.5 text-xs font-medium  transition-transform active:scale-[0.98]  dark:"
+                className="relative z-10 mt-5 inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-[#0f8b8d] bg-[#0f8b8d] text-white hover:bg-[#00696b] shadow-xs px-5 py-2.5 text-xs font-medium transition-transform active:scale-[0.98]"
               >
                 <Upload className="h-4 w-4" />
                 Import {BANK_CONFIGS[activeTab].name} (.json)
@@ -1163,7 +1163,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                     key={bid}
                     type="button"
                     onClick={() => triggerImport(bid)}
-                    className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border  px-3.5 py-2 text-xs font-medium   dark:"
+                    className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 px-3.5 py-2 text-xs font-medium"
                   >
                     <Upload className="w-3.5 h-3.5" />
                     Import {BANK_CONFIGS[bid].name}
@@ -1175,25 +1175,25 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
         ) : (
           <div className="space-y-6">
             {/* Sticky Search & Unseen Filter */}
-            <div className="sticky top-2 z-20 -mx-1 rounded-2xl border   p-2 backdrop-blur  ">
+            <div className="sticky top-2 z-20 -mx-1 rounded-2xl border border-slate-200 bg-white/95 p-2 shadow-xs backdrop-blur">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <div className="relative flex-1">
-                  <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2  " />
+                  <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Search stems, signs, drugs, topics, or explanations..."
-                    className="min-h-[44px] w-full rounded-xl border  bg-white pl-9 pr-28 text-sm  placeholder-[#5B5550]/70 focus:outline-none focus:ring-2 focus:    dark:placeholder-[#B8B2AA]/60 dark:focus:"
+                    className="min-h-[44px] w-full rounded-xl border border-slate-200 bg-white text-slate-800 pl-9 pr-28 text-sm  placeholder-[#5B5550]/70 focus:outline-none focus:ring-2 focus:ring-[#0f8b8d]/30 focus:border-[#0f8b8d] dark:placeholder-[#B8B2AA]/60"
                   />
                   <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1.5">
-                    <span className="rounded-full border   px-2 py-0.5 text-[10px] font-medium  ">
+                    <span className="rounded-full border border-slate-200 bg-slate-50 text-slate-600 px-2 py-0.5 text-[10px] font-medium">
                       {filteredQuestions.length}
                     </span>
                     {searchQuery && (
                       <button
                         onClick={() => setSearchQuery('')}
-                        className="min-h-[36px] rounded-lg border  bg-white px-2 text-[10px] font-medium  "
+                        className="min-h-[36px] rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 px-2 text-[10px] font-medium"
                       >
                         Clear
                       </button>
@@ -1201,15 +1201,15 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                   </div>
                 </div>
 
-                <label className="flex min-h-[44px] shrink-0 cursor-pointer items-center gap-2.5 rounded-xl border   px-4 py-2  ">
+                <label className="flex min-h-[44px] shrink-0 cursor-pointer items-center gap-2.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-4 py-2">
                   <input
                     type="checkbox"
                     checked={unseenOnly}
                     onChange={(e) => setUnseenOnly(e.target.checked)}
-                    className="h-4 w-4 rounded border-slate-300  focus: accent-[#0f8b8d]"
+                  className="h-4 w-4 rounded border-slate-300 text-[#0f8b8d] focus:ring-[#0f8b8d] accent-[#0f8b8d]"
                   />
                   <span className="text-xs font-medium">Unseen only</span>
-                  <span className="rounded border  bg-white px-2 py-0.5 text-[10px] font-mono  ">
+                  <span className="rounded border border-slate-200 bg-white text-slate-600 px-2 py-0.5 text-[10px] font-mono">
                     {currentPool.length - currentSeenSet.size}
                   </span>
                 </label>
@@ -1218,7 +1218,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                   <button
                     type="button"
                     onClick={handleStartOver}
-                    className="flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-xl border   px-4 py-2 text-xs font-medium  transition-colors   "
+                    className="flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 px-4 py-2 text-xs font-medium transition-colors   "
                     title={`Clear seen history for ${BANK_CONFIGS[activeTab].name} only`}
                   >
                     <RotateCcw className="h-3.5 w-3.5" />
@@ -1230,45 +1230,45 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
 
             {/* Active Filter Chips */}
             {(searchQuery || selectedSubjects.length > 0 || selectedTopics.length > 0 || selectedGroups.length > 0 || selectedPapers.length > 0 || recentWindow !== 'any' || redFlagsOnly || unseenOnly) && (
-              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-dashed   p-3  ">
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3">
                 <span className="text-[10px] font-medium uppercase tracking-wider">Active filters:</span>
                 {searchQuery && (
-                  <button onClick={() => setSearchQuery('')} className="min-h-[36px] rounded-full border  bg-white px-3 text-[11px] font-medium  ">
+                  <button onClick={() => setSearchQuery('')} className="min-h-[36px] rounded-full border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 px-3 text-[11px] font-medium  ">
                     Search: {searchQuery} ✕
                   </button>
                 )}
                 {selectedSubjects.map(item => (
-                  <button key={`chip-sub-${item}`} onClick={() => toggleItem(selectedSubjects, setSelectedSubjects, item)} className="min-h-[36px] rounded-full border  bg-white px-3 text-[11px] font-medium  ">
+                  <button key={`chip-sub-${item}`} onClick={() => toggleItem(selectedSubjects, setSelectedSubjects, item)} className="min-h-[36px] rounded-full border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 px-3 text-[11px] font-medium  ">
                     Subject: {item} ✕
                   </button>
                 ))}
                 {selectedTopics.map(item => (
-                  <button key={`chip-topic-${item}`} onClick={() => toggleItem(selectedTopics, setSelectedTopics, item)} className="min-h-[36px] rounded-full border  bg-white px-3 text-[11px] font-medium  ">
+                  <button key={`chip-topic-${item}`} onClick={() => toggleItem(selectedTopics, setSelectedTopics, item)} className="min-h-[36px] rounded-full border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 px-3 text-[11px] font-medium  ">
                     Topic: {item} ✕
                   </button>
                 ))}
                 {selectedGroups.map(item => (
-                  <button key={`chip-group-${item}`} onClick={() => toggleItem(selectedGroups, setSelectedGroups, item)} className="min-h-[36px] rounded-full border  bg-white px-3 text-[11px] font-medium  ">
+                  <button key={`chip-group-${item}`} onClick={() => toggleItem(selectedGroups, setSelectedGroups, item)} className="min-h-[36px] rounded-full border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 px-3 text-[11px] font-medium  ">
                     Group: {item} ✕
                   </button>
                 ))}
                 {selectedPapers.map(item => (
-                  <button key={`chip-paper-${item}`} onClick={() => toggleItem(selectedPapers, setSelectedPapers, item)} className="min-h-[36px] rounded-full border  bg-white px-3 text-[11px] font-medium  ">
+                  <button key={`chip-paper-${item}`} onClick={() => toggleItem(selectedPapers, setSelectedPapers, item)} className="min-h-[36px] rounded-full border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 px-3 text-[11px] font-medium  ">
                     Paper: {item} ✕
                   </button>
                 ))}
                 {recentWindow !== 'any' && (
-                  <button onClick={() => setRecentWindow('any')} className="min-h-[36px] rounded-full border  bg-white px-3 text-[11px] font-medium  ">
+                  <button onClick={() => setRecentWindow('any')} className="min-h-[36px] rounded-full border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 px-3 text-[11px] font-medium  ">
                     Updated: {recentWindow} days ✕
                   </button>
                 )}
                 {redFlagsOnly && (
-                  <button onClick={() => setRedFlagsOnly(false)} className="min-h-[36px] rounded-full border   px-3 text-[11px] font-medium   ">
+                  <button onClick={() => setRedFlagsOnly(false)} className="min-h-[36px] rounded-full border border-rose-200 bg-rose-50 text-rose-700 px-3 text-[11px] font-medium ">
                     Red flags only ✕
                   </button>
                 )}
                 {unseenOnly && (
-                  <button onClick={() => setUnseenOnly(false)} className="min-h-[36px] rounded-full border  bg-white px-3 text-[11px] font-medium  ">
+                  <button onClick={() => setUnseenOnly(false)} className="min-h-[36px] rounded-full border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 px-3 text-[11px] font-medium  ">
                     Unseen only ✕
                   </button>
                 )}
@@ -1283,7 +1283,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                     setRedFlagsOnly(false);
                     setUnseenOnly(false);
                   }}
-                  className="ml-auto min-h-[36px] rounded-full border   px-3 text-[11px] font-medium    "
+                  className="ml-auto min-h-[36px] rounded-full border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 px-3 text-[11px] font-medium "
                 >
                   Reset all
                 </button>
@@ -1331,7 +1331,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                             type="checkbox"
                             checked={isChecked}
                             onChange={() => toggleItem(selectedSubjects, setSelectedSubjects, subject)}
-                            className="h-3.5 w-3.5 rounded border-slate-300  accent-[#0f8b8d]"
+                            className="h-3.5 w-3.5 rounded border-slate-300 text-[#0f8b8d] accent-[#0f8b8d]"
                           />
                           <span className="truncate">{subject}</span>
                         </label>
@@ -1374,7 +1374,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                             type="checkbox"
                             checked={isChecked}
                             onChange={() => toggleItem(selectedTopics, setSelectedTopics, topic)}
-                            className="h-3.5 w-3.5 rounded border-slate-300  accent-[#0f8b8d]"
+                            className="h-3.5 w-3.5 rounded border-slate-300 text-[#0f8b8d] accent-[#0f8b8d]"
                           />
                           <span className="truncate">{topic}</span>
                         </label>
@@ -1417,7 +1417,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                             type="checkbox"
                             checked={isChecked}
                             onChange={() => toggleItem(selectedGroups, setSelectedGroups, group)}
-                            className="h-3.5 w-3.5 rounded border-slate-300  accent-[#0f8b8d]"
+                            className="h-3.5 w-3.5 rounded border-slate-300 text-[#0f8b8d] accent-[#0f8b8d]"
                           />
                           <span className="truncate">{group}</span>
                         </label>
@@ -1462,7 +1462,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                               type="checkbox"
                               checked={isChecked}
                               onChange={() => toggleItem(selectedPapers, setSelectedPapers, paper)}
-                              className="h-3.5 w-3.5 rounded border-slate-300  accent-[#0f8b8d]"
+                              className="h-3.5 w-3.5 rounded border-slate-300 text-[#0f8b8d] accent-[#0f8b8d]"
                             />
                             <span className="truncate">{paper}</span>
                           </label>
@@ -1492,7 +1492,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                     <select
                       value={recentWindow}
                       onChange={(e) => setRecentWindow(e.target.value as RecentWindow)}
-                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 focus:outline-none focus:"
+                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 focus:outline-none focus:border-[#0f8b8d]"
                     >
                       <option value="any">Any time ({currentPool.length})</option>
                       <option value="7">Last 7 days ({recentCounts.d7})</option>
@@ -1528,7 +1528,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                         type="checkbox"
                         checked={redFlagsOnly}
                         onChange={(e) => setRedFlagsOnly(e.target.checked)}
-                        className="h-3.5 w-3.5 rounded border-slate-300  accent-[#0f8b8d]"
+                        className="h-3.5 w-3.5 rounded border-slate-300 text-[#0f8b8d] accent-[#0f8b8d]"
                       />
                       <span className="text-xs font-medium text-slate-700">Red-flagged only</span>
                       <span className="ml-auto text-[10px] font-mono text-slate-500">
@@ -1545,11 +1545,11 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
             )}
 
             {/* Launch Settings & Execution Controls */}
-            <div className="sticky bottom-0 z-30 flex flex-col justify-between gap-4 rounded-2xl border   p-4 backdrop-blur md:flex-row md:items-center   dark:">
+            <div className="sticky bottom-0 z-30 flex flex-col justify-between gap-4 rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-md backdrop-blur md:flex-row md:items-center">
               {/* Question Count & Execution Mode */}
               <div className="flex flex-wrap items-center gap-6">
                 <div>
-                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider  ">
+                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-600">
                     Question Count:
                   </label>
                   <div className="flex flex-wrap items-center gap-1.5">
@@ -1560,8 +1560,8 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                         onClick={() => setQuestionCount(cnt)}
                         className={`min-h-[44px] rounded-lg border px-3 py-1.5 text-xs font-medium transition-all ${
                           questionCount === cnt
-                            ? '     '
-                            : ' bg-white      '
+                            ? 'bg-[#0f8b8d] border-[#0f8b8d] text-white shadow-xs'
+                            : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                         }`}
                       >
                         {cnt} Qs
@@ -1572,8 +1572,8 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                       onClick={() => setQuestionCount(filteredQuestions.length || 10)}
                       className={`min-h-[44px] rounded-lg border px-3 py-1.5 text-xs font-medium transition-all ${
                         questionCount === filteredQuestions.length && filteredQuestions.length > 0
-                          ? '     '
-                          : ' bg-white      '
+                          ? 'bg-[#0f8b8d] border-[#0f8b8d] text-white shadow-xs'
+                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                       }`}
                     >
                       All ({filteredQuestions.length})
@@ -1582,7 +1582,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                 </div>
 
                 <div>
-                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider  ">
+                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-600">
                     Execution Mode:
                   </label>
                   <div className="flex flex-wrap items-center gap-2">
@@ -1591,8 +1591,8 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                       onClick={() => setTestMode('TUTOR')}
                       className={`min-h-[44px] rounded-lg border px-3.5 py-1.5 text-xs font-medium transition-all ${
                         testMode === 'TUTOR'
-                          ? '     '
-                          : ' bg-white      '
+                          ? 'bg-[#0f8b8d] border-[#0f8b8d] text-white shadow-xs'
+                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                       }`}
                     >
                       Tutor Mode
@@ -1602,8 +1602,8 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                       onClick={() => setTestMode('EXAM')}
                       className={`min-h-[44px] rounded-lg border px-3.5 py-1.5 text-xs font-medium transition-all ${
                         testMode === 'EXAM'
-                          ? '     '
-                          : ' bg-white      '
+                          ? 'bg-[#0f8b8d] border-[#0f8b8d] text-white shadow-xs'
+                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                       }`}
                     >
                       Exam Mode
@@ -1614,11 +1614,11 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
 
               {/* Launch Action Button */}
               <div className="text-left md:text-right">
-                <div className="mb-1.5 text-xs font-mono  ">
-                  Available: <strong className=" ">{filteredQuestions.length}</strong> matching questions
+                <div className="mb-1.5 text-xs font-mono text-slate-600">
+                  Available: <strong className="text-slate-800">{filteredQuestions.length}</strong> matching questions
                 </div>
                 {filteredQuestions.length === 0 && (
-                  <p role="status" aria-live="polite" className="mb-2 text-xs  ">
+                  <p role="status" aria-live="polite" className="mb-2 text-xs text-amber-700">
                     {(availableSubjects.length + availableTopics.length) === 0
                       ? 'This bank has no questions yet. Import a bank, then choose filters to start practicing.'
                       : 'No questions match these filters. Clear or change a filter to see more questions.'}
@@ -1628,7 +1628,7 @@ export const QuestionBankPracticeView: React.FC<QuestionBankPracticeViewProps> =
                   type="button"
                   onClick={handleLaunch}
                   disabled={filteredQuestions.length === 0}
-                  className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl border  px-6 py-3 text-sm font-medium  transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto  dark:"
+                  className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl border border-[#0f8b8d] bg-[#0f8b8d] text-white hover:bg-[#00696b] shadow-md px-6 py-3 text-sm font-medium  transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
                 >
                   <Play className="w-4 h-4 fill-current" />
                   Launch Bank Practice ({Math.min(questionCount, filteredQuestions.length)} Qs)

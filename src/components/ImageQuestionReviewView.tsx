@@ -228,18 +228,18 @@ export const ImageQuestionReviewView: React.FC<ImageQuestionReviewViewProps> = (
     }
   }, [all, filter]);
 
-  const shell = darkMode ? " font-['M_PLUS_Rounded_1c'] " : " font-['M_PLUS_Rounded_1c'] ";
-  const card = darkMode ? ' ' : ' ';
+  const shell = darkMode ? " bg-[#0A101D] text-slate-200 " : " bg-slate-50 text-slate-800 ";
+  const card = darkMode ? 'border-slate-800 bg-[#0F172A]' : 'border-slate-200 bg-white';
   const dim = darkMode ? 'text-slate-400' : 'text-slate-600';
-  const title = darkMode ? '' : '';
+  const title = darkMode ? 'text-slate-100' : 'text-slate-900';
 
   const statChip = (label: string, value: number, tone: string, loading = false) => (
-    <div className={`rounded-xl border  px-3 py-2  dark:${card}`}>
+    <div className={`rounded-xl border  px-3 py-2  ${card}`}>
       <div className={`font-mono text-[10px] uppercase tracking-wider ${dim}`}>{label}</div>
       {loading ? (
         <div className="mt-1 h-6 w-12 animate-pulse rounded bg-slate-300/70 motion-reduce:animate-none dark:bg-slate-700/70" />
       ) : (
-        <div className={`text-2xl font-[''] tracking-tight ${tone}`}>{value}</div>
+        <div className={`text-2xl tracking-tight ${tone}`}>{value}</div>
       )}
     </div>
   );
@@ -251,8 +251,8 @@ export const ImageQuestionReviewView: React.FC<ImageQuestionReviewViewProps> = (
       aria-pressed={filter === key}
       className={`min-h-[44px] rounded-[14px] border  px-3 py-2 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible: focus-visible:ring-offset-2 focus-visible:ring-offset-transparent  ${
         filter === key
-          ? ' dark:'
-          : `${darkMode ? 'text-slate-300 hover:bg-slate-800' : 'text-slate-600 hover:bg-slate-100'}`
+          ? 'border-[#0f8b8d] bg-[#0f8b8d]/10 text-[#0f8b8d]'
+          : `${darkMode ? 'border-slate-700 text-slate-300 hover:bg-slate-800' : 'border-slate-200 text-slate-600 hover:bg-slate-100'}`
       }`}
     >
       {label}
@@ -265,34 +265,34 @@ export const ImageQuestionReviewView: React.FC<ImageQuestionReviewViewProps> = (
         <style>{`@keyframes reviewFadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}`}</style>
         <header className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h1 className={`flex items-center gap-2 text-xl font-[''] uppercase tracking-tight ${title}`}>
-              <ImageIcon className="h-5 w-5 " />
+            <h1 className={`flex items-center gap-2 text-xl uppercase tracking-tight ${title}`}>
+              <ImageIcon className="h-5 w-5 text-[#0f8b8d]" />
               Image Question Review
             </h1>
-            <p className={`mt-1 max-w-2xl font-['Cormorant'] text-sm font-semibold leading-relaxed ${dim}`}>
+            <p className={`mt-1 max-w-2xl text-sm font-semibold leading-relaxed ${dim}`}>
               Every image question with its vision-verification result. Unverified items are amber — check them by eye.
             </p>
           </div>
           <button
             type="button"
             onClick={() => onNavigate('practice')}
-            className="inline-flex min-h-[44px] items-center gap-2 rounded-[14px] border  px-3 py-2 text-xs font-semibold  transition  focus-visible:outline-none focus-visible:ring-2 focus-visible:   dark:hover:bg-slate-800"
+            className="inline-flex min-h-[44px] items-center gap-2 rounded-[14px] border border-slate-200 text-slate-600 hover:bg-slate-100 px-3 py-2 text-xs font-semibold  transition  focus-visible:outline-none focus-visible:ring-2 focus-visible:   dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
           >
             Build more <ArrowRight className="h-4 w-4" />
           </button>
         </header>
 
-        <div className={`rounded-xl border  px-3 py-2  dark:${card}`}>
+        <div className={`rounded-xl border  px-3 py-2  ${card}`}>
           <div className="flex flex-wrap items-center gap-2">
             <span className={`font-mono text-[10px] uppercase tracking-wider ${dim}`}>Run report</span>
             <span className="rounded-full border border-teal-500/50 bg-teal-500/10 px-2 py-0.5 text-[11px] font-medium text-teal-700 dark:text-teal-300">
-              Attempted <span className="font-[''] text-sm">{counts.attempted}</span>
+              Attempted <span className=" text-sm">{counts.attempted}</span>
             </span>
             <span className="rounded-full border border-emerald-500/50 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
-              Kept with image <span className="font-[''] text-sm">{counts.total}</span>
+              Kept with image <span className=" text-sm">{counts.total}</span>
             </span>
             <span className="rounded-full border border-amber-600/60 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:border-amber-300/60 dark:text-amber-300">
-              Fell back to text-only <span className="font-[''] text-sm">{counts.textOnly}</span>
+              Fell back to text-only <span className=" text-sm">{counts.textOnly}</span>
             </span>
             {counts.ranAt && (
               <span className={`text-[10px] ${dim}`}>{new Date(counts.ranAt).toLocaleString()}</span>
@@ -310,7 +310,7 @@ export const ImageQuestionReviewView: React.FC<ImageQuestionReviewViewProps> = (
           {statChip('Text-only fallback', counts.textOnly, dim, runState === 'loading' && counts.total === 0)}
         </div>
 
-        <div className="inline-flex flex-wrap items-center gap-2 rounded-[16px] border  p-1 " role="group" aria-label="Filter image questions">
+        <div className={`inline-flex flex-wrap items-center gap-2 rounded-[16px] border ${card} p-1`} role="group" aria-label="Filter image questions">
           {filterBtn('ALL', `All (${counts.total})`)}
           {filterBtn('VERIFIED', `Verified (${counts.verified})`)}
           {filterBtn('UNVERIFIED', `Unverified (${counts.unverified})`)}
@@ -326,7 +326,7 @@ export const ImageQuestionReviewView: React.FC<ImageQuestionReviewViewProps> = (
             onClick={() => setSource('session')}
             className={`min-h-[40px] rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible: ${
               source === 'session'
-                ? '  '
+                ? 'border-[#0f8b8d] bg-[#0f8b8d]/10 text-[#0f8b8d]'
                 : `${darkMode ? 'border-slate-700 text-slate-300 hover:bg-slate-800' : 'border-slate-200 text-slate-600 hover:bg-slate-100'}`
             }`}
           >
@@ -337,7 +337,7 @@ export const ImageQuestionReviewView: React.FC<ImageQuestionReviewViewProps> = (
             onClick={() => setSource('run')}
             className={`min-h-[40px] rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible: ${
               source === 'run'
-                ? '  '
+                ? 'border-[#0f8b8d] bg-[#0f8b8d]/10 text-[#0f8b8d]'
                 : `${darkMode ? 'border-slate-700 text-slate-300 hover:bg-slate-800' : 'border-slate-200 text-slate-600 hover:bg-slate-100'}`
             }`}
           >
@@ -358,7 +358,7 @@ export const ImageQuestionReviewView: React.FC<ImageQuestionReviewViewProps> = (
             <button
               type="button"
               onClick={() => setReloadToken((n) => n + 1)}
-              className="inline-flex min-h-[44px] items-center gap-2 rounded-[14px] border  px-3 py-2 text-xs font-semibold  transition  focus-visible:outline-none focus-visible:ring-2 focus-visible:   dark:hover:bg-slate-800"
+              className="inline-flex min-h-[44px] items-center gap-2 rounded-[14px] border border-[#0f8b8d] text-[#0f8b8d] hover:bg-[#0f8b8d]/10 px-3 py-2 text-xs font-semibold  transition  focus-visible:outline-none focus-visible:ring-2 focus-visible:   dark:hover:bg-slate-800"
             >
               <RotateCcw className="h-4 w-4" /> Retry
             </button>
@@ -397,9 +397,9 @@ export const ImageQuestionReviewView: React.FC<ImageQuestionReviewViewProps> = (
             ))}
           </div>
         ) : shown.length === 0 ? (
-          <div className={`rounded-xl border  p-8 text-center  dark:${card}`}>
+          <div className={`rounded-xl border  p-8 text-center  ${card}`}>
             <Eye className={`mx-auto h-8 w-8 ${dim}`} />
-            <p className={`mt-3 text-lg font-[''] uppercase tracking-tight ${title}`}>
+            <p className={`mt-3 text-lg uppercase tracking-tight ${title}`}>
               {filter === 'ALL' ? 'Nothing to review yet' : `No ${filter === 'VERIFIED' ? 'verified' : filter === 'UNVERIFIED' ? 'unverified' : 'text-only'} questions`}
             </p>
             <p className={`mx-auto mt-1 max-w-md text-xs ${dim}`}>
@@ -429,7 +429,7 @@ export const ImageQuestionReviewView: React.FC<ImageQuestionReviewViewProps> = (
                 <button
                   type="button"
                   onClick={() => setSource('run')}
-                  className="min-h-[44px] rounded-[14px] border  px-4 py-2 text-xs font-semibold  transition  focus-visible:outline-none focus-visible:ring-2 focus-visible:   dark:hover:bg-slate-800"
+                  className="min-h-[44px] rounded-[14px] border border-slate-200 text-slate-600 hover:bg-slate-100 px-4 py-2 text-xs font-semibold  transition  focus-visible:outline-none focus-visible:ring-2 focus-visible:   dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
                 >
                   Show last test run
                 </button>
@@ -462,7 +462,7 @@ export const ImageQuestionReviewView: React.FC<ImageQuestionReviewViewProps> = (
                       {q.imageLicence && <span className={dim}>· {q.imageLicence}</span>}
                     </div>
                     <span
-                      className={`flex items-center gap-1 rounded-md border px-2 py-1 font-[''] text-[11px] uppercase tracking-tight dark:${tone} ${
+                      className={`flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] uppercase tracking-tight ${tone} ${
                         !verified && q.image ? 'motion-safe:animate-[bounce_0.7s_ease-out_1]' : ''
                       }`}
                     >
@@ -575,12 +575,12 @@ export const ImageQuestionReviewView: React.FC<ImageQuestionReviewViewProps> = (
           onClick={closeLightbox}
         >
           <div
-            className={`max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border  p-4  dark:${card}`}
+            className={`max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border  p-4  ${card}`}
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className={`font-[''] text-lg uppercase tracking-tight ${title}`}>Image lightbox</p>
+                <p className={` text-lg uppercase tracking-tight ${title}`}>Image lightbox</p>
                 <p className={`mt-0.5 text-[10px] uppercase tracking-wider ${dim}`}>
                   {lightbox.figureModality || 'Clinical image'}
                   {lightbox.imageLicence ? ` · ${lightbox.imageLicence}` : ''}

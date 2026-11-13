@@ -4,6 +4,10 @@
 // signature is the module's id, so reopening a module restores where the learner stopped.
 import type { ClinicalQuestion, ExamType } from '../types.ts';
 import { DUPLICATE_SIMILARITY, stemSimilarity } from '../lib/benchmark.ts';
+import { signature } from './sessionStore.ts';
+
+/** A stored question and where it lives: a saved bank (moduleId) or the QA review list (no moduleId). */
+export interface StoredQuestion { source: string; moduleId?: string; createdAt?: string; question: ClinicalQuestion }
 
 const DB_NAME = 'PulseMedModules';
 const STORE = 'modules';
@@ -138,10 +142,10 @@ export async function backfillModulesFromSessions(): Promise<number> {
 }
 
 /** Every stored question, from saved banks and from the QA review list, with where it came from. */
-export async function storedQuestions(): Promise<{ source: string; question: ClinicalQuestion }[]> {
+export async function storedQuestions(): Promise<StoredQuestion[]> {
   const all = (await withStore('readonly', (store) => store.getAll())) as SavedModule[];
-  const out: { source: string; question: ClinicalQuestion }[] = [];
-  for (const m of all) for (const q of m.questions) out.push({ source: m.title, question: q });
+  const out: StoredQuestion[] = [];
+  for (const m of all) for (const q of m.questions) out.push({ source: m.title, moduleId: m.id, createdAt: m.createdAt, question: q });
   try {
     const reviewed = JSON.parse(localStorage.getItem('pulse.qa.bank') || '[]') as { question?: ClinicalQuestion }[];
     for (const entry of reviewed) if (entry?.question) out.push({ source: 'QA review list', question: entry.question });
@@ -157,9 +161,9 @@ const correctAnswerText = (q: ClinicalQuestion) =>
 export { correctAnswerText };
 
 /** Pairs of questions whose stems overlap strongly, marked when their correct answers differ. */
-export function findDuplicates(items: { source: string; question: ClinicalQuestion }[]): {
-  a: { source: string; question: ClinicalQuestion };
-  b: { source: string; question: ClinicalQuestion };
+export function findDuplicates(items: StoredQuestion[]): {
+  a: StoredQuestion;
+  b: StoredQuestion;
   similarity: number;
   sameAnswer: boolean;
 }[] {
@@ -194,4 +198,48 @@ export function withoutStoredDuplicates(
     return !storedTexts.some((t) => stemSimilarity(text, t) >= DUPLICATE_SIMILARITY);
   });
   return { kept, dropped: questions.length - kept.length };
+}
+
+/**
+ * Deletes single questions from saved banks (or from the QA review list). A bank keeps its progress: the answers, flags and
+ * position are carried over to the shortened bank, minus the deleted questions. A bank left with no questions is removed.
+ */
+export async function removeStoredQuestions(items: StoredQuestion[]): Promise<number> {
+  let removed = 0;
+  const byModule = new Map<string, Set<string>>();
+  const fromQa = new Set<string>();
+  for (const it of items) {
+    if (it.moduleId) {
+      if (!byModule.has(it.moduleId)) byModule.set(it.moduleId, new Set());
+      byModule.get(it.moduleId)!.add(it.question.id);
+    } else fromQa.add(it.question.id);
+  }
+  for (const [moduleId, ids] of byModule) {
+    const m = await getModule(moduleId);
+    if (!m) continue;
+    const kept = m.questions.filter((q) => !ids.has(q.id));
+    removed += m.questions.length - kept.length;
+    let run: any = null;
+    try { run = JSON.parse(localStorage.getItem('runSession-' + moduleId) || 'null'); } catch { /* no saved progress */ }
+    localStorage.removeItem('runSession-' + moduleId);
+    await withStore('readwrite', (store) => store.delete(moduleId));
+    if (!kept.length) continue;
+    const newId = signature(kept);
+    await withStore('readwrite', (store) => store.put({ ...m, id: newId, count: kept.length, title: titleFor(kept), questions: kept }));
+    if (run) {
+      const only = (o: Record<string, unknown> = {}) => Object.fromEntries(Object.entries(o).filter(([k]) => !ids.has(k)));
+      const before = m.questions.slice(0, Number(run.index) || 0).filter((q) => !ids.has(q.id)).length;
+      localStorage.setItem('runSession-' + newId, JSON.stringify({ ...run, sig: newId, answers: only(run.answers), flags: only(run.flags), index: Math.min(before, kept.length - 1) }));
+    }
+  }
+  if (fromQa.size) {
+    try {
+      const list = JSON.parse(localStorage.getItem('pulse.qa.bank') || '[]') as { question?: ClinicalQuestion }[];
+      const next = list.filter((e) => !(e?.question && fromQa.has(e.question.id)));
+      removed += list.length - next.length;
+      localStorage.setItem('pulse.qa.bank', JSON.stringify(next));
+    } catch { /* unreadable QA list: left as it is */ }
+  }
+  notifyModulesChanged();
+  return removed;
 }

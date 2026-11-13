@@ -14,6 +14,8 @@ import {
   Sliders,
   Moon,
   Sun,
+  Volume2,
+  VolumeX,
   ShieldCheck,
   FileText,
   UploadCloud,
@@ -21,9 +23,16 @@ import {
   Database,
   Images,
   Globe,
-  Loader2
+  Loader2,
+  CalendarCheck,
+  ListChecks,
+  Bell,
+  CloudUpload,
+  ClipboardCheck,
+  Home,
 } from 'lucide-react';
 import { AppView, ExamType } from '../types.ts';
+import { soundsOn, setSoundsOn } from '../lib/sounds.ts';
 
 interface SidebarProps {
   currentView: AppView;
@@ -36,10 +45,18 @@ interface SidebarProps {
   srsDueCount: number;
 }
 
+// The menu is grouped by what the learner is doing, so each item is easy to find.
+const NAV_GROUPS: { title: string; ids: AppView[] }[] = [
+  { title: 'Home', ids: ['today', 'study-plan', 'reminders'] },
+  { title: 'Practice', ids: ['practice', 'question-bank', 'test-runner', 'image-review'] },
+  { title: 'Review', ids: ['reviews', 'analytics', 'mistakes', 'highlights', 'syllabus'] },
+  { title: 'Learn', ids: ['ai-tutor', 'pdf-reader', 'research'] },
+  { title: 'Tools', ids: ['qa', 'sync', 'settings'] },
+];
+
 const EXAM_CARDS: { id: ExamType; label: string; storageKeys: string[] }[] = [
   { id: 'NEET_PG', label: 'NEET-PG', storageKeys: ['exam.date.NEET_PG', 'exam.date.NEET-PG'] },
   { id: 'INI_CET', label: 'INI-CET', storageKeys: ['exam.date.INI_CET', 'exam.date.INI-CET'] },
-  { id: 'AMC_CAT' as ExamType, label: 'AMC CAT', storageKeys: ['exam.date.AMC_CAT', 'exam.date.AMC-CAT'] },
 ];
 
 const loadStoredExamDate = (storageKeys: string[]): string => {
@@ -51,7 +68,7 @@ const loadStoredExamDate = (storageKeys: string[]): string => {
 };
 
 // ---------- multiple exam dates per exam ----------
-// A single datetime picker cannot hold the real world: NEET-PG/INI-CET/AMC CAT run on
+// A single datetime picker cannot hold the real world: NEET-PG and INI-CET can run on
 // several dates and shifts. Each exam keeps a list (exam.dates.<ID>) plus the one the
 // learner is counting down to (exam.date.<ID>, the key the rest of the app already reads).
 
@@ -121,15 +138,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
   unresolvedMistakesCount,
   srsDueCount,
 }) => {
+  const [sound, setSound] = useState<boolean>(() => soundsOn());
   const [examDates, setExamDates] = useState<Record<ExamType, string>>(() => ({
     NEET_PG: loadStoredExamDate(['exam.date.NEET_PG', 'exam.date.NEET-PG']),
     INI_CET: loadStoredExamDate(['exam.date.INI_CET', 'exam.date.INI-CET']),
-    AMC_CAT: loadStoredExamDate(['exam.date.AMC_CAT', 'exam.date.AMC-CAT']),
   }));
   const [examDateLists, setExamDateLists] = useState<Record<ExamType, string[]>>(() => ({
     NEET_PG: loadStoredDateList(['exam.date.NEET_PG', 'exam.date.NEET-PG'], loadStoredExamDate(['exam.date.NEET_PG', 'exam.date.NEET-PG'])),
     INI_CET: loadStoredDateList(['exam.date.INI_CET', 'exam.date.INI-CET'], loadStoredExamDate(['exam.date.INI_CET', 'exam.date.INI-CET'])),
-    AMC_CAT: loadStoredDateList(['exam.date.AMC_CAT', 'exam.date.AMC-CAT'], loadStoredExamDate(['exam.date.AMC_CAT', 'exam.date.AMC-CAT'])),
   }));
 
   const [nowMs, setNowMs] = useState<number>(Date.now());
@@ -166,7 +182,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   /**
    * Ask the backend to look for the announced date on the OFFICIAL exam body only
-   * (NBEMS / AIIMS / AMC). Anything found is added to the DRAFT list for the user to
+   * (NBEMS / AIIMS). Anything found is added to the DRAFT list for the user to
    * confirm — it is never saved automatically, because these sites are often
    * JavaScript-rendered and a guessed date would be worse than none.
    */
@@ -288,32 +304,38 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   const navItems = [
+    { id: 'today' as AppView, label: 'Today', icon: Home },
     { id: 'analytics' as AppView, label: 'Performance Analytics', icon: BarChart3 },
+    { id: 'reviews' as AppView, label: 'Test Reviews', icon: ClipboardCheck },
     { id: 'practice' as AppView, label: 'Practice Builder', icon: FileQuestion },
     { id: 'question-bank' as AppView, label: 'Question Bank', icon: Database },
     { id: 'test-runner' as AppView, label: 'Active Test Runner', icon: Timer, badge: 'Live' },
     { id: 'mistakes' as AppView, label: 'Mistakes & Spaced Review', icon: AlertOctagon, badge: srsDueCount > 0 ? `${srsDueCount} due` : unresolvedMistakesCount > 0 ? String(unresolvedMistakesCount) : undefined },
     { id: 'highlights' as AppView, label: 'Highlights & Memory', icon: Bookmark },
+    { id: 'study-plan' as AppView, label: 'Study Plan', icon: CalendarCheck },
+    { id: 'syllabus' as AppView, label: 'Syllabus Tracker', icon: ListChecks },
+    { id: 'reminders' as AppView, label: 'Reminders', icon: Bell },
     { id: 'ai-tutor' as AppView, label: 'Clinical AI Tutor', icon: Brain },
     { id: 'pdf-reader' as AppView, label: 'PDF Reader & OCR', icon: BookOpen },
     { id: 'research' as AppView, label: 'Clinical Evidence Browser', icon: Compass },
     { id: 'image-review' as AppView, label: 'Image Question Review', icon: Images },
     { id: 'qa' as AppView, label: 'QA & Benchmark', icon: ShieldCheck },
+    { id: 'sync' as AppView, label: 'Sync & Backup', icon: CloudUpload },
     { id: 'settings' as AppView, label: 'AI Subscriptions & OCR', icon: Sliders },
   ];
 
   return (
-    <aside className="w-64  text-slate-200 flex flex-col shrink-0 border-r  h-screen select-none z-20">
+    <aside className="w-64 bg-[#001432] text-slate-200 flex flex-col shrink-0 border-r border-[#13294b] h-screen select-none z-20">
       {/* Brand Header */}
-      <div className="p-5 pb-4 border-b ">
+      <div className="p-5 pb-4 border-b border-[#13294b]">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl flex items-center justify-center  shadow-sm font-medium text-lg">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#0f8b8d] to-[#8ff3f4] flex items-center justify-center text-[#001432] shadow-sm font-medium text-lg">
             P
           </div>
           <div>
             <div className="text-sm font-medium tracking-tight text-white flex items-center gap-1.5">
               <span>PULSE MED</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.2   rounded border ">
+              <span className="text-[10px] font-mono px-1.5 py-0.2 bg-[#0f8b8d]/20 text-[#8ff3f4] rounded border border-[#0f8b8d]/30">
                 PRO
               </span>
             </div>
@@ -322,12 +344,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         {/* 3-Way Exam Switcher (USMLE Removed) */}
-        <div className="mt-4 p-1  rounded-xl flex items-center justify-between text-[11px] font-medium">
+        <div className="mt-4 p-1 bg-[#13294b] rounded-xl flex items-center justify-between text-[11px] font-medium">
           <button
             onClick={() => onSelectExam('NEET_PG')}
             className={`flex-1 py-1.5 rounded-lg transition-all text-center ${
               selectedExam === 'NEET_PG'
-                ? ' text-white shadow-xs'
+                ? 'bg-[#0f8b8d] text-white shadow-xs'
                 : 'text-slate-400 hover:text-white'
             }`}
           >
@@ -337,28 +359,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
             onClick={() => onSelectExam('INI_CET')}
             className={`flex-1 py-1.5 rounded-lg transition-all text-center ${
               selectedExam === 'INI_CET'
-                ? ' text-white shadow-xs'
+                ? 'bg-[#0f8b8d] text-white shadow-xs'
                 : 'text-slate-400 hover:text-white'
             }`}
           >
             INI-CET
           </button>
-          <button
-            onClick={() => onSelectExam('AMC_CAT' as ExamType)}
-            className={`flex-1 py-1.5 rounded-lg transition-all text-center ${
-              selectedExam === ('AMC_CAT' as ExamType)
-                ? ' text-white shadow-xs'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            AMC CAT
-          </button>
         </div>
       </div>
 
       {/* Navigation List */}
-      <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-1">
-        {navItems.map((item) => {
+      <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-4">
+        {NAV_GROUPS.map((group) => (
+          <div key={group.title} className="space-y-0.5">
+            <div className="px-3.5 pb-1 pt-1 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">{group.title}</div>
+        {navItems.filter((item) => group.ids.includes(item.id)).map((item) => {
           const isActive = currentView === item.id;
           const Icon = item.icon;
 
@@ -368,14 +383,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
               onClick={() => onNavigate(item.id)}
               className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all group ${
                 isActive
-                  ? 'text-white shadow-md'
-                  : 'text-slate-300  hover:text-white'
+                  ? 'bg-gradient-to-r from-[#0f8b8d] to-[#00696b] text-white shadow-md'
+                  : 'text-slate-300 hover:bg-[#13294b]/70 hover:text-white'
               }`}
             >
               <div className="flex items-center gap-3">
                 <Icon
                   className={`w-4 h-4 transition-colors ${
-                    isActive ? '' : 'text-slate-400 group-hover:text-slate-200'
+                    isActive ? 'text-[#8ff3f4]' : 'text-slate-400 group-hover:text-slate-200'
                   }`}
                 />
                 <span className="truncate">{item.label}</span>
@@ -397,16 +412,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </button>
           );
         })}
+          </div>
+        ))}
       </nav>
 
       {/* Real Live Countdown Cards per Exam */}
       <div className="px-3 pb-2 shrink-0 max-h-[52vh] overflow-y-auto">
-        <div className="flex items-center justify-between px-1 text-[10px] font-medium text-slate-400 uppercase tracking-wider sticky top-0  pb-1 z-10">
+        <div className="flex items-center justify-between px-1 text-[10px] font-medium text-slate-400 uppercase tracking-wider sticky top-0 bg-[#001432] pb-1 z-10">
           <span className="flex items-center gap-1.5">
-            <Timer className="w-3.5 h-3.5 " />
+            <Timer className="w-3.5 h-3.5 text-[#0f8b8d]" />
             Exam Countdowns
           </span>
-          <span className="text-[9px] font-mono ">Live</span>
+          <span className="text-[9px] font-mono text-[#8ff3f4]">Live</span>
         </div>
 
         <div className="space-y-1.5">
@@ -426,8 +443,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 }}
                 className={`p-2.5 rounded-xl border text-xs transition-all ${
                   isSelected
-                    ? '/25  ring-1  shadow-xs'
-                    : '  border-slate-700/60 text-slate-300'
+                    ? 'bg-gradient-to-br from-[#0f8b8d]/25 to-[#13294b] border-[#0f8b8d] ring-1 ring-[#0f8b8d]/50 shadow-xs'
+                    : 'bg-[#13294b]/40 hover:bg-[#13294b]/70 border-slate-700/60 text-slate-300'
                 }`}
               >
                 {/* Header: Exam Title & Selected Badge */}
@@ -437,7 +454,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       {exam.label}
                     </span>
                     {isSelected && (
-                      <span className="text-[9px] font-mono font-medium px-1.5 py-0.2   rounded border ">
+                      <span className="text-[9px] font-mono font-medium px-1.5 py-0.2 bg-[#0f8b8d]/30 text-[#8ff3f4] rounded border border-[#0f8b8d]/40">
                         Selected
                       </span>
                     )}
@@ -471,13 +488,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         type="datetime-local"
                         value={tempDateInput}
                         onChange={(e) => setTempDateInput(e.target.value)}
-                        className="flex-1 min-w-0 px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[11px] text-white focus:outline-none focus:"
+                        className="flex-1 min-w-0 px-2 py-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-[11px] text-slate-800 dark:text-white focus:outline-none focus:border-[#0f8b8d]"
                       />
                       <button
                         type="button"
                         onClick={() => { addDraftDate(tempDateInput); setTempDateInput(''); }}
                         disabled={!tempDateInput}
-                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-[10px] font-medium "
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-[10px] font-medium text-[#8ff3f4]"
                       >
                         Add
                       </button>
@@ -497,7 +514,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       type="button"
                       onClick={() => checkOfficialDates(exam)}
                       disabled={checkingExam === exam.id}
-                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-[10px] font-medium "
+                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-[10px] font-medium text-[#8ff3f4]"
                       title="Search the official exam body for the announced date"
                     >
                       {checkingExam === exam.id ? (
@@ -525,7 +542,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             href={l.url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="block truncate text-[9px] font-mono  hover:underline"
+                            className="block truncate text-[9px] font-mono text-[#8ff3f4] hover:underline"
                             title={l.title || l.url}
                           >
                             Open {l.host} ↗
@@ -553,7 +570,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                               key={d}
                               className={`inline-flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.5 rounded border ${
                                 draftSelected === d
-                                  ? '  '
+                                  ? 'bg-teal-600 text-white border-teal-500'
                                   : 'bg-slate-800 text-slate-400 border-slate-700'
                               }`}
                             >
@@ -576,7 +593,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     )}
 
                     {detectedNote && (
-                      <p className="text-[9px]  leading-snug">{detectedNote}</p>
+                      <p className="text-[9px] text-[#8ff3f4] leading-snug">{detectedNote}</p>
                     )}
 
                     <div className="flex items-center justify-between text-[10px]">
@@ -598,7 +615,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         <button
                           type="button"
                           onClick={() => handleSaveExamDate(exam.id, exam.storageKeys)}
-                          className="px-2 py-0.5   text-white font-medium rounded"
+                          className="px-2 py-0.5 bg-[#0f8b8d] hover:bg-[#00696b] text-white font-medium rounded"
                         >
                           Save
                         </button>
@@ -615,7 +632,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           e.stopPropagation();
                           openEditor(exam);
                         }}
-                        className="mt-0.5 text-[11px] font-semibold  hover:underline flex items-center gap-1"
+                        className="mt-0.5 text-[11px] font-semibold text-[#8ff3f4] hover:underline flex items-center gap-1"
                       >
                         <Calendar className="w-3 h-3" />
                         <span>Set exam date</span>
@@ -649,7 +666,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             value={dateVal}
                             onClick={(e) => e.stopPropagation()}
                             onChange={(e) => selectExamDate(exam.id, exam.storageKeys, e.target.value)}
-                            className="mt-1 w-full px-1.5 py-0.5 bg-slate-900/80 border border-slate-700 rounded text-[10px] text-slate-200 focus:outline-none focus:"
+                            className="mt-1 w-full px-1.5 py-0.5 bg-white dark:bg-slate-900/80 border border-slate-300 dark:border-slate-700 rounded text-[10px] text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#0f8b8d]"
                             title="Choose which exam date to count down to"
                           >
                             {examDateLists[exam.id].map((d) => (
@@ -674,12 +691,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       {/* Footer Controls: Dark Mode Toggle */}
-      <div className="p-3 border-t  flex items-center justify-between text-xs text-slate-400 shrink-0">
+      <div className="p-3 border-t border-[#13294b] flex items-center justify-between text-xs text-slate-400 shrink-0">
         <span className="text-[11px] font-mono text-slate-500">Board Exam Engine</span>
 
         <button
+          onClick={() => { const next = !sound; setSound(next); setSoundsOn(next); }}
+          className="p-1.5 rounded-lg bg-[#13294b] hover:bg-slate-700 text-slate-300 hover:text-white transition-colors ml-auto mr-2"
+          title={sound ? 'Sounds on. Click to turn off' : 'Sounds off. Click to turn on'}
+          aria-label={sound ? 'Turn interface sounds off' : 'Turn interface sounds on'}
+          aria-pressed={sound}
+        >
+          {sound ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5 text-slate-500" />}
+        </button>
+        <button
           onClick={onToggleDarkMode}
-          className="p-1.5 rounded-lg  hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
+          className="p-1.5 rounded-lg bg-[#13294b] hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
           title="Toggle Dark Mode"
         >
           {darkMode ? <Sun className="w-3.5 h-3.5 text-amber-300" /> : <Moon className="w-3.5 h-3.5" />}

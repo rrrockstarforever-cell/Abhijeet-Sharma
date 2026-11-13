@@ -20,8 +20,15 @@ import {
 } from 'lucide-react';
 import { ClinicalQuestion, AppView, ExamType } from '../types.ts';
 import { AiQuestionTools } from './AiQuestionTools.tsx';
+import { TestCoachPanel } from './TestCoachPanel.tsx';
+import { ReviewNoteCard } from './ReviewNoteCard.tsx';
+import { TeachMeModal } from './TeachMeModal.tsx';
+import { setTutorSeed } from '../lib/tutorSeed.ts';
+import { lessonMessage, type TopicStat } from '../lib/testReview.ts';
 import { ZoomableImage } from './ZoomableImage.tsx';
 import { addAttempt } from '../utils/attemptStore.ts';
+import { buildReview, saveReview, type ReviewRecord } from '../lib/testReview.ts';
+import { rewardForTest } from '../utils/gameStore.ts';
 import { loadRunSession, saveRunSession, signature } from '../utils/sessionStore.ts';
 
 interface TestRunnerViewProps {
@@ -94,147 +101,147 @@ function safeImageCaption(q: ClinicalQuestion | undefined, revealed: boolean): s
  * mode: the component simply reads `t.<token>` and the theme prop decides.
  */
 const LIGHT = {
-  page: '  selection:',
-  bar: ' ',
-  barBack: 'border    ',
-  barTitle: '',
-  barSub: '',
-  chip: 'border   ',
-  chipAccent: 'border   ',
-  chipMono: 'border   ',
-  pace: 'border   ',
-  paceLabel: '',
-  timer: 'border    ',
-  flagOn: 'border    ',
-  flagOff: 'border     ',
-  submitTop: 'border    ',
-  card: 'border  ',
-  shadow: '',
-  shadowXl: '',
-  inner: 'border-y-2 border-r-2  border-l-4 border-l-[#0F8B8D] ',
-  vignetteLabel: 'border   ',
-  faint: '',
-  dim: '',
-  text: '',
-  body: '',
-  title: '',
-  strong: '',
-  accent: '',
-  accentCyan: '',
-  accentAmber: '',
-  chipAnswered: 'border   ',
-  chipOk: 'border   ',
-  chipTeal: 'border   ',
-  chipWarn: 'border   ',
-  track: 'border  ',
-  divider: '',
-  optIdle: 'border   hover:-translate-y-0.5 ',
-  optIdleTile: 'border   ',
-  optIdleText: 'font-semibold ',
-  optPick: 'border   -translate-y-0.5',
-  optPickTile: ' text-white',
-  optPickText: 'font-medium ',
-  optOk: 'border   -translate-y-0.5',
-  optOkTile: ' text-white',
-  optOkText: 'font-medium ',
-  okBadge: 'border   ',
-  optBad: 'border   -translate-y-0.5',
-  optBadTile: ' text-white',
-  optBadText: 'font-medium ',
-  badBadge: 'border   ',
-  okHint: '',
-  matrixHead: 'border-b-2  ',
-  tabOn: 'border-b-4   font-medium ',
-  tabOff: 'border-b-4 border-transparent  ',
-  warnBox: 'border   ',
-  warnTitle: '',
-  warnText: '',
-  pearl: 'border   ',
-  pearlTitle: '',
-  pearlText: '',
-  swallow: 'border  ',
-  navBtn: 'border    ',
-  ghostBtn: 'border    ',
-  aside: 'border-l-2  ',
-  paletteIdle: 'border    ',
+  page: 'selection: bg-[#f6f8fc] text-slate-800',
+  bar: 'border-slate-200 bg-white',
+  barBack: 'border border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100',
+  barTitle: 'text-slate-900',
+  barSub: 'text-slate-500',
+  chip: 'border border-slate-200 bg-slate-100 text-slate-600',
+  chipAccent: 'border border-cyan-600/30 bg-cyan-50 text-cyan-700',
+  chipMono: 'border border-emerald-600/30 bg-emerald-50 text-emerald-700',
+  pace: 'border border-slate-200 bg-slate-50',
+  paceLabel: 'text-slate-500',
+  timer: 'border border-amber-300 bg-amber-50 text-amber-700',
+  flagOn: 'border border-amber-400 bg-amber-100 text-amber-700',
+  flagOff: 'border border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100 hover:text-slate-800',
+  submitTop: 'border border-cyan-600/40 bg-cyan-50 text-cyan-700 hover:border-cyan-600',
+  card: 'border border-slate-200 bg-white',
+  shadow: 'shadow-sm',
+  shadowXl: 'shadow-md',
+  inner: 'border-y-2 border-r-2 border-l-4 border-l-[#0F8B8D] border-slate-200 bg-slate-50',
+  vignetteLabel: 'border border-cyan-600/30 bg-cyan-50 text-cyan-700',
+  faint: 'text-slate-400',
+  dim: 'text-slate-500',
+  text: 'text-slate-500',
+  body: 'text-slate-600',
+  title: 'text-slate-900',
+  strong: 'text-slate-900',
+  accent: 'text-teal-700',
+  accentCyan: 'text-cyan-700',
+  accentAmber: 'text-amber-600',
+  chipAnswered: 'border border-slate-200 bg-slate-100 text-slate-700',
+  chipOk: 'border border-emerald-600/30 bg-emerald-50 text-emerald-700',
+  chipTeal: 'border border-teal-600/30 bg-teal-50 text-teal-700',
+  chipWarn: 'border border-amber-500/40 bg-amber-50 text-amber-700',
+  track: 'border border-slate-200 bg-slate-100',
+  divider: 'border-slate-200',
+  optIdle: 'border hover:-translate-y-0.5 border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50',
+  optIdleTile: 'border border-slate-200 bg-slate-100 text-slate-600',
+  optIdleText: 'font-semibold text-slate-700',
+  optPick: 'border -translate-y-0.5 border-[#0f8b8d] bg-teal-50',
+  optPickTile: 'text-white bg-[#0f8b8d]',
+  optPickText: 'font-medium text-teal-900',
+  optOk: 'border -translate-y-0.5 border-emerald-500 bg-emerald-50',
+  optOkTile: 'text-white bg-emerald-600',
+  optOkText: 'font-medium text-emerald-800',
+  okBadge: 'border border-emerald-600/40 bg-emerald-100 text-emerald-700',
+  optBad: 'border -translate-y-0.5 border-rose-500 bg-rose-50',
+  optBadTile: 'bg-rose-600 text-white',
+  optBadText: 'font-medium text-rose-800',
+  badBadge: 'border border-rose-500/40 bg-rose-100 text-rose-700',
+  okHint: 'text-emerald-700',
+  matrixHead: 'border-b-2 border-slate-200 bg-slate-50',
+  tabOn: 'border-b-4 font-medium border-[#0f8b8d] bg-white text-teal-700',
+  tabOff: 'border-b-4 border-transparent text-slate-500 hover:text-slate-800',
+  warnBox: 'border border-amber-400/60 bg-amber-50',
+  warnTitle: 'text-amber-700',
+  warnText: 'text-amber-800',
+  pearl: 'border border-teal-500/40 bg-teal-50',
+  pearlTitle: 'text-teal-700',
+  pearlText: 'text-slate-900',
+  swallow: 'border border-slate-200 bg-slate-50',
+  navBtn: 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50',
+  ghostBtn: 'border border-slate-200 bg-white text-slate-500 hover:text-slate-800',
+  aside: 'border-l-2 border-slate-200 bg-white',
+  paletteIdle: 'border border-slate-200 bg-white text-slate-500 hover:bg-slate-100 hover:text-slate-800',
   ringOffset: 'ring-offset-[#FFF9ED]',
-  copilot: 'border  ',
-  copilotText: '',
-  submit: 'border    ',
-  dissect: 'border   hover:brightness-105',
+  copilot: 'border border-teal-600/30 bg-gradient-to-b from-teal-50 to-white',
+  copilotText: 'text-slate-600',
+  submit: 'border border-cyan-600/40 bg-white text-cyan-700 hover:border-cyan-600 hover:bg-cyan-50',
+  dissect: 'border hover:brightness-105 border-amber-500/60 bg-gradient-to-r from-amber-100 to-teal-100 text-amber-700 hover:border-amber-500',
 };
 
 type Theme = typeof LIGHT;
 
 const DARK: Theme = {
-  page: '  selection:',
-  bar: ' ',
-  barBack: 'border    ',
-  barTitle: '',
-  barSub: '',
-  chip: 'border   ',
-  chipAccent: 'border   ',
-  chipMono: 'border   ',
-  pace: 'border   ',
-  paceLabel: '',
-  timer: 'border    ',
-  flagOn: 'border    ',
-  flagOff: 'border     hover:text-white',
-  submitTop: 'border    ',
-  card: 'border  ',
-  shadow: '',
-  shadowXl: '',
-  inner: 'border-y-2 border-r-2  border-l-4 border-l-[#2DD4BF] ',
-  vignetteLabel: 'border   ',
-  faint: '',
-  dim: '',
-  text: '',
-  body: '',
-  title: '',
-  strong: '',
-  accent: '',
-  accentCyan: '',
-  accentAmber: '',
-  chipAnswered: 'border   ',
-  chipOk: 'border   ',
-  chipTeal: 'border   ',
-  chipWarn: 'border   ',
-  track: 'border  ',
-  divider: '',
-  optIdle: 'border   hover:-translate-y-0.5 ',
-  optIdleTile: 'border   ',
-  optIdleText: 'font-semibold ',
-  optPick: 'border   -translate-y-0.5',
-  optPickTile: ' ',
-  optPickText: 'font-medium ',
-  optOk: 'border   -translate-y-0.5',
-  optOkTile: ' ',
-  optOkText: 'font-medium ',
-  okBadge: 'border   ',
-  optBad: 'border   -translate-y-0.5',
-  optBadTile: ' ',
-  optBadText: 'font-medium ',
-  badBadge: 'border   ',
-  okHint: '',
-  matrixHead: 'border-b-2  ',
-  tabOn: 'border-b-4   font-medium ',
-  tabOff: 'border-b-4 border-transparent  ',
-  warnBox: 'border   ',
-  warnTitle: '',
-  warnText: '',
-  pearl: 'border   ',
-  pearlTitle: '',
-  pearlText: '',
-  swallow: 'border  ',
-  navBtn: 'border    ',
-  ghostBtn: 'border    ',
-  aside: 'border-l-2  ',
-  paletteIdle: 'border    ',
+  page: 'selection: bg-[#0F172A] text-slate-200',
+  bar: 'border-slate-800/90 bg-[#0A101D]',
+  barBack: 'border border-slate-700/80 bg-slate-800/80 text-slate-300 hover:bg-slate-700',
+  barTitle: 'text-slate-100',
+  barSub: 'text-slate-400',
+  chip: 'border border-slate-700 bg-slate-800 text-slate-300',
+  chipAccent: 'border border-cyan-500/40 bg-cyan-500/20 text-cyan-300',
+  chipMono: 'border border-emerald-500/30 bg-emerald-500/15 text-emerald-300',
+  pace: 'border border-slate-800 bg-slate-900',
+  paceLabel: 'text-slate-400',
+  timer: 'border border-amber-500/30 bg-amber-500/10 text-amber-300',
+  flagOn: 'border border-amber-400 bg-amber-500/20 text-amber-300',
+  flagOff: 'border hover:text-white border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700',
+  submitTop: 'border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:border-cyan-400',
+  card: 'border border-slate-700/80 bg-[#1E293B]',
+  shadow: 'shadow-md',
+  shadowXl: 'shadow-xl',
+  inner: 'border-y-2 border-r-2 border-l-4 border-l-[#2DD4BF] border-slate-700/70 bg-[#151F30]',
+  vignetteLabel: 'border border-cyan-500/30 bg-cyan-950/80 text-cyan-400',
+  faint: 'text-slate-500',
+  dim: 'text-slate-400',
+  text: 'text-slate-400',
+  body: 'text-slate-300',
+  title: 'text-white',
+  strong: 'text-slate-100',
+  accent: 'text-teal-400',
+  accentCyan: 'text-cyan-400',
+  accentAmber: 'text-amber-300',
+  chipAnswered: 'border border-slate-700 bg-slate-900 text-slate-300',
+  chipOk: 'border border-emerald-700/60 bg-emerald-950/60 text-emerald-300',
+  chipTeal: 'border border-teal-700/60 bg-teal-950/60 text-teal-300',
+  chipWarn: 'border border-amber-600/60 bg-amber-950/50 text-amber-300',
+  track: 'border border-slate-800 bg-slate-900',
+  divider: 'border-slate-800/80',
+  optIdle: 'border hover:-translate-y-0.5 border-slate-700/80 bg-slate-900/60 hover:border-slate-600 hover:bg-slate-800/50',
+  optIdleTile: 'border border-slate-700 bg-slate-800 text-slate-300',
+  optIdleText: 'font-semibold text-slate-300',
+  optPick: 'border -translate-y-0.5 border-teal-500 bg-teal-500/10',
+  optPickTile: 'bg-teal-600 text-white',
+  optPickText: 'font-medium text-teal-100',
+  optOk: 'border -translate-y-0.5 border-emerald-500 bg-emerald-950/20',
+  optOkTile: 'bg-emerald-500 text-slate-950',
+  optOkText: 'font-medium text-emerald-200',
+  okBadge: 'border border-emerald-500/40 bg-emerald-900/60 text-emerald-400',
+  optBad: 'border -translate-y-0.5 border-rose-500 bg-rose-950/20',
+  optBadTile: 'bg-rose-600 text-white',
+  optBadText: 'font-medium text-rose-200',
+  badBadge: 'border border-rose-500/40 bg-rose-900/60 text-rose-300',
+  okHint: 'text-emerald-300/80',
+  matrixHead: 'border-b-2 border-slate-700/80 bg-[#131C2E]',
+  tabOn: 'border-b-4 font-medium border-cyan-500 bg-[#1E293B] text-sky-300',
+  tabOff: 'border-b-4 border-transparent text-slate-400 hover:text-slate-200',
+  warnBox: 'border border-amber-500/40 bg-amber-950/20',
+  warnTitle: 'text-amber-300',
+  warnText: 'text-amber-200/90',
+  pearl: 'border border-teal-500/40 bg-[#0B132B]',
+  pearlTitle: 'text-teal-300',
+  pearlText: 'text-slate-100',
+  swallow: 'border border-slate-700/80 bg-slate-900/70',
+  navBtn: 'border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700',
+  ghostBtn: 'border border-slate-700 bg-slate-900 text-slate-400 hover:text-slate-200',
+  aside: 'border-l-2 border-slate-800/90 bg-[#0A101D]',
+  paletteIdle: 'border border-slate-800 bg-slate-900 text-slate-400 hover:bg-slate-800 hover:text-slate-200',
   ringOffset: 'ring-offset-[#1C1916]',
-  copilot: 'border  ',
-  copilotText: '',
-  submit: 'border    ',
-  dissect: 'border   hover:brightness-110',
+  copilot: 'border border-teal-500/30 bg-gradient-to-b from-teal-950/40 to-slate-900',
+  copilotText: 'text-slate-400',
+  submit: 'border border-cyan-500/40 bg-[#0F172A] text-cyan-300 hover:border-cyan-400 hover:bg-slate-900',
+  dissect: 'border hover:brightness-110 border-amber-400/50 bg-gradient-to-r from-amber-500/20 to-teal-500/20 text-amber-300 hover:border-amber-400',
 };
 
 export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
@@ -262,6 +269,13 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
   const [examSubmitted, setExamSubmitted] = useState<boolean>(restoredRun?.submitted ?? false);
   const [showExplanation, setShowExplanation] = useState<boolean>(restoredRun?.showExplanation ?? mode === 'TUTOR');
   const [secondsElapsed, setSecondsElapsed] = useState<number>(restoredRun?.seconds ?? 0);
+  const [review, setReview] = useState<ReviewRecord | null>(null);
+  const [celebrate, setCelebrate] = useState(false);
+  const [teachTopics, setTeachTopics] = useState<TopicStat[] | null>(null);
+  const questionTopic = (q: ClinicalQuestion): TopicStat => ({
+    key: `${q.subject}|${q.subtopic}`, subject: q.subject, topic: q.subtopic || q.subject, total: 1, wrong: 1, skipped: 0, accuracy: 0,
+    missedFacts: [((q.keyFact || '').trim() || (q.options.find((o) => o.id === q.correctOption)?.text ?? '')).slice(0, 200)].filter(Boolean),
+  });
   const [showResultsScreen, setShowResultsScreen] = useState<boolean>(restoredRun?.showResults ?? false);
   const [matrixTab, setMatrixTab] = useState<MatrixTab>('rationale');
   // "Dissect with AI Tutor" can open the reasoning matrix before the question is
@@ -280,13 +294,17 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
       const sig = signature(propQuestions);
       if (sig === lastSigRef.current) return;
       lastSigRef.current = sig;
+      // A bank opened again continues from its saved answers, flags, position and time. Only a bank with no saved
+      // run starts empty. Starting empty here would also overwrite the saved run with blank progress.
+      const saved = loadRunSession(sig);
       setQuestions(propQuestions);
-      setCurrentIndex(0);
-      setUserAnswers({});
-      setFlaggedIds({});
-      setExamSubmitted(false);
-      setShowExplanation(mode === 'TUTOR');
-      setSecondsElapsed(0);
+      setCurrentIndex(saved?.index ?? 0);
+      setUserAnswers(saved?.answers ?? {});
+      setFlaggedIds(saved?.flags ?? {});
+      setExamSubmitted(saved?.submitted ?? false);
+      setShowResultsScreen(saved?.showResults ?? false);
+      setShowExplanation(saved?.showExplanation ?? mode === 'TUTOR');
+      setSecondsElapsed(saved?.seconds ?? 0);
     }
   }, [propQuestions, mode]);
 
@@ -387,7 +405,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
       for (const q of attemptedQs) {
         if (userAnswers[q.id] === q.correctOption) correct += 1;
       }
-      addAttempt({
+      const attempt = addAttempt({
         exam: questions[0]?.examType ?? 'NEET_PG',
         mode,
         total: questions.length,
@@ -397,6 +415,15 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
         questionIds: questions.map((q) => q.id),
         incorrectIds: attemptedQs.filter((q) => userAnswers[q.id] !== q.correctOption).map((q) => q.id),
       });
+      // The performance review is kept for good, so it can be opened again from the Test Reviews screen.
+      const saved = buildReview(attempt.id, questions, userAnswers as Record<string, string>);
+      const reward = rewardForTest(saved.correct, saved.answered);
+      saved.xp = reward.xp;
+      saved.leveledUp = reward.leveledUp;
+      saved.newBadges = reward.newBadges;
+      saveReview(saved);
+      setReview(saved);
+      setCelebrate(true);
     } catch { /* never block the run on history bookkeeping */ }
   };
 
@@ -469,7 +496,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
           matrixTab === tab ? t.tabOn : t.tabOff
         }`}
       >
-        <span className={`font-[''] text-sm tracking-wide ${matrixTab === tab ? '' : 'opacity-60'}`}>{tabNo}</span>
+        <span className={` text-sm tracking-wide ${matrixTab === tab ? '' : 'opacity-60'}`}>{tabNo}</span>
         <Icon className="h-3.5 w-3.5" />
         <span className="whitespace-nowrap font-medium">{label}</span>
       </button>
@@ -527,15 +554,15 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
 
           const answerCls = ans === q.correctOption
             ? darkMode
-              ? '   '
-              : '   '
+              ? 'bg-emerald-600 text-white hover:bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.3)]'
+              : 'bg-emerald-600 text-white hover:bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.25)]'
             : darkMode
-              ? '   '
-              : '   ';
+              ? 'bg-rose-600 text-white hover:bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.3)]'
+              : 'bg-rose-600 text-white hover:bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.25)]';
           let cls = t.paletteIdle;
           if (ans) cls = answerCls;
           if (isCurrent) {
-            cls += ` ring-2  ring-offset-1 ${t.ringOffset}`;
+            cls += ` ring-2 ring-cyan-400 ring-offset-1 ${t.ringOffset}`;
           }
 
           return (
@@ -549,7 +576,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
               {wasFlagged && (
                 <span
                   className={`absolute -right-1 -top-1 h-3 w-3 border ${
-                    darkMode ? ' ' : ' '
+                    darkMode ? 'border-amber-800 bg-amber-400' : 'border-amber-200 bg-amber-400'
                   }`}
                 />
               )}
@@ -592,7 +619,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
 
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                <span className={`font-[''] text-lg tracking-wide ${t.barTitle}`}>
+                <span className={` text-lg tracking-wide ${t.barTitle}`}>
                   {examLabel} • AI MODULE
                 </span>
                 <span className={`rounded-md border px-2 py-0.5 font-mono text-[10px] font-medium tracking-wide ${t.chipAccent}`}>
@@ -625,9 +652,9 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
 
           <div className="flex flex-wrap items-center gap-2">
             <div className={`hidden items-center gap-2 rounded-lg px-3 py-1.5 font-mono text-xs sm:flex ${t.pace}`}>
-              <Gauge className={`h-4 w-4 ${darkMode ? '' : ''}`} />
+              <Gauge className={`h-4 w-4 ${darkMode ? 'text-emerald-400' : 'text-emerald-500'}`} />
               <span className={t.paceLabel}>PACE</span>
-              <span className={`font-[''] text-base ${t.accent}`}>{paceDisplay}</span>
+              <span className={` text-base ${t.accent}`}>{paceDisplay}</span>
             </div>
 
             {mode === 'EXAM' && !examSubmitted && (
@@ -639,14 +666,22 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
               </button>
             )}
             {examSubmitted && (
-              <span className={`hidden rounded-lg px-2.5 py-1 font-mono text-[11px] font-medium sm:block ${t.chipMono}`}>
-                SUBMITTED
-              </span>
+              <>
+                <span className={`hidden rounded-lg px-2.5 py-1 font-mono text-[11px] font-medium sm:block ${t.chipMono}`}>
+                  SUBMITTED
+                </span>
+                <button
+                  onClick={() => setShowResultsScreen(true)}
+                  className={`min-h-[44px] rounded-lg px-3 py-1.5 font-mono text-[11px] font-medium ${t.submitTop}`}
+                >
+                  PERFORMANCE REVIEW
+                </button>
+              </>
             )}
 
             <div className={`flex items-center gap-2 rounded-lg px-3 py-1.5 font-mono text-xs font-semibold ${t.timer}`}>
               <Clock className="h-4 w-4" />
-              <span className="font-[''] text-xl tracking-wider">{formatTimer(secondsElapsed)}</span>
+              <span className=" text-xl tracking-wider">{formatTimer(secondsElapsed)}</span>
             </div>
 
             <button
@@ -663,8 +698,8 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                     animate={{ scale: 1, rotate: -6, opacity: 1 }}
                     exit={{ scale: 0.6, opacity: 0 }}
                     transition={{ type: 'spring', stiffness: 420, damping: 18 }}
-                    className={`pointer-events-none absolute -right-2 -top-3 rounded-md border  px-1.5 py-0.5 font-[''] text-[10px] tracking-wide  ${
-                      darkMode ? ' ' : ' '
+                    className={`pointer-events-none absolute -right-2 -top-3 rounded-md border  px-1.5 py-0.5 text-[10px] tracking-wide  ${
+                      darkMode ? 'border-amber-400 bg-amber-500/20 text-amber-300' : 'border-amber-400 bg-amber-100 text-amber-700'
                     }`}
                   >
                     FLAGGED!
@@ -696,7 +731,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
               />
               <div className="relative z-10 flex flex-wrap items-center justify-between gap-2 text-xs">
                 <div className="flex flex-wrap items-center gap-2 font-mono">
-                  <span className={`flex items-center gap-1.5 font-[''] text-lg tracking-wide ${t.accent}`}>
+                  <span className={`flex items-center gap-1.5 text-lg tracking-wide ${t.accent}`}>
                     <Zap className="h-4 w-4" /> PULSE PROGRESS
                   </span>
                   <span className={`rounded-md border px-2 py-1 font-medium ${t.chipAnswered}`}>ANSWERED {answeredCount}/{totalQuestions}</span>
@@ -708,14 +743,14 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                       {Array.from({ length: Math.min(flaggedCount, 4) }).map((_, i) => (
                         <span
                           key={i}
-                          className={`h-2 w-2 border ${darkMode ? ' ' : ' '}`}
+                          className={`h-2 w-2 border ${darkMode ? 'bg-amber-400 border-amber-800' : 'bg-amber-400 border-amber-200'}`}
                         />
                       ))}
                     </span>
                   </span>
                 </div>
                 <div className={`font-mono text-[11px] ${t.dim}`}>
-                  CURRENT <span className={`font-[''] text-base ${t.accentCyan}`}>Q{currentIndex + 1}</span> OF {totalQuestions}
+                  CURRENT <span className={` text-base ${t.accentCyan}`}>Q{currentIndex + 1}</span> OF {totalQuestions}
                 </div>
               </div>
 
@@ -763,7 +798,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                       {currentQ?.moduleCode ?? `Q-${currentQ?.id?.slice(-6) ?? currentIndex + 1}`}
                     </span>
                   </div>
-                  <p className={`whitespace-pre-line text-[15px] leading-relaxed ${t.strong}`}>{rawStem}</p>
+                  <p className={`whitespace-pre-line text-[18px] leading-relaxed sm:text-[20px] ${t.strong}`}>{rawStem}</p>
                 </div>
               )}
 
@@ -810,9 +845,9 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                 </div>
               )}
 
-              {/* Stem — deliberately smaller than the vignette */}
+              {/* Question — large enough to read comfortably, in step with the vignette above */}
               <div>
-                <h2 className={`flex items-start gap-3 text-[15px] font-semibold leading-relaxed sm:text-base ${t.title}`}>
+                <h2 className={`flex items-start gap-3 text-[18px] font-semibold leading-relaxed sm:text-[20px] ${t.title}`}>
                   <span className={`mt-0.5 shrink-0 rounded-md border px-1.5 py-0.5 font-mono text-[11px] font-medium ${t.vignetteLabel}`}>
                     Q{currentIndex + 1}
                   </span>
@@ -860,32 +895,26 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                       className={`group relative flex min-h-[52px] w-full flex-col gap-2 rounded-xl px-4 py-3.5 text-left transition-all duration-150 active:translate-y-0 ${shell} ${
                         isLocked
                           ? 'cursor-default'
-                          : `cursor-pointer hover:-translate-y-1 ${darkMode ? 'hover:' : 'hover:'}`
+                          : `cursor-pointer hover:-translate-y-1 `
                       }`}
                     >
                       {showCorrect && (
                         <span
-                          className={`absolute -right-1 -top-2 z-10 -rounded-md border px-2 py-0.5 font-[''] text-sm tracking-wide ${t.okBadge} ${
-                            darkMode ? '' : ''
-                          }`}
+                          className={`absolute -right-1 -top-2 z-10 -rounded-md border px-2 py-0.5 text-sm tracking-wide ${t.okBadge}`}
                         >
                           CORRECT!
                         </span>
                       )}
                       {showWrong && (
                         <span
-                          className={`absolute -right-1 -top-2 z-10 rounded-md border px-2 py-0.5 font-[''] text-sm tracking-wide ${t.badBadge} ${
-                            darkMode ? '' : ''
-                          }`}
+                          className={`absolute -right-1 -top-2 z-10 rounded-md border px-2 py-0.5 text-sm tracking-wide ${t.badBadge}`}
                         >
                           YOUR PICK
                         </span>
                       )}
                       {pending && (
                         <span
-                          className={`absolute -right-1 -top-2 z-10 -rounded-md border px-2 py-0.5 font-[''] text-sm tracking-wide ${t.okBadge} ${
-                            darkMode ? '' : ''
-                          }`}
+                          className={`absolute -right-1 -top-2 z-10 -rounded-md border px-2 py-0.5 text-sm tracking-wide ${t.okBadge}`}
                         >
                           LOCKED IN
                         </span>
@@ -897,13 +926,13 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                           >
                             {opt.id}
                           </div>
-                          <div className={`text-[15px] leading-relaxed ${label}`}>{opt.text}</div>
+                          <div className={`text-[16px] leading-relaxed sm:text-[17px] ${label}`}>{opt.text}</div>
                         </div>
                         {showCorrect && (
-                          <CheckCircle2 className={`h-6 w-6 shrink-0 ${darkMode ? '' : ''}`} />
+                          <CheckCircle2 className={`h-6 w-6 shrink-0 ${darkMode ? 'text-emerald-400' : 'text-emerald-500'}`} />
                         )}
                         {showWrong && (
-                          <X className={`h-6 w-6 shrink-0 ${darkMode ? '' : ''}`} />
+                          <X className={`h-6 w-6 shrink-0 ${darkMode ? 'text-rose-400' : 'text-rose-500'}`} />
                         )}
                       </div>
 
@@ -973,56 +1002,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
 
                   {reveal && matrixTab === 'rationale' && (
                     <>
-                      {(currentQ?.trapExplanation || currentQ?.trapType) && (
-                        <div className={`rounded-xl border p-4 ${t.warnBox}`}>
-                          <div className="flex items-start gap-3">
-                            <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-amber-500/40 bg-amber-500/15 ${t.warnTitle}`}>
-                              <Flag className="h-4 w-4" />
-                            </div>
-                            <div>
-                              <h3 className={`font-mono text-[11px] font-medium uppercase tracking-wider ${t.warnTitle}`}>
-                                Distractor dissection{currentQ?.trapType ? `: ${currentQ.trapType}` : ''}
-                              </h3>
-                              <p className={`mt-1 text-xs leading-relaxed ${t.warnText}`}>
-                                {currentQ?.trapExplanation || 'The remaining options are plausible but do not fit the stem.'}
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      <div className={`space-y-3 border-t pt-3 text-sm leading-relaxed ${t.divider} ${t.body}`}>
-                        <span className={`font-mono text-[11px] font-medium uppercase tracking-wider ${t.accentCyan}`}>
-                          Comprehensive explanation
-                        </span>
-                        <p className="whitespace-pre-line">{currentQ?.explanation || 'No explanation was attached to this item.'}</p>
-                      </div>
-
-                      <div className={`space-y-1.5 border-t pt-3 ${t.divider}`}>
-                        <span className={`font-mono text-[10px] font-medium uppercase tracking-wider ${t.accentCyan}`}>
-                          Option verdicts
-                        </span>
-                        {currentQ.options.map((opt) => {
-                          const correct = opt.id === currentQ.correctOption;
-                          return (
-                            <div key={opt.id} className="flex items-start gap-2 text-xs">
-                              <span
-                                className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded font-mono text-[10px] font-medium ${
-                                  correct ? 'bg-emerald-600 text-white' : t.optIdleTile
-                                }`}
-                              >
-                                {opt.id}
-                              </span>
-                              <p className={`min-w-0 flex-1 ${t.dim}`}>
-                                <span className={correct ? 'font-semibold text-emerald-600 dark:text-emerald-300' : 'font-semibold text-rose-500 dark:text-rose-400'}>
-                                  {correct ? 'Correct answer. ' : 'Distractor. '}
-                                </span>
-                                {opt.text}
-                              </p>
-                            </div>
-                          );
-                        })}
-                      </div>
+                      <ReviewNoteCard q={currentQ} userChoice={selectedAnswer} onTeach={() => setTeachTopics([questionTopic(currentQ)])} />
                     </>
                   )}
 
@@ -1104,8 +1084,8 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
             <div
               className={`sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center justify-between gap-2 border-t-2 px-4 py-2 sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:py-0 sm:shadow-none ${
                 darkMode
-                  ? '  '
-                  : '  '
+                  ? 'border-slate-800 bg-slate-950/95'
+                  : 'border-slate-200 bg-white/95'
               }`}
             >
               <button
@@ -1142,7 +1122,7 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
                   disabled={currentIndex === questions.length - 1}
                   onClick={goNext}
                   className={`flex min-h-[44px] items-center gap-1.5 rounded-lg border  px-5 py-2 text-xs font-medium  transition  active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-40 ${
-                    darkMode ? ' ' : ' '
+                    darkMode ? 'border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                   }`}
                 >
                   Next
@@ -1155,6 +1135,19 @@ export const TestRunnerView: React.FC<TestRunnerViewProps> = ({
             <div className="xl:hidden">{palette}</div>
           </div>
         </main>
+
+        {teachTopics && (
+          <TeachMeModal topics={teachTopics} onClose={() => setTeachTopics(null)} onAskTutor={() => { setTutorSeed(lessonMessage(teachTopics)); onNavigate('ai-tutor'); }} />
+        )}
+        {examSubmitted && showResultsScreen && (
+          <TestCoachPanel
+            celebrate={celebrate}
+            review={review ?? buildReview(`run-${signature(questions)}`, questions, userAnswers as Record<string, string>)}
+            darkMode={darkMode}
+            onClose={() => setShowResultsScreen(false)}
+            onTeach={() => onNavigate('ai-tutor')}
+          />
+        )}
 
         {/* ── Right rail: palette + telemetry + CTA ───────────────────── */}
         <aside className={`hidden w-72 shrink-0 flex-col space-y-4 border-l p-4 xl:sticky xl:top-[57px] xl:flex xl:max-h-[calc(100vh-57px)] xl:self-start xl:overflow-y-auto ${t.aside}`}>

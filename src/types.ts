@@ -16,7 +16,9 @@ export type AppView =
   | 'study-plan'
   | 'syllabus'
   | 'reminders'
-  | 'sync';
+  | 'sync'
+  | 'reviews'
+  | 'today';
 
 export type DifficultyTier = 'ALL' | 'LOW' | 'MEDIUM' | 'HIGH';
 

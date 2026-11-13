@@ -50,7 +50,7 @@ export const BenchmarkPanel: React.FC = () => {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <div className="text-sm font-medium text-slate-900 flex items-center gap-2">
-            <Scale className="w-4 h-4 " /> Benchmark against reference papers
+            <Scale className="w-4 h-4 text-[#0f8b8d]" /> Benchmark against reference papers
           </div>
           <div className="text-[11px] text-slate-500">
             Compares the latest module with imported eMedici items on stem length, vignettes,

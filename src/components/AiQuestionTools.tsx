@@ -199,7 +199,7 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
       length === val
         ? dark
           ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300'
-          : '  '
+          : 'bg-teal-50 border-teal-600 text-teal-800'
         : dark
           ? 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-600'
           : 'bg-slate-50 border-slate-200 text-slate-500 hover:border-slate-300'
@@ -233,7 +233,7 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
             dark ? 'bg-teal-600 text-white hover:bg-teal-500' : ' text-white'
           }`}
         >
-          {busy === 'explain' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Brain className="w-3 h-3 " />}
+          {busy === 'explain' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Brain className="w-3 h-3 text-[#8ff3f4]" />}
           Explain every option
         </button>
         <button
@@ -264,7 +264,7 @@ export const AiQuestionTools: React.FC<AiQuestionToolsProps> = ({ question, user
       </div>
 
       {busy && (
-        <p className={`text-[10px] ${dark ? 'text-teal-300' : ''}`}>
+        <p className={`text-[10px] ${dark ? 'text-teal-300' : 'text-[#00696b]'}`}>
           Generating… you can move to another question; the result will be here when you come back.
         </p>
       )}
